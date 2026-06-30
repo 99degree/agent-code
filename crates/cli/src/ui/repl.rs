@@ -149,15 +149,17 @@ fn find_background_skill_context(line: &str, pos: usize) -> Option<(usize, &str)
     Some((slash_idx, partial))
 }
 
-/// Skill-name completion candidates for a `&/<partial>` context, scored
-/// against `partial` with the same matcher used for slash commands.
-/// Loads the skill registry (project + user + bundled) fresh so newly
-/// added skills show up without a restart.
-fn complete_skill_name(cwd: &str, partial: &str) -> Vec<Pair> {
-    let registry = agent_code_lib::skills::SkillRegistry::load_all(Some(std::path::Path::new(cwd)));
-    let mut scored: Vec<(i32, Pair)> = registry
-        .all()
+/// Score the user-invocable skills in `skills` against `partial`,
+/// returning `/name` completion candidates sorted best-first.
+///
+/// Only skills with `userInvocable: true` are offered — matching `/help`
+/// and the documented meaning of the flag — so internal/agent-only
+/// skills don't leak into the completion menu. Pure (no I/O) so it can
+/// be unit-tested with a hand-built fixture.
+fn skill_completion_pairs(skills: &[agent_code_lib::skills::Skill], partial: &str) -> Vec<Pair> {
+    let mut scored: Vec<(i32, Pair)> = skills
         .iter()
+        .filter(|skill| skill.metadata.user_invocable)
         .filter_map(|skill| {
             let score = score_command(&skill.name, &[], partial)?;
             let desc = skill.metadata.description.as_deref().unwrap_or("");
@@ -177,6 +179,82 @@ fn complete_skill_name(cwd: &str, partial: &str) -> Vec<Pair> {
     scored
         .sort_by(|(sa, pa), (sb, pb)| sb.cmp(sa).then_with(|| pa.replacement.cmp(&pb.replacement)));
     scored.into_iter().map(|(_, p)| p).collect()
+}
+
+/// Skill-name completion candidates for a `&/<partial>` context. Loads
+/// the skill registry (project + user + bundled) fresh so newly added
+/// skills show up without a restart, then defers to
+/// [`skill_completion_pairs`].
+fn complete_skill_name(cwd: &str, partial: &str) -> Vec<Pair> {
+    let registry = agent_code_lib::skills::SkillRegistry::load_all(Some(std::path::Path::new(cwd)));
+    skill_completion_pairs(registry.all(), partial)
+}
+
+/// True when `name` is a built-in command name or alias (including
+/// hidden commands). Such a name is resolved as the command by
+/// `commands::execute` before skills are consulted, so a skill with that
+/// name is unreachable via `/name` — completion must not offer it.
+fn is_command_name_or_alias(name: &str) -> bool {
+    crate::commands::COMMANDS
+        .iter()
+        .any(|c| c.name == name || c.aliases.contains(&name))
+}
+
+/// Build `/`-completion candidates for `partial` (the text after the
+/// leading `/`, up to the cursor): built-in commands first, scored and
+/// sorted, then matching skill names (which are also invocable as
+/// `/name`). Skills are only offered while the partial is a single token
+/// (no args typed yet), and any skill colliding with a command name is
+/// dropped so the command wins.
+fn complete_slash(partial: &str, cwd: &str) -> Vec<Pair> {
+    let mut scored: Vec<(i32, Pair)> = crate::commands::COMMANDS
+        .iter()
+        .filter(|c| !c.hidden)
+        .filter_map(|c| {
+            let score = score_command(c.name, c.aliases, partial)?;
+            let alias_hint = if c.aliases.is_empty() {
+                String::new()
+            } else {
+                format!(" (alias: /{})", c.aliases.join(", /"))
+            };
+            Some((
+                score,
+                Pair {
+                    display: format!("/{} — {}{alias_hint}", c.name, c.description),
+                    replacement: format!("/{}", c.name),
+                },
+            ))
+        })
+        .collect();
+
+    // Stable sort by score desc, then alphabetical by replacement for
+    // deterministic ordering across equal-scored matches.
+    scored
+        .sort_by(|(sa, pa), (sb, pb)| sb.cmp(sa).then_with(|| pa.replacement.cmp(&pb.replacement)));
+    let mut matches: Vec<Pair> = scored.into_iter().map(|(_, p)| p).collect();
+
+    // Skills are invocable as `/name` too, so offer them after the
+    // built-in commands. Only when the partial is still a single token
+    // (no args typed yet). Skip any skill whose name is a built-in
+    // command or alias (including hidden) — `commands::execute` resolves
+    // those as the command, so the skill is unreachable via `/name` and
+    // offering it would be misleading.
+    if !partial.chars().any(|c| c.is_whitespace()) {
+        for pair in complete_skill_name(cwd, partial) {
+            let name = pair
+                .replacement
+                .strip_prefix('/')
+                .unwrap_or(&pair.replacement);
+            if is_command_name_or_alias(name) {
+                continue;
+            }
+            if matches.iter().all(|m| m.replacement != pair.replacement) {
+                matches.push(pair);
+            }
+        }
+    }
+
+    matches
 }
 
 /// Find an `@path-partial` context ending at byte position `pos` in
@@ -328,37 +406,12 @@ impl Completer for CommandCompleter {
         }
 
         let partial = &line[1..pos];
-
-        let mut scored: Vec<(i32, Pair)> = crate::commands::COMMANDS
-            .iter()
-            .filter(|c| !c.hidden)
-            .filter_map(|c| {
-                let score = score_command(c.name, c.aliases, partial)?;
-                let alias_hint = if c.aliases.is_empty() {
-                    String::new()
-                } else {
-                    format!(" (alias: /{})", c.aliases.join(", /"))
-                };
-                Some((
-                    score,
-                    Pair {
-                        display: format!("/{} — {}{alias_hint}", c.name, c.description),
-                        replacement: format!("/{}", c.name),
-                    },
-                ))
-            })
-            .collect();
-
-        // Stable sort by score desc, then alphabetical by replacement for
-        // deterministic ordering across equal-scored matches.
-        scored.sort_by(|(sa, pa), (sb, pb)| {
-            sb.cmp(sa).then_with(|| pa.replacement.cmp(&pb.replacement))
-        });
-
-        let matches: Vec<Pair> = scored.into_iter().map(|(_, p)| p).collect();
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".into());
 
         // Start replacement from position 0 (replacing the whole /partial).
-        Ok((0, matches))
+        Ok((0, complete_slash(partial, &cwd)))
     }
 }
 
@@ -1755,11 +1808,11 @@ mod background_skill_completion_tests {
 
     #[test]
     fn completer_matches_a_bundled_skill_prefix() {
-        // Pick a real bundled skill, then confirm a prefix of its name
-        // surfaces it as a `/name` replacement.
+        // Pick a real *user-invocable* bundled skill, then confirm a
+        // prefix of its name surfaces it as a `/name` replacement.
         let reg = agent_code_lib::skills::SkillRegistry::load_bundled_only();
-        let Some(skill) = reg.all().first() else {
-            return; // no bundled skills in this build — nothing to assert
+        let Some(skill) = reg.user_invocable().into_iter().next() else {
+            return; // no invocable bundled skills in this build
         };
         let name = skill.name.clone();
         let prefix: String = name.chars().take(2).collect();
@@ -1767,6 +1820,108 @@ mod background_skill_completion_tests {
         assert!(
             pairs.iter().any(|p| p.replacement == format!("/{name}")),
             "expected /{name} among completions for prefix {prefix:?}: {:?}",
+            pairs.iter().map(|p| &p.replacement).collect::<Vec<_>>()
+        );
+    }
+
+    fn mk_skill(name: &str, user_invocable: bool) -> agent_code_lib::skills::Skill {
+        use agent_code_lib::skills::{Skill, SkillMetadata};
+        Skill {
+            name: name.to_string(),
+            metadata: SkillMetadata {
+                user_invocable,
+                ..Default::default()
+            },
+            body: "do the thing".to_string(),
+            source: std::path::PathBuf::from("test"),
+        }
+    }
+
+    #[test]
+    fn skill_completion_excludes_non_invocable() {
+        use super::skill_completion_pairs;
+        let skills = vec![mk_skill("review", true), mk_skill("internal-helper", false)];
+        let pairs = skill_completion_pairs(&skills, "");
+        let names: Vec<&String> = pairs.iter().map(|p| &p.replacement).collect();
+        assert!(names.iter().any(|r| *r == "/review"), "{names:?}");
+        assert!(
+            !names.iter().any(|r| *r == "/internal-helper"),
+            "non-invocable skill must not be offered: {names:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod slash_completion_tests {
+    use super::complete_slash;
+
+    #[test]
+    fn includes_builtin_commands() {
+        let pairs = complete_slash("hel", ".");
+        assert!(
+            pairs.iter().any(|p| p.replacement == "/help"),
+            "expected /help: {:?}",
+            pairs.iter().map(|p| &p.replacement).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn includes_matching_skills() {
+        // A user-invocable bundled skill should be offered via `/`
+        // completion too — unless its name is shadowed by a command.
+        let reg = agent_code_lib::skills::SkillRegistry::load_bundled_only();
+        let Some(skill) = reg
+            .user_invocable()
+            .into_iter()
+            .find(|s| !super::is_command_name_or_alias(&s.name))
+        else {
+            return;
+        };
+        let name = skill.name.clone();
+        let prefix: String = name.chars().take(2).collect();
+        let pairs = complete_slash(&prefix, ".");
+        assert!(
+            pairs.iter().any(|p| p.replacement == format!("/{name}")),
+            "expected /{name} via /-completion for {prefix:?}"
+        );
+    }
+
+    #[test]
+    fn command_names_and_aliases_are_recognized() {
+        use super::is_command_name_or_alias;
+        // `find` is an alias of `/search`; `h` of `/help`.
+        assert!(is_command_name_or_alias("search"));
+        assert!(is_command_name_or_alias("find"));
+        assert!(is_command_name_or_alias("help"));
+        assert!(is_command_name_or_alias("h"));
+        assert!(!is_command_name_or_alias("definitely-not-a-command"));
+    }
+
+    #[test]
+    fn no_duplicate_replacements() {
+        // Even if a skill shared a command's name, each `/name` appears
+        // once. Assert the invariant holds across an empty partial
+        // (which surfaces everything).
+        let pairs = complete_slash("", ".");
+        let mut seen = std::collections::HashSet::new();
+        for p in &pairs {
+            assert!(
+                seen.insert(p.replacement.clone()),
+                "duplicate replacement {:?}",
+                p.replacement
+            );
+        }
+    }
+
+    #[test]
+    fn skips_skills_once_args_are_typed() {
+        // With a space in the partial, no skill load happens and the
+        // command scorer also yields nothing — so the result is empty.
+        let pairs = complete_slash("review some args", ".");
+        assert!(
+            pairs.is_empty(),
+            "expected no matches, got {} replacements: {:?}",
+            pairs.len(),
             pairs.iter().map(|p| &p.replacement).collect::<Vec<_>>()
         );
     }
