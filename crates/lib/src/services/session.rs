@@ -174,6 +174,11 @@ pub fn list_sessions(limit: usize) -> Vec<SessionSummary> {
         _ => return Vec::new(),
     };
 
+    // Drop sidecar entries for sessions that no longer exist, so a session's
+    // cached metadata never outlives its file — this full-read path (used by
+    // `/sessions` and the resume picker) does not otherwise touch the index.
+    reconcile_index(&dir);
+
     let mut sessions: Vec<SessionSummary> = std::fs::read_dir(&dir)
         .ok()
         .into_iter()
@@ -231,32 +236,180 @@ pub fn list_session_summaries(limit: usize) -> Vec<SessionSummary> {
         Some(d) if d.is_dir() => d,
         _ => return Vec::new(),
     };
+    list_session_summaries_in(&dir, limit)
+}
 
-    let mut sessions: Vec<SessionSummary> = std::fs::read_dir(&dir)
-        .ok()
+/// A cached lite summary plus the source file's validity stamp, keyed by
+/// session id in the on-disk index.
+#[derive(Clone, Serialize, Deserialize)]
+struct IndexedSummary {
+    /// Source file mtime in nanoseconds since the Unix epoch. Combined with
+    /// `size`, this is the cache-validity stamp: the entry is only trusted
+    /// while both still match the file on disk. Nanosecond resolution plus the
+    /// size guard makes a same-instant stale hit (e.g. a rename/tag within one
+    /// mtime tick) far less likely than a millisecond stamp alone.
+    mtime_ns: u128,
+    /// Source file size in bytes, part of the validity stamp.
+    size: u64,
+    cwd: String,
+    model: String,
+    updated_at: String,
+    turn_count: usize,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+/// Name of the sidecar index inside the sessions directory. Deliberately not a
+/// `.json` file so it can never collide with a `<id>.json` session (a session
+/// id of `index` used to clobber it) and is naturally skipped by the scan.
+const INDEX_FILE: &str = "index.cache";
+
+/// Drop sidecar-index entries whose `<id>.json` session file no longer exists,
+/// so the cache never persists metadata for a deleted session. A no-op when
+/// there is no index. Cheap: it stats the directory names only, not contents.
+fn reconcile_index(dir: &std::path::Path) {
+    let index_path = dir.join(INDEX_FILE);
+    let Ok(text) = std::fs::read_to_string(&index_path) else {
+        return;
+    };
+    let Ok(mut index) =
+        serde_json::from_str::<std::collections::HashMap<String, IndexedSummary>>(&text)
+    else {
+        return;
+    };
+    let present: std::collections::HashSet<String> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .filter_map(|entry| {
-            let content = std::fs::read_to_string(entry.path()).ok()?;
-            let m: SessionMetaLite = serde_json::from_str(&content).ok()?;
-            Some(SessionSummary {
-                id: m.id,
-                cwd: m.cwd,
-                model: m.model,
-                turn_count: m.turn_count,
-                message_count: 0,
-                updated_at: m.updated_at,
-                label: m.label,
-                tags: m.tags,
-            })
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| {
+            e.path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
         })
         .collect();
+    let before = index.len();
+    index.retain(|id, _| present.contains(id));
+    if index.len() != before {
+        let _ = std::fs::write(
+            &index_path,
+            serde_json::to_string(&index).unwrap_or_default(),
+        );
+    }
+}
 
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    sessions.truncate(limit);
-    sessions
+/// The cache-validity stamp for a file: `(mtime_ns, size)`.
+fn file_stamp(path: &std::path::Path) -> Option<(u128, u64)> {
+    let md = std::fs::metadata(path).ok()?;
+    let ns = md
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((ns, md.len()))
+}
+
+/// Testable core of [`list_session_summaries`].
+///
+/// Backed by a lazy, self-healing sidecar index (`index.json`): each call
+/// stats every session file (cheap) but only reads and parses files that are
+/// new or whose mtime changed since the index was written. The index is a pure
+/// cache derived from the session files — if it is missing, stale, or
+/// corrupt, it is transparently rebuilt, so it can never corrupt session data.
+fn list_session_summaries_in(dir: &std::path::Path, limit: usize) -> Vec<SessionSummary> {
+    let index_path = dir.join(INDEX_FILE);
+    let mut index: std::collections::HashMap<String, IndexedSummary> =
+        std::fs::read_to_string(&index_path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_default();
+
+    let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut summaries: Vec<SessionSummary> = Vec::new();
+    let mut index_changed = false;
+
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // The index file itself is not a session.
+        if path.extension().is_none_or(|ext| ext != "json")
+            || path.file_name() == Some(std::ffi::OsStr::new(INDEX_FILE))
+        {
+            continue;
+        }
+        let Some(id) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let disk_stamp = file_stamp(&path);
+        present.insert(id.clone());
+
+        // Fast path: a cached entry whose (mtime_ns, size) still matches.
+        let cached = index
+            .get(&id)
+            .filter(|e| Some((e.mtime_ns, e.size)) == disk_stamp);
+        let entry_summary = if let Some(hit) = cached {
+            hit.clone()
+        } else {
+            // Miss: read and parse this one file, then refresh the cache.
+            let Some(content) = std::fs::read_to_string(&path).ok() else {
+                continue;
+            };
+            let Some(m) = serde_json::from_str::<SessionMetaLite>(&content).ok() else {
+                continue;
+            };
+            let (mtime_ns, size) = disk_stamp.unwrap_or((0, 0));
+            let fresh = IndexedSummary {
+                mtime_ns,
+                size,
+                cwd: m.cwd,
+                model: m.model,
+                updated_at: m.updated_at,
+                turn_count: m.turn_count,
+                label: m.label,
+                tags: m.tags,
+            };
+            index.insert(id.clone(), fresh.clone());
+            index_changed = true;
+            fresh
+        };
+
+        summaries.push(SessionSummary {
+            id,
+            cwd: entry_summary.cwd,
+            model: entry_summary.model,
+            turn_count: entry_summary.turn_count,
+            message_count: 0,
+            updated_at: entry_summary.updated_at,
+            label: entry_summary.label,
+            tags: entry_summary.tags,
+        });
+    }
+
+    // Drop cache entries for sessions that no longer exist on disk.
+    let before = index.len();
+    index.retain(|id, _| present.contains(id));
+    index_changed |= index.len() != before;
+
+    // Best-effort write-back of the refreshed cache; failure is non-fatal.
+    if index_changed && let Ok(json) = serde_json::to_string(&index) {
+        let _ = std::fs::write(&index_path, json);
+    }
+
+    summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    summaries.truncate(limit);
+    summaries
 }
 
 /// Result of a prune sweep over the sessions directory.
@@ -343,6 +496,16 @@ pub(crate) fn prune_older_than_in(
             stats.kept += 1;
         }
     }
+    // The sidecar index caches per-session metadata (cwd/model/label/tags).
+    // Pruning deletes session files directly, so drop the whole index when
+    // anything was removed — otherwise a pruned session's metadata would
+    // linger on disk (undermining the cleanup/privacy guarantee) until the
+    // next listing rebuilds the index. The index is pure cache and rebuilds
+    // lazily, so removing it is safe and cheap.
+    if stats.removed > 0 {
+        let _ = std::fs::remove_file(dir.join(INDEX_FILE));
+    }
+
     debug!(
         "Session prune: removed {} kept {} (threshold {} days)",
         stats.removed, stats.kept, days
@@ -454,6 +617,179 @@ pub fn new_session_id() -> String {
 mod tests {
     use super::*;
     use crate::llm::message::{ContentBlock, Message, UserMessage, user_message};
+
+    fn write_session_file(dir: &std::path::Path, id: &str, updated_at: &str) {
+        let json = format!(
+            r#"{{"id":"{id}","created_at":"{updated_at}","updated_at":"{updated_at}",
+                 "cwd":"/work/{id}","model":"m","turn_count":1,"messages":[]}}"#
+        );
+        std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
+    }
+
+    #[test]
+    fn index_lists_sessions_sorted_and_creates_sidecar() {
+        let dir = std::env::temp_dir().join(format!("agent-sess-idx-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_session_file(&dir, "a", "2026-06-30T10:00:00Z");
+        write_session_file(&dir, "b", "2026-06-30T11:00:00Z");
+
+        let out = list_session_summaries_in(&dir, 10);
+        assert_eq!(out.len(), 2);
+        // Sorted by updated_at descending.
+        assert_eq!(out[0].id, "b");
+        assert_eq!(out[1].id, "a");
+        // The sidecar index was written.
+        assert!(dir.join(INDEX_FILE).exists());
+
+        // A second call (now served from the index) returns the same result.
+        let again = list_session_summaries_in(&dir, 10);
+        assert_eq!(again.len(), 2);
+        assert_eq!(again[0].id, "b");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn index_drops_entries_for_removed_sessions() {
+        let dir = std::env::temp_dir().join(format!("agent-sess-idx-rm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_session_file(&dir, "keep", "2026-06-30T10:00:00Z");
+        write_session_file(&dir, "gone", "2026-06-30T11:00:00Z");
+        assert_eq!(list_session_summaries_in(&dir, 10).len(), 2);
+
+        // Remove one session file, then relist: it must not appear, and the
+        // index must no longer reference it.
+        std::fs::remove_file(dir.join("gone.json")).unwrap();
+        let out = list_session_summaries_in(&dir, 10);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "keep");
+        let idx = std::fs::read_to_string(dir.join(INDEX_FILE)).unwrap();
+        assert!(!idx.contains("gone"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn index_recovers_from_corrupt_sidecar() {
+        let dir = std::env::temp_dir().join(format!("agent-sess-idx-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_session_file(&dir, "a", "2026-06-30T10:00:00Z");
+        std::fs::write(dir.join(INDEX_FILE), b"not json {").unwrap();
+
+        // A corrupt index must be transparently rebuilt from the files.
+        let out = list_session_summaries_in(&dir, 10);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "a");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reconcile_index_drops_metadata_for_deleted_sessions() {
+        // Simulates a session deleted out-of-band (or via a full-read list
+        // path): its cached metadata must not survive in the sidecar.
+        let dir = std::env::temp_dir().join(format!("agent-sess-idx-recon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_session_file(&dir, "keep", "2026-06-30T10:00:00Z");
+        write_session_file(&dir, "gone", "2026-06-30T11:00:00Z");
+        let _ = list_session_summaries_in(&dir, 10); // build index with both
+        assert!(
+            std::fs::read_to_string(dir.join(INDEX_FILE))
+                .unwrap()
+                .contains("gone")
+        );
+
+        // Delete one file and reconcile (what list_sessions now does).
+        std::fs::remove_file(dir.join("gone.json")).unwrap();
+        reconcile_index(&dir);
+
+        let idx = std::fs::read_to_string(dir.join(INDEX_FILE)).unwrap();
+        assert!(idx.contains("keep"));
+        assert!(
+            !idx.contains("gone"),
+            "deleted session metadata must be dropped"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prune_clears_the_sidecar_index() {
+        // Pruning must not leave a pruned session's cached metadata behind.
+        let dir = std::env::temp_dir().join(format!("agent-sess-idx-prune-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_session_file(&dir, "old", "2000-01-01T00:00:00Z");
+
+        // Build the index, then confirm it cached the (soon-pruned) session.
+        let _ = list_session_summaries_in(&dir, 10);
+        assert!(dir.join(INDEX_FILE).exists());
+        assert!(
+            std::fs::read_to_string(dir.join(INDEX_FILE))
+                .unwrap()
+                .contains("old")
+        );
+
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let stats = prune_older_than_in(&dir, 1, now).unwrap();
+        assert_eq!(stats.removed, 1);
+        // The sidecar is dropped so the pruned session's metadata is gone.
+        assert!(!dir.join(INDEX_FILE).exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn index_does_not_collide_with_session_named_index() {
+        // A session id of "index" must not be shadowed or clobbered by the
+        // sidecar cache, which is a separate non-`.json` file.
+        let dir = std::env::temp_dir().join(format!("agent-sess-idx-col-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_session_file(&dir, "index", "2026-06-30T10:00:00Z");
+        write_session_file(&dir, "other", "2026-06-30T11:00:00Z");
+
+        let out = list_session_summaries_in(&dir, 10);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|s| s.id == "index"));
+        // The session file and the sidecar coexist as distinct files.
+        assert!(dir.join("index.json").exists());
+        assert!(dir.join(INDEX_FILE).exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn index_reparses_on_mtime_mismatch() {
+        let dir = std::env::temp_dir().join(format!("agent-sess-idx-mt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_session_file(&dir, "a", "2026-06-30T10:00:00Z");
+
+        // Seed the index with a deliberately stale mtime and outdated model
+        // so the fast path is rejected and the file is re-read.
+        let mut stale = std::collections::HashMap::new();
+        stale.insert(
+            "a".to_string(),
+            IndexedSummary {
+                mtime_ns: 0,
+                size: 0,
+                cwd: "/old".to_string(),
+                model: "old-model".to_string(),
+                updated_at: "2000-01-01T00:00:00Z".to_string(),
+                turn_count: 99,
+                label: None,
+                tags: vec![],
+            },
+        );
+        std::fs::write(dir.join(INDEX_FILE), serde_json::to_string(&stale).unwrap()).unwrap();
+
+        let out = list_session_summaries_in(&dir, 10);
+        assert_eq!(out.len(), 1);
+        // Values come from the file, not the stale cache entry.
+        assert_eq!(out[0].model, "m");
+        assert_eq!(out[0].updated_at, "2026-06-30T10:00:00Z");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn session_meta_lite_deserializes_metadata_and_skips_messages() {
