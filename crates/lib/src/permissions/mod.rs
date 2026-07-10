@@ -29,7 +29,10 @@ pub enum PermissionDecision {
 
 /// Checks permissions for tool operations based on configured rules.
 pub struct PermissionChecker {
-    default_mode: PermissionMode,
+    /// Live default mode. Interior mutability so a UI can switch
+    /// AcceptEdits / Plan / Ask mid-turn without rebuilding the checker
+    /// or waiting on the query-engine mutex (M0 mid-turn mode).
+    default_mode: std::sync::RwLock<PermissionMode>,
     rules: Vec<PermissionRule>,
     /// Project root used for runtime checks (e.g. team-memory).
     /// `None` means "no project root known" — runtime checks that
@@ -47,7 +50,7 @@ impl PermissionChecker {
     /// Create from configuration.
     pub fn from_config(config: &PermissionsConfig) -> Self {
         Self {
-            default_mode: config.default_mode,
+            default_mode: std::sync::RwLock::new(config.default_mode),
             rules: config.rules.clone(),
             project_root: None,
             read_scope: None,
@@ -57,10 +60,25 @@ impl PermissionChecker {
     /// Create a checker that allows everything (for testing or bypass mode).
     pub fn allow_all() -> Self {
         Self {
-            default_mode: PermissionMode::Allow,
+            default_mode: std::sync::RwLock::new(PermissionMode::Allow),
             rules: Vec::new(),
             project_root: None,
             read_scope: None,
+        }
+    }
+
+    /// Current default permission mode (lock-friendly read).
+    pub fn default_mode(&self) -> PermissionMode {
+        self.default_mode
+            .read()
+            .map(|g| *g)
+            .unwrap_or(PermissionMode::Ask)
+    }
+
+    /// Update the default mode live (mid-turn Shift+Tab, etc.).
+    pub fn set_default_mode(&self, mode: PermissionMode) {
+        if let Ok(mut g) = self.default_mode.write() {
+            *g = mode;
         }
     }
 
@@ -199,8 +217,8 @@ impl PermissionChecker {
             return mode_to_decision(rule.action, tool_name);
         }
 
-        // Fall back to default mode.
-        mode_to_decision(self.default_mode, tool_name)
+        // Fall back to default mode (may have been updated mid-turn).
+        mode_to_decision(self.default_mode(), tool_name)
     }
 
     /// Check for read-only operations (always allowed).
@@ -435,7 +453,7 @@ pub(crate) const PROTECTED_DIRS: &[&str] = &[
 fn is_write_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "FileWrite" | "FileEdit" | "MultiEdit" | "NotebookEdit"
+        "FileWrite" | "FileEdit" | "MultiEdit" | "NotebookEdit" | "ApplyPatch"
     )
 }
 
@@ -459,7 +477,18 @@ fn check_protected_path(input: &serde_json::Value) -> Option<String> {
 
 fn mode_to_decision(mode: PermissionMode, tool_name: &str) -> PermissionDecision {
     match mode {
-        PermissionMode::Allow | PermissionMode::AcceptEdits => PermissionDecision::Allow,
+        PermissionMode::Allow => PermissionDecision::Allow,
+        // Auto-allow filesystem edits only; shell / agent / MCP / other
+        // mutations still prompt (docs: "auto-approve file edits, ask for
+        // shell commands"). Treating AcceptEdits as Allow for every tool
+        // would let Shift+Tab into accept-edits silently run Bash.
+        PermissionMode::AcceptEdits => {
+            if is_write_tool(tool_name) {
+                PermissionDecision::Allow
+            } else {
+                PermissionDecision::Ask(format!("Allow {tool_name} to execute?"))
+            }
+        }
         PermissionMode::Deny => {
             PermissionDecision::Deny(format!("Default mode denies {tool_name}"))
         }
@@ -816,6 +845,43 @@ mod tests {
             checker.check("FileWrite", &serde_json::json!({"file_path": "src/lib.rs"})),
             PermissionDecision::Allow
         ));
+        assert!(matches!(
+            checker.check("FileEdit", &serde_json::json!({"file_path": "src/main.rs"})),
+            PermissionDecision::Allow
+        ));
+        assert!(matches!(
+            checker.check(
+                "ApplyPatch",
+                &serde_json::json!({"patch": "*** Begin Patch\n*** End Patch\n"})
+            ),
+            PermissionDecision::Allow
+        ));
+    }
+
+    #[test]
+    fn test_accept_edits_mode_asks_for_non_edit_tools() {
+        let checker = PermissionChecker::from_config(&PermissionsConfig {
+            default_mode: PermissionMode::AcceptEdits,
+            rules: vec![],
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+        });
+        // Shell / external / agents must still prompt under accept-edits.
+        assert!(matches!(
+            checker.check("Bash", &serde_json::json!({"command": "cargo build"})),
+            PermissionDecision::Ask(_)
+        ));
+        assert!(matches!(
+            checker.check("Agent", &serde_json::json!({"prompt": "do work"})),
+            PermissionDecision::Ask(_)
+        ));
+        assert!(matches!(
+            checker.check(
+                "WebFetch",
+                &serde_json::json!({"url": "https://example.com"})
+            ),
+            PermissionDecision::Ask(_)
+        ));
     }
 
     #[test]
@@ -898,6 +964,7 @@ mod tests {
         assert!(is_write_tool("FileEdit"));
         assert!(is_write_tool("MultiEdit"));
         assert!(is_write_tool("NotebookEdit"));
+        assert!(is_write_tool("ApplyPatch"));
         assert!(!is_write_tool("FileRead"));
         assert!(!is_write_tool("Bash"));
         assert!(!is_write_tool("Grep"));
@@ -1016,5 +1083,30 @@ mod tests {
             &serde_json::json!({"file_path": ".agent/team-memory/foo.md"}),
         );
         assert!(matches!(dec, PermissionDecision::Allow));
+    }
+
+    #[test]
+    fn set_default_mode_is_visible_to_check() {
+        let checker = PermissionChecker::from_config(&PermissionsConfig {
+            default_mode: PermissionMode::Ask,
+            rules: vec![],
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+        });
+        // Bash under Ask → Ask decision
+        assert!(matches!(
+            checker.check("Bash", &serde_json::json!({"command": "ls"})),
+            PermissionDecision::Ask(_)
+        ));
+        checker.set_default_mode(PermissionMode::Plan);
+        assert!(matches!(
+            checker.check("Bash", &serde_json::json!({"command": "ls"})),
+            PermissionDecision::Deny(_)
+        ));
+        checker.set_default_mode(PermissionMode::Allow);
+        assert!(matches!(
+            checker.check("Bash", &serde_json::json!({"command": "ls"})),
+            PermissionDecision::Allow
+        ));
     }
 }

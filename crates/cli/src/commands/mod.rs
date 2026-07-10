@@ -791,16 +791,20 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             if let Some(id) = args {
                 match agent_code_lib::services::session::load_session(id) {
                     Ok(data) => {
-                        let state = engine.state_mut();
-                        state.messages = data.messages;
-                        state.turn_count = data.turn_count;
-                        state.total_cost_usd = data.total_cost_usd;
-                        state.total_usage.input_tokens = data.total_input_tokens;
-                        state.total_usage.output_tokens = data.total_output_tokens;
-                        state.plan_mode = data.plan_mode;
-                        if !data.model.is_empty() {
-                            state.config.api.model = data.model.clone();
+                        let restored_plan = data.plan_mode;
+                        {
+                            let state = engine.state_mut();
+                            state.messages = data.messages;
+                            state.turn_count = data.turn_count;
+                            state.total_cost_usd = data.total_cost_usd;
+                            state.total_usage.input_tokens = data.total_input_tokens;
+                            state.total_usage.output_tokens = data.total_output_tokens;
+                            state.plan_mode = restored_plan;
+                            if !data.model.is_empty() {
+                                state.config.api.model = data.model.clone();
+                            }
                         }
+                        engine.set_live_plan_mode(restored_plan);
                         println!(
                             "Resumed session {} ({} messages, {} turns, ${:.4})",
                             id,
@@ -1216,9 +1220,15 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             CommandResult::Handled
         }
         Some("plan") => {
-            let plan_mode = &mut engine.state_mut().plan_mode;
-            *plan_mode = !*plan_mode;
-            if *plan_mode {
+            let enabled = {
+                let plan_mode = &mut engine.state_mut().plan_mode;
+                *plan_mode = !*plan_mode;
+                *plan_mode
+            };
+            // Keep the live atomic in sync — ToolContext reads
+            // `effective_plan_mode()` which is live-authoritative.
+            engine.set_live_plan_mode(enabled);
+            if enabled {
                 println!("Plan mode enabled. Only read-only tools available.");
             } else {
                 println!("Plan mode disabled. All tools available.");
@@ -5622,16 +5632,20 @@ fn execute_session_picker(engine: &mut QueryEngine) {
     // Resume — same path as /resume <id>.
     match agent_code_lib::services::session::load_session(&chosen) {
         Ok(data) => {
-            let state = engine.state_mut();
-            state.messages = data.messages;
-            state.turn_count = data.turn_count;
-            state.total_cost_usd = data.total_cost_usd;
-            state.total_usage.input_tokens = data.total_input_tokens;
-            state.total_usage.output_tokens = data.total_output_tokens;
-            state.plan_mode = data.plan_mode;
-            if !data.model.is_empty() {
-                state.config.api.model = data.model.clone();
+            let restored_plan = data.plan_mode;
+            {
+                let state = engine.state_mut();
+                state.messages = data.messages;
+                state.turn_count = data.turn_count;
+                state.total_cost_usd = data.total_cost_usd;
+                state.total_usage.input_tokens = data.total_input_tokens;
+                state.total_usage.output_tokens = data.total_output_tokens;
+                state.plan_mode = restored_plan;
+                if !data.model.is_empty() {
+                    state.config.api.model = data.model.clone();
+                }
             }
+            engine.set_live_plan_mode(restored_plan);
             println!(
                 "Resumed session {} ({} messages, {} turns, ${:.4})",
                 chosen,
@@ -7853,11 +7867,17 @@ mod tests {
         assert!(out.contains("audit security"));
         assert!(out.contains("echo plain"));
         // LocalAgent rows are colorised: the SGR foreground escape
-        // `\x1b[38` opens before the description.
-        assert!(
-            out.contains("\x1b[38"),
-            "expected SGR foreground escape in colourised output: {out:?}"
-        );
+        // `\x1b[38` opens before the description. crossterm honors
+        // `NO_COLOR=1` / `CARGO_TERM_COLOR=never` by stripping colour
+        // codes, so only assert the SGR payload when colour is allowed.
+        let color_disabled = std::env::var_os("NO_COLOR").is_some()
+            || std::env::var("CARGO_TERM_COLOR").as_deref() == Ok("never");
+        if !color_disabled {
+            assert!(
+                out.contains("\x1b[38"),
+                "expected SGR foreground escape in colourised output: {out:?}"
+            );
+        }
         // Verify both kinds appear so the test reflects the real
         // mixed-row case.
         assert!(out.contains(TaskKind::LocalAgent.as_str()));
@@ -8196,8 +8216,9 @@ mod tests {
         let mut svc = agent_code_lib::services::tips::TipsService::with_state_dir(dir.path());
         let mut out = String::new();
         super::run_tips_command(&mut svc, None, &mut out);
-        assert!(out.contains("Loaded 15 tip(s):"), "output: {out}");
+        assert!(out.contains("Loaded 16 tip(s):"), "output: {out}");
         assert!(out.contains("plan-mode"));
+        assert!(out.contains("subagent-types"));
         assert!(out.contains("tips-off"));
     }
 
