@@ -149,6 +149,18 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
             ("sonar", "Sonar · Balanced, web search"),
             ("sonar-deep-research", "Sonar Deep Research · In-depth"),
         ],
+        ProviderKind::Nvidia => &[
+            ("meta/llama-3.1-8b-instruct", "Llama 3.1 8B · Fast, open"),
+            (
+                "nvidia/llama-3.3-nemotron-super-49b-v1",
+                "Nemotron Super 49B · Capable",
+            ),
+            ("deepseek-ai/deepseek-r1", "DeepSeek R1 · Reasoning"),
+            (
+                "nvidia/llama-3.1-nemotron-70b-instruct",
+                "Nemotron 70B · Instruct",
+            ),
+        ],
         ProviderKind::OpenRouter => &[
             ("anthropic/claude-sonnet-5", "Claude Sonnet 5 · Balanced"),
             (
@@ -220,6 +232,9 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     }
     if url_lower.contains("perplexity.ai") {
         return ProviderKind::Perplexity;
+    }
+    if url_lower.contains("nvidia") || url_lower.contains("nvidianim") {
+        return ProviderKind::Nvidia;
     }
     if url_lower.contains("localhost") || url_lower.contains("127.0.0.1") {
         return ProviderKind::OpenAiCompatible;
@@ -294,6 +309,7 @@ pub enum ProviderKind {
     OpenRouter,
     Cohere,
     Perplexity,
+    Nvidia,
     OpenAiCompatible,
 }
 
@@ -314,6 +330,7 @@ impl ProviderKind {
             | Self::OpenRouter
             | Self::Cohere
             | Self::Perplexity
+            | Self::Nvidia
             | Self::OpenAiCompatible => WireFormat::OpenAiCompatible,
         }
     }
@@ -335,6 +352,7 @@ impl ProviderKind {
             Self::OpenRouter => Some("https://openrouter.ai/api/v1"),
             Self::Cohere => Some("https://api.cohere.com/v2"),
             Self::Perplexity => Some("https://api.perplexity.ai"),
+            Self::Nvidia => Some("https://integrate.api.nvidia.com/v1"),
             // These require user-supplied URLs.
             Self::Bedrock | Self::Vertex | Self::AzureOpenAi | Self::OpenAiCompatible => None,
         }
@@ -356,6 +374,7 @@ impl ProviderKind {
             Self::OpenRouter => "OPENROUTER_API_KEY",
             Self::Cohere => "COHERE_API_KEY",
             Self::Perplexity => "PERPLEXITY_API_KEY",
+            Self::Nvidia => "NVIDIA_API_KEY",
             Self::OpenAiCompatible => "OPENAI_API_KEY",
         }
     }
@@ -503,6 +522,18 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_from_url_nvidia() {
+        assert!(matches!(
+            detect_provider("any", "https://integrate.api.nvidia.com/v1"),
+            ProviderKind::Nvidia
+        ));
+        assert!(matches!(
+            detect_provider("any", "https://ai.api.nvidia.com/v1"),
+            ProviderKind::Nvidia
+        ));
+    }
+
+    #[test]
     fn test_detect_from_model_command_r() {
         assert!(matches!(
             detect_provider("command-r-plus", ""),
@@ -609,6 +640,7 @@ mod tests {
             ProviderKind::OpenRouter,
             ProviderKind::Cohere,
             ProviderKind::Perplexity,
+            ProviderKind::Nvidia,
             ProviderKind::OpenAiCompatible,
         ];
         for p in openai_compat_providers {
@@ -635,6 +667,7 @@ mod tests {
             ProviderKind::OpenRouter,
             ProviderKind::Cohere,
             ProviderKind::Perplexity,
+            ProviderKind::Nvidia,
         ];
         for p in providers_with_urls {
             assert!(
@@ -678,6 +711,7 @@ mod tests {
             ProviderKind::Perplexity.env_var_name(),
             "PERPLEXITY_API_KEY"
         );
+        assert_eq!(ProviderKind::Nvidia.env_var_name(), "NVIDIA_API_KEY");
         assert_eq!(
             ProviderKind::OpenAiCompatible.env_var_name(),
             "OPENAI_API_KEY"

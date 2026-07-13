@@ -114,7 +114,7 @@ struct Cli {
     #[arg(long)]
     no_sandbox: bool,
 
-    /// LLM provider: anthropic, openai, xai (grok), or auto (default).
+    /// LLM provider: anthropic, openai, xai (grok), nvidia (NIM), or auto (default).
     #[arg(long, default_value = "auto")]
     provider: String,
 
@@ -653,6 +653,7 @@ async fn async_main() -> anyhow::Result<()> {
             "mistral" => ProviderKind::Mistral,
             "together" => ProviderKind::Together,
             "zhipu" | "glm" | "z.ai" => ProviderKind::Zhipu,
+            "nvidia" | "nim" => ProviderKind::Nvidia,
             "azure" | "azure-openai" => ProviderKind::AzureOpenAi,
             _ => detect_provider(&config.api.model, &config.api.base_url),
         },
