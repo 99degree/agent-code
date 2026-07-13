@@ -369,6 +369,12 @@ fn default_browser_launcher(url: &str) -> Result<(), OAuthError> {
     let candidates: &[&str] = &["open"];
     #[cfg(target_os = "windows")]
     let candidates: &[&str] = &["cmd"];
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows"
+    )))]
+    let candidates: &[&str] = &["xdg-open"];
 
     #[cfg(target_os = "windows")]
     let args_for = |bin: &str| {
