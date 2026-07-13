@@ -115,19 +115,24 @@ fn probe_caps() -> TerminalCaps {
 fn setup_terminal() -> anyhow::Result<Term> {
     enable_raw_mode()?;
     let mut out = stdout();
-    // Enter alt screen and enable focus + bracketed paste + mouse capture.
-    // All are consumed by the loop and disabled on exit so no `^[[I`/`^[[O`
-    // (focus), paste brackets, or mouse tracking leak into the shell
-    // (plan §M7/§M9).
+    // Enter alt screen and enable focus + bracketed paste. Mouse capture is
+    // enabled on every other platform. On Termux (Android) it is deliberately
+    // skipped: with mouse tracking on, Termux turns a screen tap into a mouse
+    // report sent to the app instead of re-triggering its own show-keyboard-on-
+    // touch, so once the on-screen keyboard is dismissed it can never be tapped
+    // back into view. Without mouse tracking, taps always reach Termux's
+    // keyboard handler (plan §M7/§M9).
     if let Err(e) = execute!(
         out,
         EnterAlternateScreen,
         EnableFocusChange,
         EnableBracketedPaste,
-        EnableMouseCapture,
     ) {
         let _ = disable_raw_mode();
         return Err(e.into());
+    }
+    if !is_termux() {
+        let _ = execute!(out, EnableMouseCapture);
     }
     let backend = CrosstermBackend::new(out);
     match Terminal::new(backend) {
@@ -164,6 +169,46 @@ fn restore_terminal(terminal: &mut Term) -> anyhow::Result<()> {
     terminal.show_cursor()?;
     disable_raw_mode()?;
     Ok(())
+}
+
+/// True when running inside Termux (Android), which advertises itself via the
+/// `TERMUX_VERSION` environment variable.
+fn is_termux() -> bool {
+    std::env::var_os("TERMUX_VERSION").is_some()
+}
+
+/// Spawn a thread that reads terminal events with the blocking
+/// [`crossterm::event::read`] and forwards them over a channel. Used in place
+/// of [`EventStream`] on Termux: a foreground process parked in `poll()` does
+/// not keep the pty's read pending, so Termux never shows the on-screen
+/// keyboard on tap. A dedicated thread blocked in `read()` does.
+///
+/// The thread cannot be interrupted once blocked in `read()`, so on clean
+/// exit it lingers until the next keystroke (which fails to send and breaks
+/// the loop). The CLI process exits immediately after, so this is harmless.
+fn spawn_blocking_event_reader() -> tokio::sync::mpsc::UnboundedReceiver<Event> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        while let Ok(ev) = crossterm::event::read() {
+            if tx.send(ev).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// Yield the next terminal event from either the crossterm [`EventStream`]
+/// (desktop) or the Termux blocking-read channel.
+async fn next_terminal_event(
+    stream: Option<&mut EventStream>,
+    rx: Option<&mut tokio::sync::mpsc::UnboundedReceiver<Event>>,
+) -> Option<std::io::Result<Event>> {
+    match (stream, rx) {
+        (_, Some(rx)) => rx.recv().await.map(Ok),
+        (Some(stream), None) => stream.next().await,
+        (None, None) => std::future::pending().await,
+    }
 }
 
 /// Chain a panic hook that restores the terminal (raw mode off, focus/paste
@@ -373,7 +418,7 @@ pub(super) async fn event_loop(
 
         tokio::select! {
             // Terminal input.
-            maybe_ev = term_events.next() => {
+            maybe_ev = next_terminal_event(term_events.as_mut(), term_rx.as_mut()) => {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) => {
                         // Disarm a stale quit before routing the key so a late
