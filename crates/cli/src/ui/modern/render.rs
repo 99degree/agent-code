@@ -357,7 +357,7 @@ fn draw_permission_modal(
         Span::raw("Allow for session"),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("  [A] ", Style::default().fg(c)),
+        Span::styled("  [f] ", Style::default().fg(c)),
         Span::styled("Allow always", Style::default().add_modifier(Modifier::BOLD)),
     ]));
     lines.push(Line::from(vec![
@@ -378,7 +378,7 @@ fn draw_permission_modal(
         // Keep ≤ ~40 cols so min-width modals still show every binding
         // (digits 1/2/3 work the same as y/a/n; listed in /help).
         Some(key_hint_line(
-            "[y] once   [a] session   [A] always   [n]/[Esc] deny",
+            "[y] once   [a] session   [f] always   [n]/[Esc] deny",
         )),
     );
 }
