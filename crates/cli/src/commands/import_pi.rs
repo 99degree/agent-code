@@ -113,7 +113,8 @@ fn import_by_index(index: usize, cwd: &str) -> String {
 
 /// Convert a directory path to pi.dev session folder name.
 fn cwd_to_pi_dir_name(cwd: &str) -> String {
-    let dir_name = cwd.replace('/', "-");
+    // Trim leading/trailing slashes to avoid extra dashes in the pattern.
+    let dir_name = cwd.trim_matches('/').replace('/', "-");
     format!("--{dir_name}--")
 }
 
@@ -184,36 +185,17 @@ fn file_age(path: &Path) -> String {
     let hours = (secs % 86400) / 3600;
     let mins = (secs % 3600) / 60;
 
+    // Only show the largest unit for compactness
     if years > 0 {
-        if months > 0 {
-            format!("{years}y{months}mo")
-        } else {
-            format!("{years}y")
-        }
+        format!("{years}y")
     } else if months > 0 {
-        if weeks > 0 {
-            format!("{months}mo{weeks}w")
-        } else {
-            format!("{months}mo")
-        }
+        format!("{months}mo")
     } else if weeks > 0 {
-        if days > 0 {
-            format!("{weeks}w{days}d")
-        } else {
-            format!("{weeks}w")
-        }
+        format!("{weeks}w")
     } else if days > 0 {
-        if hours > 0 {
-            format!("{days}d{hours}h")
-        } else {
-            format!("{days}d")
-        }
+        format!("{days}d")
     } else if hours > 0 {
-        if mins > 0 {
-            format!("{hours}h{mins}m")
-        } else {
-            format!("{hours}h")
-        }
+        format!("{hours}h")
     } else if mins > 0 {
         format!("{mins}m")
     } else {
@@ -221,7 +203,49 @@ fn file_age(path: &Path) -> String {
     }
 }
 
-/// List pi.dev sessions that match the current working directory.
+/// Scanned summary metadata for a pi.dev JSONL file.
+struct ScanMeta {
+    model: Option<String>,
+    message_count: usize,
+    label: Option<String>,
+}
+
+/// Lightweight scan of a pi.dev JSONL file for model + message count + label.
+fn scan_session_meta(path: &Path) -> ScanMeta {
+    use std::io::{BufRead, BufReader};
+    let mut model: Option<String> = None;
+    let mut message_count = 0usize;
+    let mut label: Option<String> = None;
+    if let Ok(file) = std::fs::File::open(path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines().flatten() {
+            let entry: PiEntry = match serde_json::from_str(&line) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            match entry {
+                PiEntry::ModelChange(mc) => {
+                    if let Some(m) = mc.model_id {
+                        model = Some(m);
+                    }
+                }
+                PiEntry::Message(_) => message_count += 1,
+                PiEntry::Session(meta) => {
+                    label = meta.label;
+                }
+                PiEntry::SessionInfo(info) => {
+                    if label.is_none() {
+                        label = Some(info.name);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    ScanMeta { model, message_count, label }
+}
+
+/// List pi.dev sessions across all directories so the user can choose.
 fn list_sessions_for_cwd(cwd: &str) -> String {
     let Some(sessions_base) = get_pi_sessions_dir() else {
         return "Cannot determine pi.dev sessions directory".into();
@@ -234,37 +258,66 @@ fn list_sessions_for_cwd(cwd: &str) -> String {
         );
     }
 
+    // Collect sessions from every project folder, not just the cwd-matched one.
     let dir_pattern = cwd_to_pi_dir_name(cwd);
-    let session_dir = sessions_base.join(&dir_pattern);
+    let mut all: Vec<(String, Option<String>, PathBuf, String)> = Vec::new();
 
-    if !session_dir.exists() {
-        return format!(
-            "No pi.dev sessions found for this directory.\nSearched: {}",
-            session_dir.display()
-        );
+    if let Ok(projects) = std::fs::read_dir(&sessions_base) {
+        for project in projects.filter_map(|e| e.ok()) {
+            let proj_dir = project.path();
+            if !proj_dir.is_dir() {
+                continue;
+            }
+            for (name, label) in get_session_files(&proj_dir) {
+                let full = proj_dir.join(&name);
+                let disp = name.strip_suffix(".jsonl").unwrap_or(&name).to_string();
+                all.push((disp, label, full, proj_dir.file_name().unwrap_or_default().to_string_lossy().to_string()));
+            }
+        }
     }
 
-    let sessions = get_session_files(&session_dir);
-
-    if sessions.is_empty() {
-        return format!(
-            "No pi.dev sessions found for this directory.\nSearched: {}",
-            session_dir.display()
-        );
+    if all.is_empty() {
+        return "No pi.dev sessions found.".into();
     }
 
-    let mut out = format!("pi.dev sessions for {}:\n\n", cwd);
-    for (i, (name, label)) in sessions.iter().enumerate() {
-        let display_name = name.strip_suffix(".jsonl").unwrap_or(name);
-        let full_path = session_dir.join(name);
-        let age = file_age(&full_path);
-        let label_str = label
-            .as_deref()
-            .map(|l| format!(" \"{l}\""))
-            .unwrap_or_default();
-        out.push_str(&format!("  {}. {}{label_str} ({})\n", i + 1, display_name, age));
+    // Sort by most recently modified (newest first).
+    all.sort_by(|a, b| {
+        let ma = a.2.metadata().and_then(|m| m.modified()).ok();
+        let mb = b.2.metadata().and_then(|m| m.modified()).ok();
+        mb.cmp(&ma)
+    });
+
+    // Filter out sessions with < 100 messages.
+    all.retain(|(_, _, path, _)| {
+        scan_session_meta(path).message_count >= 100
+    });
+
+    if all.is_empty() {
+        return "No pi.dev sessions with 100+ messages found.".into();
     }
-    out.push_str("\nUse: /import-pi <number> or /import-pi <full-path>\n");
+
+    let mut out = String::from("pi.dev sessions (newest first, 100+ msgs):\n\n");
+    for (i, (name, label, path, proj)) in all.iter().enumerate() {
+        let age = file_age(path);
+        let meta = scan_session_meta(path);
+        let model_str = meta.model.as_deref().map(|m| format!(" · {m}")).unwrap_or_default();
+        let msgs = meta.message_count;
+        let meta_label = meta.label.as_deref().map(|l| format!(" \"{l}\"")).unwrap_or_default();
+        let label_str = label.as_deref().map(|l| format!(" \"{l}\"")).unwrap_or_default();
+        // Highlight sessions matching the current directory.
+        let marker = if *proj == dir_pattern { " *" } else { "" };
+        out.push_str(&format!(
+            "  {}. {}{label_str}{meta_label}{model_str} · {} msgs · {} · {}{}\n",
+            i + 1,
+            name,
+            msgs,
+            age,
+            proj.replace("--", ""),
+            marker
+        ));
+    }
+    out.push_str("\n* = matches current directory\n");
+    out.push_str("Use: /import-pi <number> or /import-pi <full-path>\n");
     out
 }
 
