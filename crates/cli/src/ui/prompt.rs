@@ -68,7 +68,7 @@ pub fn ask_permission_detailed(
     let c = t.accent;
     eprintln!("  {}{}", "[y] ".with(c), "Allow once".with(t.text));
     eprintln!("  {}{}", "[a] ".with(c), "Allow for session".with(t.text));
-    eprintln!("  {}{}", "[A] ".with(c), "Allow always".with(t.text).bold());
+    eprintln!("  {}{}", "[f] ".with(c), "Allow always".with(t.text).bold());
     eprintln!("  {}{}", "[n] ".with(c), "Deny".with(t.text));
     eprintln!();
 
