@@ -543,6 +543,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 (_, KeyCode::Char('a')) | (_, KeyCode::Char('2')) => {
                     app.resolve_permission(PermissionResponse::AllowSession);
                 }
+                (_, KeyCode::Char('A')) | (_, KeyCode::Char('4')) => {
+                    app.resolve_permission(PermissionResponse::AllowAlways);
+                }
                 (_, KeyCode::Esc) | (_, KeyCode::Char('n')) | (_, KeyCode::Char('3')) => {
                     app.resolve_permission(PermissionResponse::Deny);
                 }

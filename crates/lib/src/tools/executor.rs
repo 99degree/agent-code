@@ -136,6 +136,7 @@ pub async fn execute_tool_calls(
                                     task_manager: None,
                                     subagent_colors: None,
                                     session_allows: None,
+                                    session_allow_all: None,
                                     permission_prompter: None,
                                     question_asker: None,
                                     agent_origin: None,
@@ -222,57 +223,73 @@ async fn execute_single_tool(
             };
         }
         PermissionDecision::Ask(prompt) => {
-            // Session allows key on (tool, normalized input shape) so
-            // "allow for session" does not blanket every future call of
-            // the same tool name (M0 AllowSession store).
-            let allow_key = session_allow_key(&call.name, &call.input);
-            if let Some(ref allows) = ctx.session_allows
-                && allows.lock().await.contains(&allow_key)
+            // Whole-session approval ("Allow always") already granted — skip
+            // the prompt entirely.
+            if let Some(ref all) = ctx.session_allow_all
+                && all.load(std::sync::atomic::Ordering::SeqCst)
             {
-                // Already allowed for this session — skip prompt.
+                // Already approved for the whole session.
             } else {
-                // Prompt the user for permission via the prompter trait.
-                let description = format!("{}: {}", call.name, prompt);
-                let input_preview = serde_json::to_string_pretty(&call.input).ok();
-
-                let response = if let Some(ref prompter) = ctx.permission_prompter {
-                    prompter.ask(
-                        &call.name,
-                        &description,
-                        input_preview.as_deref(),
-                        ctx.agent_origin.as_deref(),
-                    )
+                // Session allows key on (tool, normalized input shape) so
+                // "allow for session" does not blanket every future call of
+                // the same tool name (M0 AllowSession store).
+                let allow_key = session_allow_key(&call.name, &call.input);
+                if let Some(ref allows) = ctx.session_allows
+                    && allows.lock().await.contains(&allow_key)
+                {
+                    // Already allowed for this session — skip prompt.
                 } else {
-                    // No prompter = auto-allow (non-interactive mode).
-                    super::PermissionResponse::AllowOnce
-                };
+                    // Prompt the user for permission via the prompter trait.
+                    let description = format!("{}: {}", call.name, prompt);
+                    let input_preview = serde_json::to_string_pretty(&call.input).ok();
 
-                match response {
-                    super::PermissionResponse::AllowOnce => {
-                        // Continue to execution.
-                    }
-                    super::PermissionResponse::AllowSession => {
-                        if let Some(ref allows) = ctx.session_allows {
-                            allows.lock().await.insert(allow_key);
+                    let response = if let Some(ref prompter) = ctx.permission_prompter {
+                        prompter.ask(
+                            &call.name,
+                            &description,
+                            input_preview.as_deref(),
+                            ctx.agent_origin.as_deref(),
+                        )
+                    } else {
+                        // No prompter = auto-allow (non-interactive mode).
+                        super::PermissionResponse::AllowOnce
+                    };
+
+                    match response {
+                        super::PermissionResponse::AllowOnce => {
+                            // Continue to execution.
+                        }
+                        super::PermissionResponse::AllowSession => {
+                            if let Some(ref allows) = ctx.session_allows {
+                                allows.lock().await.insert(allow_key);
+                            }
+                        }
+                        super::PermissionResponse::AllowAlways => {
+                            if let Some(ref all) = ctx.session_allow_all {
+                                all.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            if let Some(ref allows) = ctx.session_allows {
+                                allows.lock().await.insert(allow_key);
+                            }
+                        }
+                        super::PermissionResponse::Deny => {
+                            if let Some(ref tracker) = ctx.denial_tracker {
+                                tracker.lock().await.record(
+                                    &call.name,
+                                    &call.id,
+                                    "user denied",
+                                    &call.input,
+                                );
+                            }
+                            return ToolCallResult {
+                                tool_use_id: call.id.clone(),
+                                tool_name: call.name.clone(),
+                                result: ToolResult::error("Permission denied by user".to_string()),
+                            };
                         }
                     }
-                    super::PermissionResponse::Deny => {
-                        if let Some(ref tracker) = ctx.denial_tracker {
-                            tracker.lock().await.record(
-                                &call.name,
-                                &call.id,
-                                "user denied",
-                                &call.input,
-                            );
-                        }
-                        return ToolCallResult {
-                            tool_use_id: call.id.clone(),
-                            tool_name: call.name.clone(),
-                            result: ToolResult::error("Permission denied by user".to_string()),
-                        };
-                    }
-                }
-            } // close else block
+                } // close else block
+            } // close session-allow-all else
         }
     }
 

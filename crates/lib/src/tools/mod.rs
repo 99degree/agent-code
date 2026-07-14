@@ -166,6 +166,10 @@ pub trait Tool: Send + Sync {
 pub enum PermissionResponse {
     AllowOnce,
     AllowSession,
+    /// Approve every tool call for the remainder of the session without
+    /// further prompts. Distinct from `AllowSession`, which only covers
+    /// repeated calls of the same tool + input shape.
+    AllowAlways,
     Deny,
 }
 
@@ -247,6 +251,10 @@ pub struct ToolContext {
     pub subagent_colors: Option<Arc<crate::services::subagent_colors::SubagentColorManager>>,
     /// Tools allowed for the rest of the session (via "Allow for session" prompt).
     pub session_allows: Option<Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>>,
+    /// When set and true, every tool call is auto-approved for the rest of the
+    /// session (the "Allow always" permission prompt choice). Read by the
+    /// executor before prompting; set when the user picks that choice.
+    pub session_allow_all: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Permission prompter for interactive approval.
     pub permission_prompter: Option<Arc<dyn PermissionPrompter>>,
     /// Multi-choice question asker (modern modal / tests). When `None`,
@@ -305,6 +313,7 @@ impl ToolContext {
             task_manager: None,
             subagent_colors: None,
             session_allows: None,
+            session_allow_all: None,
             permission_prompter: None,
             question_asker: None,
             agent_origin: None,
@@ -336,6 +345,7 @@ impl ToolContext {
             task_manager: self.task_manager.clone(),
             subagent_colors: self.subagent_colors.clone(),
             session_allows: self.session_allows.clone(),
+            session_allow_all: self.session_allow_all.clone(),
             permission_prompter: self.permission_prompter.clone(),
             question_asker: self.question_asker.clone(),
             agent_origin: self.agent_origin.clone(),
