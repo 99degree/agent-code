@@ -448,6 +448,7 @@ mod tests {
             task_manager: None,
             subagent_colors: None,
             session_allows: None,
+            session_allow_all: None,
             permission_prompter: None,
             question_asker: None,
             agent_origin: None,

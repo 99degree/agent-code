@@ -12,6 +12,8 @@ pub enum PermissionResponse {
     AllowOnce,
     /// Allow this tool for the rest of the session.
     AllowSession,
+    /// Allow every tool call for the rest of the session.
+    AllowAlways,
     /// Deny this invocation.
     Deny,
 }
@@ -24,7 +26,9 @@ pub fn ask_permission(tool_name: &str, description: &str) -> bool {
     let response = ask_permission_detailed(tool_name, description, None);
     matches!(
         response,
-        PermissionResponse::AllowOnce | PermissionResponse::AllowSession
+        PermissionResponse::AllowOnce
+            | PermissionResponse::AllowSession
+            | PermissionResponse::AllowAlways
     )
 }
 
@@ -76,6 +80,12 @@ pub fn ask_permission_detailed(
             preview: None,
         },
         super::selector::SelectOption {
+            label: "Allow always".into(),
+            description: "approve every tool call for this session".into(),
+            value: "allow_always".into(),
+            preview: None,
+        },
+        super::selector::SelectOption {
             label: "Deny".into(),
             description: "block this action".into(),
             value: "deny".into(),
@@ -86,6 +96,7 @@ pub fn ask_permission_detailed(
     match choice.as_deref() {
         Some("allow_once") => PermissionResponse::AllowOnce,
         Some("allow_session") => PermissionResponse::AllowSession,
+        Some("allow_always") => PermissionResponse::AllowAlways,
         // None (Esc/q cancel) or "deny" → deny.
         _ => PermissionResponse::Deny,
     }
@@ -140,6 +151,7 @@ impl agent_code_lib::tools::PermissionPrompter for TuiPrompter {
         match response {
             PermissionResponse::AllowOnce => Lib::AllowOnce,
             PermissionResponse::AllowSession => Lib::AllowSession,
+            PermissionResponse::AllowAlways => Lib::AllowAlways,
             PermissionResponse::Deny => Lib::Deny,
         }
     }
