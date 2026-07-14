@@ -757,7 +757,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 // Find provider for this model.
                 let mut found_provider = None;
                 for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
-                    let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                    let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
                     if models.iter().any(|(n, _)| *n == new_model) {
                         found_provider = Some(kind);
                         if let Some(url) = kind.default_base_url() {
@@ -788,7 +788,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     if !kind.is_configured() {
                         continue;
                     }
-                    let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                    let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
                     if models.is_empty() {
                         continue;
                     }
@@ -860,7 +860,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             } else if !data.model.is_empty() {
                                 // Fallback: detect base_url from model name.
                                 for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
-                                    let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                                    let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
                                     if models.iter().any(|(n, _)| *n == data.model) {
                                         if let Some(url) = kind.default_base_url() {
                                             state.config.api.base_url = url.to_string();
@@ -5730,7 +5730,7 @@ fn execute_session_picker(engine: &mut QueryEngine) {
                 } else if !data.model.is_empty() {
                     // Fallback: detect base_url from model name.
                     for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
-                        let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                        let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
                         if models.iter().any(|(n, _)| *n == data.model) {
                             if let Some(url) = kind.default_base_url() {
                                 state.config.api.base_url = url.to_string();

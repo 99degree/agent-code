@@ -14,6 +14,7 @@ pub mod azure_openai;
 pub mod client;
 pub mod codex_auth;
 pub mod message;
+pub mod models_config;
 pub mod normalize;
 pub mod openai;
 pub mod provider;

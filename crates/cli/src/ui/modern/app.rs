@@ -55,7 +55,7 @@ pub(crate) fn format_model_catalog(_provider: agent_code_lib::llm::provider::Pro
     let mut configured: Vec<(agent_code_lib::llm::provider::ProviderKind, &str)> = Vec::new();
     for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
         if kind.is_configured() {
-            let models = agent_code_lib::llm::provider::models_for_provider(kind);
+            let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
             if !models.is_empty() {
                 configured.push((kind, models[0].0)); // Just check if has models
             }
@@ -70,13 +70,13 @@ pub(crate) fn format_model_catalog(_provider: agent_code_lib::llm::provider::Pro
             if !kind.is_configured() {
                 continue;
             }
-            let models = agent_code_lib::llm::provider::models_for_provider(kind);
+            let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
             if models.is_empty() {
                 continue;
             }
             lines.push(format!("\n  [{:?}]", kind));
             for (name, desc) in models {
-                let mark = if *name == current { " ✔" } else { "" };
+                let mark = if name == current { " ✔" } else { "" };
                 lines.push(format!("    {name}{mark}  — {desc}"));
             }
         }
@@ -690,7 +690,7 @@ impl App {
                 // Find provider for this model.
                 let mut found_provider = None;
                 for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
-                    let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                    let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
                     if models.iter().any(|(n, _)| *n == name) {
                         found_provider = Some(kind);
                         break;

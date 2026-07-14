@@ -222,6 +222,52 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
     }
 }
 
+/// Get all models for a provider, including custom models from config.
+///
+/// Returns a Vec of (id, description) tuples.
+pub fn models_for_provider_with_custom(kind: ProviderKind) -> Vec<(&'static str, &'static str)> {
+    let mut models: Vec<(&str, &str)> = models_for_provider(kind).to_vec();
+
+    // Load custom models from config.
+    let config = super::models_config::load_models_config();
+    let provider_name = match kind {
+        ProviderKind::Anthropic => "anthropic",
+        ProviderKind::OpenAi => "openai",
+        ProviderKind::Xai => "xai",
+        ProviderKind::Google => "google",
+        ProviderKind::DeepSeek => "deepseek",
+        ProviderKind::Mistral => "mistral",
+        ProviderKind::Nvidia => "nvidia",
+        ProviderKind::OpenRouter => "openrouter",
+        ProviderKind::OpenCode => "opencode",
+        ProviderKind::OpenCodeGo => "opencode-go",
+        ProviderKind::Groq => "groq",
+        ProviderKind::Together => "together",
+        ProviderKind::Zhipu => "zhipu",
+        ProviderKind::Cohere => "cohere",
+        ProviderKind::Perplexity => "perplexity",
+        ProviderKind::Bedrock => "bedrock",
+        ProviderKind::Vertex => "vertex",
+        ProviderKind::AzureOpenAi => "azure",
+        ProviderKind::OpenAiCompatible => "openai-compatible",
+    };
+
+    if let Some(provider_models) = config.provider.get(provider_name) {
+        for custom in &provider_models.models {
+            // Don't add duplicates.
+            if !models.iter().any(|(id, _)| *id == custom.id.as_str()) {
+                // Leak the strings to get 'static lifetime.
+                // This is acceptable since models config is small and loaded once.
+                let id: &'static str = Box::leak(custom.id.clone().into_boxed_str());
+                let desc: &'static str = Box::leak(custom.description.clone().into_boxed_str());
+                models.push((id, desc));
+            }
+        }
+    }
+
+    models
+}
+
 pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     let model_lower = model.to_lowercase();
     let url_lower = base_url.to_lowercase();

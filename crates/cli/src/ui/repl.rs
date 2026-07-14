@@ -577,7 +577,7 @@ impl Completer for CommandCompleter {
                 .map(|ctx| {
                     let provider = agent_code_lib::llm::provider::detect_provider(&ctx.0, &ctx.1);
                     let names: Vec<&str> =
-                        agent_code_lib::llm::provider::models_for_provider(provider)
+                        agent_code_lib::llm::provider::models_for_provider_with_custom(provider)
                             .iter()
                             .map(|(id, _)| *id)
                             .collect();
