@@ -481,7 +481,25 @@ impl ProviderKind {
         if matches!(self, Self::OpenAiCompatible) {
             return false;
         }
-        std::env::var(self.env_var_name()).is_ok()
+        self.api_key_from_env().is_some()
+    }
+
+    /// Get API key from environment, with fallback support.
+    pub fn api_key_from_env(&self) -> Option<String> {
+        // Primary env var.
+        if let Ok(key) = std::env::var(self.env_var_name()) {
+            if !key.is_empty() {
+                return Some(key);
+            }
+        }
+        // Fallback env vars.
+        match self {
+            Self::OpenCode => {
+                // OPENCODE_ZEN_API_KEY → OPENCODE_API_KEY
+                std::env::var("OPENCODE_API_KEY").ok().filter(|k| !k.is_empty())
+            }
+            _ => None,
+        }
     }
 
     /// Which wire format this provider uses.
@@ -547,7 +565,7 @@ impl ProviderKind {
             Self::Zhipu => "ZHIPU_API_KEY",
             Self::OpenRouter => "OPENROUTER_API_KEY",
             Self::OpenCode => "OPENCODE_ZEN_API_KEY",
-            Self::OpenCodeGo => "OPENCODE_API_KEY",
+            Self::OpenCodeGo => "OPENCODE_GO_API_KEY",
             Self::Cohere => "COHERE_API_KEY",
             Self::Perplexity => "PERPLEXITY_API_KEY",
             Self::Nvidia => "NVIDIA_API_KEY",
