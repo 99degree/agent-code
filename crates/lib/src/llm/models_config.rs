@@ -335,6 +335,21 @@ pub fn max_context_for_model(model_id: &str) -> Option<u64> {
     None
 }
 
+/// Look up max_tokens for a model from the config.
+///
+/// Returns the per-model max_tokens if set, otherwise None.
+pub fn max_tokens_for_model(model_id: &str) -> Option<u64> {
+    let config = load_models_config();
+    for provider_models in config.provider.values() {
+        for m in &provider_models.models {
+            if m.id == model_id {
+                return m.max_tokens;
+            }
+        }
+    }
+    None
+}
+
 /// Get custom models for a provider from config.
 ///
 /// Returns empty slice if no custom models are configured.

@@ -273,6 +273,10 @@ pub struct ApiConfig {
     pub codex_home: Option<String>,
     /// Maximum output tokens per response.
     pub max_output_tokens: Option<u32>,
+    /// Maximum context window tokens (global override).
+    /// If set, limits context window for all models.
+    /// Per-model max_context in models.toml takes precedence if smaller.
+    pub max_context: Option<u64>,
     /// Thinking mode: "enabled", "disabled", or "adaptive".
     pub thinking: Option<String>,
     /// Effort level: "low", "medium", "high".
@@ -366,6 +370,7 @@ impl Default for ApiConfig {
             api_key_helper: None,
             codex_home: None,
             max_output_tokens: Some(16384),
+            max_context: None,
             thinking: None,
             effort: None,
             max_cost_usd: None,

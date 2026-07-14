@@ -105,20 +105,24 @@ pub fn estimate_context_tokens(messages: &[Message]) -> u64 {
 }
 
 /// Get the context window size for a model.
+///
+/// Returns the smallest of: global max_context from config,
+/// per-model max_context from models.toml, or built-in default.
 pub fn context_window_for_model(model: &str) -> u64 {
-    // First, check models.toml for custom context_window or max_context.
-    if let Some(max_ctx) = crate::llm::models_config::max_context_for_model(model) {
-        return max_ctx;
-    }
+    context_window_for_model_with_config(model, None)
+}
 
+/// Get the context window size for a model with optional global config.
+///
+/// `global_max_context` is the global max_context from config.toml.
+/// Returns the smallest of: global max_context, per-model max_context,
+/// or built-in default.
+pub fn context_window_for_model_with_config(model: &str, global_max_context: Option<u64>) -> u64 {
+    // Built-in defaults by model family.
     let lower = model.to_lowercase();
-
-    // Check for extended context variants first.
-    if lower.contains("1m") || lower.contains("1000k") {
-        return 1_000_000;
-    }
-
-    if lower.contains("opus") || lower.contains("sonnet") || lower.contains("haiku") {
+    let builtin = if lower.contains("1m") || lower.contains("1000k") {
+        1_000_000
+    } else if lower.contains("opus") || lower.contains("sonnet") || lower.contains("haiku") {
         200_000
     } else if lower.contains("gpt-4") {
         128_000
@@ -126,19 +130,45 @@ pub fn context_window_for_model(model: &str) -> u64 {
         16_384
     } else {
         128_000
+    };
+
+    // Start with built-in, then apply per-model, then global (smallest wins).
+    let mut result = builtin;
+
+    // Check models.toml for per-model context_window or max_context.
+    if let Some(model_ctx) = crate::llm::models_config::max_context_for_model(model) {
+        result = result.min(model_ctx);
     }
+
+    // Apply global max_context from config if set.
+    if let Some(global) = global_max_context {
+        result = result.min(global);
+    }
+
+    result
 }
 
 /// Get the max output tokens for a model.
+///
+/// Returns the smaller of: per-model max_tokens from models.toml,
+/// or the built-in default for the model family.
 pub fn max_output_tokens_for_model(model: &str) -> u64 {
+    // Built-in defaults by model family.
     let lower = model.to_lowercase();
-    if lower.contains("opus") || lower.contains("sonnet") {
+    let builtin = if lower.contains("opus") || lower.contains("sonnet") {
         16_384
     } else if lower.contains("haiku") {
         8_192
     } else {
         16_384
+    };
+
+    // Check models.toml for per-model max_tokens.
+    if let Some(model_max) = crate::llm::models_config::max_tokens_for_model(model) {
+        return builtin.min(model_max);
     }
+
+    builtin
 }
 
 /// Get the maximum thinking token budget for a model.
