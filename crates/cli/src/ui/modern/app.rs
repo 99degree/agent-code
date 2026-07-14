@@ -51,8 +51,15 @@ pub(crate) fn parse_model_slash(input: &str) -> Option<PendingModelAction> {
 pub(crate) fn format_model_catalog(provider: agent_code_lib::llm::provider::ProviderKind, current: &str) -> Vec<String> {
     let models = agent_code_lib::llm::provider::models_for_provider(provider);
     let mut lines = vec![format!("Model: {current}")];
+
+    // Check if provider has an API key configured.
+    let env_var = provider.env_var_name();
+    let has_key = std::env::var(env_var).is_ok();
+
     if models.is_empty() {
         lines.push("Use /model <name> to change.".into());
+    } else if !has_key {
+        lines.push(format!("Provider not configured (set {env_var} to browse models)."));
     } else {
         lines.push("Available models (use /model <id>):".into());
         for (name, desc) in models {
