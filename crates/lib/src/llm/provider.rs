@@ -168,6 +168,7 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
             ("google/gemini-3-pro", "Gemini 3 Pro"),
             ("x-ai/grok-4.3", "Grok 4.3"),
             ("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro · Open"),
+            ("hy3-free", "Hy3 Free"),
         ],
         ProviderKind::OpenCodeGo => &[
             ("deepseek-v4-flash", "DeepSeek V4 Flash · Fast"),
