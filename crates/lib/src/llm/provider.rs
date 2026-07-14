@@ -98,169 +98,71 @@ impl std::fmt::Display for ProviderError {
 /// both surfaces stay in sync. Providers without a curated list return
 /// an empty slice (the caller falls back to "type any name"). These are
 /// suggestions, not an allow-list — `/model <name>` accepts any string.
-pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'static str)] {
-    match kind {
-        ProviderKind::Anthropic | ProviderKind::Bedrock | ProviderKind::Vertex => &[
-            ("claude-opus-4-8", "Opus 4.8 · Most capable"),
-            ("claude-sonnet-5", "Sonnet 5 · Balanced"),
-            ("claude-haiku-4-5", "Haiku 4.5 · Fast"),
-            ("claude-fable-5", "Fable 5 · Frontier"),
-        ],
-        ProviderKind::OpenAi => &[
-            ("gpt-5.5", "GPT-5.5 · Most capable"),
-            ("gpt-5.5-pro", "GPT-5.5 Pro · Reasoning"),
-            ("gpt-5.4", "GPT-5.4 · Balanced"),
-            ("gpt-5.4-mini", "GPT-5.4 Mini · Fast"),
-            ("gpt-5.4-nano", "GPT-5.4 Nano · Fastest"),
-            ("o3", "o3 · Reasoning"),
-        ],
-        ProviderKind::Xai => &[
-            ("grok-build-0.1", "Grok Build · Agentic coding (SuperGrok)"),
-            ("grok-4.5", "Grok 4.5 · Flagship"),
-            ("grok-4.3", "Grok 4.3 · Previous flagship"),
-            ("grok-4", "Grok 4 · Balanced"),
-        ],
-        ProviderKind::Google => &[
-            ("gemini-3-pro", "Gemini 3 Pro · Most capable"),
-            ("gemini-3.5-flash", "Gemini 3.5 Flash · Fast"),
-            ("gemini-2.5-flash", "Gemini 2.5 Flash · Previous gen"),
-        ],
-        ProviderKind::DeepSeek => &[
-            ("deepseek-chat", "DeepSeek Chat · General"),
-            ("deepseek-reasoner", "DeepSeek Reasoner · Reasoning"),
-        ],
-        ProviderKind::Mistral => &[
-            ("mistral-large-latest", "Mistral Large · Most capable"),
-            ("codestral-latest", "Codestral · Code-focused"),
-        ],
-        ProviderKind::Zhipu => &[
-            ("glm-4.7", "GLM-4.7 · Latest"),
-            ("glm-4.6", "GLM-4.6 · Balanced"),
-            ("glm-4.6-air", "GLM-4.6 Air · Fast"),
-            ("glm-4.5", "GLM-4.5 · Previous gen"),
-        ],
-        ProviderKind::Cohere => &[
-            ("command-r-plus", "Command R+ · Most capable"),
-            ("command-r", "Command R · Balanced"),
-            ("command-light", "Command Light · Fast"),
-        ],
-        ProviderKind::Perplexity => &[
-            ("sonar-pro", "Sonar Pro · Most capable, web search"),
-            ("sonar", "Sonar · Balanced, web search"),
-            ("sonar-deep-research", "Sonar Deep Research · In-depth"),
-        ],
-        ProviderKind::Nvidia => &[
-            ("meta/llama-3.1-8b-instruct", "Llama 3.1 8B · Fast, open"),
-            (
-                "nvidia/llama-3.3-nemotron-super-49b-v1",
-                "Nemotron Super 49B · Capable",
-            ),
-            ("deepseek-ai/deepseek-r1", "DeepSeek R1 · Reasoning"),
-            (
-                "nvidia/llama-3.1-nemotron-70b-instruct",
-                "Nemotron 70B · Instruct",
-            ),
-            ("minimaxai/minimax-m3", "MiniMax M3"),
-        ],
-        ProviderKind::OpenRouter => &[
-            ("anthropic/claude-sonnet-5", "Claude Sonnet 5 · Balanced"),
-            ("anthropic/claude-opus-4.8", "Claude Opus 4.8 · Most capable"),
-            ("openai/gpt-5.5", "GPT-5.5 · Most capable"),
-            ("google/gemini-3-pro", "Gemini 3 Pro"),
-            ("x-ai/grok-4.3", "Grok 4.3"),
-            ("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro · Open"),
-            ("hy3-free", "Hy3 Free"),
-        ],
-        ProviderKind::OpenCodeGo => &[
-            ("deepseek-v4-flash", "DeepSeek V4 Flash · Fast"),
-            ("deepseek-v4-pro", "DeepSeek V4 Pro"),
-            ("glm-5.1", "GLM-5.1"),
-            ("glm-5.2", "GLM-5.2"),
-            ("kimi-k2.6", "Kimi K2.6"),
-            ("kimi-k2.7-code", "Kimi K2.7 Code"),
-            ("mimo-v2.5", "MiMo V2.5"),
-            ("mimo-v2.5-pro", "MiMo V2.5 Pro"),
-            ("minimax-m2.7", "MiniMax M2.7"),
-            ("minimax-m3", "MiniMax M3"),
-            ("qwen3.6-plus", "Qwen3.6 Plus"),
-            ("qwen3.7-max", "Qwen3.7 Max"),
-            ("qwen3.7-plus", "Qwen3.7 Plus"),
-        ],
-        ProviderKind::OpenCode => &[
-            ("claude-sonnet-5", "Claude Sonnet 5"),
-            ("claude-opus-4-8", "Claude Opus 4.8"),
-            ("claude-opus-4-7", "Claude Opus 4.7"),
-            ("claude-opus-4-6", "Claude Opus 4.6"),
-            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
-            ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
-            ("claude-haiku-4-5", "Claude Haiku 4.5"),
-            ("gpt-5.5", "GPT-5.5"),
-            ("gpt-5.5-pro", "GPT-5.5 Pro"),
-            ("gpt-5.4", "GPT-5.4"),
-            ("gpt-5.4-pro", "GPT-5.4 Pro"),
-            ("gpt-5.4-mini", "GPT-5.4 Mini"),
-            ("gpt-5.2", "GPT-5.2"),
-            ("gpt-5.2-codex", "GPT-5.2 Codex"),
-            ("gpt-5.1", "GPT-5.1"),
-            ("gpt-5.1-codex", "GPT-5.1 Codex"),
-            ("gpt-5", "GPT-5"),
-            ("gemini-3.5-flash", "Gemini 3.5 Flash"),
-            ("gemini-3.1-pro", "Gemini 3.1 Pro"),
-            ("gemini-3-flash", "Gemini 3 Flash"),
-            ("deepseek-v4-pro", "DeepSeek V4 Pro"),
-            ("deepseek-v4-flash", "DeepSeek V4 Flash"),
-            ("grok-4.5", "Grok 4.5"),
-            ("grok-build-0.1", "Grok Build 0.1"),
-            ("kimi-k2.7-code", "Kimi K2.7 Code"),
-            ("kimi-k2.6", "Kimi K2.6"),
-            ("qwen3.6-plus", "Qwen3.6 Plus"),
-            ("qwen3.5-plus", "Qwen3.5 Plus"),
-            ("minimax-m3", "MiniMax M3"),
-            ("glm-5.2", "GLM-5.2"),
-        ],
-        _ => &[],
-    }
+pub fn models_for_provider(kind: ProviderKind) -> &'static [(String, String)] {
+    use std::sync::OnceLock;
+    
+    static MODELS_DB: OnceLock<std::collections::HashMap<String, Vec<(String, String)>>> = OnceLock::new();
+    
+    let map = MODELS_DB.get_or_init(|| {
+        let toml_str = include_str!("models-db.toml");
+        let mut map = std::collections::HashMap::new();
+        
+        let mut current_section = String::new();
+        let mut current_id = String::new();
+        
+        for line in toml_str.lines() {
+            let trimmed = line.trim();
+            
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            
+            // Section header [[provider]]
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                current_section = trimmed.trim_matches('[').trim_matches(']').to_string();
+                map.entry(current_section.clone()).or_insert_with(Vec::new);
+                continue;
+            }
+            
+            // Key-value pairs
+            if let Some((key, value)) = trimmed.split_once('=') {
+                let key = key.trim();
+                let value = value.trim().trim_matches('"');
+                
+                match key {
+                    "id" => current_id = value.to_string(),
+                    "name" => {
+                        if let Some(models) = map.get_mut(&current_section) {
+                            models.push((current_id.clone(), value.to_string()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        
+        map
+    });
+    
+    let key = kind.toml_key();
+    map.get(key).map(|v| v.as_slice()).unwrap_or(&[])
 }
 
 /// Get all models for a provider, including custom models from config.
 ///
 /// Returns a Vec of (id, description) tuples.
-pub fn models_for_provider_with_custom(kind: ProviderKind) -> Vec<(&'static str, &'static str)> {
-    let mut models: Vec<(&str, &str)> = models_for_provider(kind).to_vec();
+pub fn models_for_provider_with_custom(kind: ProviderKind) -> Vec<(String, String)> {
+    let mut models: Vec<(String, String)> = models_for_provider(kind).to_vec();
 
     // Load custom models from config.
     let config = super::models_config::load_models_config();
-    let provider_name = match kind {
-        ProviderKind::Anthropic => "anthropic",
-        ProviderKind::OpenAi => "openai",
-        ProviderKind::Xai => "xai",
-        ProviderKind::Google => "google",
-        ProviderKind::DeepSeek => "deepseek",
-        ProviderKind::Mistral => "mistral",
-        ProviderKind::Nvidia => "nvidia",
-        ProviderKind::OpenRouter => "openrouter",
-        ProviderKind::OpenCode => "opencode",
-        ProviderKind::OpenCodeGo => "opencode-go",
-        ProviderKind::Groq => "groq",
-        ProviderKind::Together => "together",
-        ProviderKind::Zhipu => "zhipu",
-        ProviderKind::Cohere => "cohere",
-        ProviderKind::Perplexity => "perplexity",
-        ProviderKind::Bedrock => "bedrock",
-        ProviderKind::Vertex => "vertex",
-        ProviderKind::AzureOpenAi => "azure",
-        ProviderKind::OpenAiCompatible => "openai-compatible",
-    };
+    let provider_name = kind.toml_key();
 
     if let Some(provider_models) = config.provider.get(provider_name) {
         for custom in &provider_models.models {
             // Don't add duplicates.
-            if !models.iter().any(|(id, _)| *id == custom.id.as_str()) {
-                // Leak the strings to get 'static lifetime.
-                // This is acceptable since models config is small and loaded once.
-                let id: &'static str = Box::leak(custom.id.clone().into_boxed_str());
-                let desc: &'static str = Box::leak(custom.description.clone().into_boxed_str());
-                models.push((id, desc));
+            if !models.iter().any(|(id, _)| id == &custom.id) {
+                models.push((custom.id.clone(), custom.description.clone()));
             }
         }
     }
@@ -522,6 +424,29 @@ impl ProviderKind {
             | Self::Perplexity
             | Self::Nvidia
             | Self::OpenAiCompatible => WireFormat::OpenAiCompatible,
+        }
+    }
+
+    /// TOML section key for models-db.toml lookup.
+    pub fn toml_key(&self) -> &'static str {
+        match self {
+            Self::Anthropic | Self::Bedrock | Self::Vertex => "anthropic",
+            Self::OpenAi => "openai",
+            Self::Xai => "xai",
+            Self::Google => "google",
+            Self::DeepSeek => "deepseek",
+            Self::Mistral => "mistral",
+            Self::Nvidia => "nvidia",
+            Self::OpenRouter => "openrouter",
+            Self::OpenCode => "opencode",
+            Self::OpenCodeGo => "opencode-go",
+            Self::Groq => "groq",
+            Self::Together => "together",
+            Self::Zhipu => "zhipu",
+            Self::Cohere => "cohere",
+            Self::Perplexity => "perplexity",
+            Self::AzureOpenAi => "openai",
+            Self::OpenAiCompatible => "",
         }
     }
 
