@@ -25,80 +25,80 @@ const DEFAULT_TEMPLATE: &str = r#"# Custom model lists per provider.
 # ============================================================================
 # OLLAMA-COM
 # ============================================================================
-[ollama-com.models]
+[[ollama-com.models]]
 id = "nemotron-3-super"
 description = "Nemotron 3 Super (120B)"
 context_window = 262144
 max_tokens = 16384
 reasoning = true
 
-[ollama-com.models]
+[[ollama-com.models]]
 id = "nemotron-3-ultra"
 description = "Nemotron 3 Ultra"
 context_window = 1048576
 max_tokens = 16384
 reasoning = true
 
-[ollama-com.models]
+[[ollama-com.models]]
 id = "nemotron-3-nano:30b"
 description = "Nemotron 3 Nano (30B)"
 context_window = 262144
 max_tokens = 16384
 reasoning = true
 
-[ollama-com.models]
+[[ollama-com.models]]
 id = "minimax-m3"
 description = "MiniMax M3"
 context_window = 524288
 max_tokens = 16384
 reasoning = true
 
-[ollama-com.models]
+[[ollama-com.models]]
 id = "minimax-m2.5"
 description = "MiniMax M2.5"
 context_window = 262144
 max_tokens = 16384
 reasoning = true
 
-[ollama-com.models]
+[[ollama-com.models]]
 id = "minimax-m2.1"
 description = "MiniMax M2.1"
 context_window = 262144
 max_tokens = 16384
 reasoning = true
 
-[ollama-com.models]
+[[ollama-com.models]]
 id = "glm-4.7"
 description = "GLM 4.7"
 context_window = 262144
 max_tokens = 16384
 
-[ollama-com.models]
+[[ollama-com.models]]
 id = "gemma4:31b"
 description = "Gemma 4 31B"
 context_window = 262144
 max_tokens = 16384
 reasoning = true
 
-[ollama-com.models]
+[[ollama-com.models]]
 id = "qwen3-coder:480b"
 description = "Qwen3 Coder 480B"
 context_window = 262144
 max_tokens = 16384
 
-[ollama-com.models]
+[[ollama-com.models]]
 id = "qwen3-coder-next"
 description = "Qwen3 Coder Next"
 context_window = 262144
 max_tokens = 16384
 
-[ollama-com.models]
+[[ollama-com.models]]
 id = "devstral-2:123b"
 description = "Devstral 2 123B"
 context_window = 262144
 max_tokens = 16384
 
-[ollama-com.models]
+[[ollama-com.models]]
 id = "devstral-small-2:24b"
 description = "Devstral Small 2 24B"
 context_window = 262144
@@ -107,102 +107,102 @@ max_tokens = 16384
 # ============================================================================
 # NVIDIA
 # ============================================================================
-[nvidia.models]
+[[nvidia.models]]
 id = "nvidia/nemotron-3-super-120b-a12b"
 description = "Nemotron 3 Super (120B)"
 context_window = 262144
 max_tokens = 16384
 reasoning = true
 
-[nvidia.models]
+[[nvidia.models]]
 id = "nvidia/nemotron-3-ultra-550b-a55b"
 description = "Nemotron 3 Ultra (550B)"
 context_window = 1048576
 max_tokens = 16384
 reasoning = true
 
-[nvidia.models]
+[[nvidia.models]]
 id = "nvidia/nemotron-3-nano-30b-a3b"
 description = "Nemotron 3 Nano (30B)"
 context_window = 262144
 max_tokens = 16384
 reasoning = true
 
-[nvidia.models]
+[[nvidia.models]]
 id = "mistralai/mistral-large-3-675b-instruct-2512"
 description = "Mistral Large 3 (675B)"
 context_window = 262144
 max_tokens = 16384
 reasoning = true
 
-[nvidia.models]
+[[nvidia.models]]
 id = "mistralai/mistral-small-4-119b-2603"
 description = "Mistral Small 4 (119B)"
 context_window = 262144
 max_tokens = 16384
 reasoning = true
 
-[nvidia.models]
+[[nvidia.models]]
 id = "mistralai/mistral-medium-3.5-128b"
 description = "Mistral Medium 3.5 (128B)"
 context_window = 262144
 max_tokens = 16384
 reasoning = true
 
-[nvidia.models]
+[[nvidia.models]]
 id = "mistralai/ministral-14b-instruct-2512"
 description = "Ministral 14B"
 context_window = 131072
 max_tokens = 8192
 
-[nvidia.models]
+[[nvidia.models]]
 id = "mistralai/mistral-nemo-12b-instruct"
 description = "Mistral NeMo 12B"
 context_window = 131072
 max_tokens = 8192
 
-[nvidia.models]
+[[nvidia.models]]
 id = "deepseek-ai/deepseek-v4-pro"
 description = "DeepSeek V4 Pro"
 context_window = 262144
 max_tokens = 8192
 reasoning = true
 
-[nvidia.models]
+[[nvidia.models]]
 id = "deepseek-ai/deepseek-v4-flash"
 description = "DeepSeek V4 Flash"
 context_window = 262144
 max_tokens = 4096
 
-[nvidia.models]
+[[nvidia.models]]
 id = "z-ai/glm-5.2"
 description = "GLM 5.2"
 context_window = 1048576
 max_tokens = 16384
 reasoning = true
 
-[nvidia.models]
+[[nvidia.models]]
 id = "minimaxai/minimax-m2.7"
 description = "Minimax M2.7"
 context_window = 204800
 max_tokens = 131072
 reasoning = true
 
-[nvidia.models]
+[[nvidia.models]]
 id = "google/gemma-4-31b-it"
 description = "Gemma 4 31B"
 context_window = 262144
 max_tokens = 16384
 reasoning = true
 
-[nvidia.models]
+[[nvidia.models]]
 id = "qwen/qwen3.5-397b-a17b"
 description = "Qwen3.5 397B"
 context_window = 262144
 max_tokens = 16384
 reasoning = true
 
-[nvidia.models]
+[[nvidia.models]]
 id = "qwen/qwen3.5-122b-a10b"
 description = "Qwen3.5 122B"
 context_window = 262144
