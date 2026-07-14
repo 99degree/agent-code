@@ -163,14 +163,58 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
         ],
         ProviderKind::OpenRouter => &[
             ("anthropic/claude-sonnet-5", "Claude Sonnet 5 · Balanced"),
-            (
-                "anthropic/claude-opus-4.8",
-                "Claude Opus 4.8 · Most capable",
-            ),
+            ("anthropic/claude-opus-4.8", "Claude Opus 4.8 · Most capable"),
             ("openai/gpt-5.5", "GPT-5.5 · Most capable"),
             ("google/gemini-3-pro", "Gemini 3 Pro"),
             ("x-ai/grok-4.3", "Grok 4.3"),
             ("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro · Open"),
+        ],
+        ProviderKind::OpenCodeGo => &[
+            ("deepseek-v4-flash", "DeepSeek V4 Flash · Fast"),
+            ("deepseek-v4-pro", "DeepSeek V4 Pro"),
+            ("glm-5.1", "GLM-5.1"),
+            ("glm-5.2", "GLM-5.2"),
+            ("kimi-k2.6", "Kimi K2.6"),
+            ("kimi-k2.7-code", "Kimi K2.7 Code"),
+            ("mimo-v2.5", "MiMo V2.5"),
+            ("mimo-v2.5-pro", "MiMo V2.5 Pro"),
+            ("minimax-m2.7", "MiniMax M2.7"),
+            ("minimax-m3", "MiniMax M3"),
+            ("qwen3.6-plus", "Qwen3.6 Plus"),
+            ("qwen3.7-max", "Qwen3.7 Max"),
+            ("qwen3.7-plus", "Qwen3.7 Plus"),
+        ],
+        ProviderKind::OpenCode => &[
+            ("claude-sonnet-5", "Claude Sonnet 5"),
+            ("claude-opus-4-8", "Claude Opus 4.8"),
+            ("claude-opus-4-7", "Claude Opus 4.7"),
+            ("claude-opus-4-6", "Claude Opus 4.6"),
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
+            ("claude-haiku-4-5", "Claude Haiku 4.5"),
+            ("gpt-5.5", "GPT-5.5"),
+            ("gpt-5.5-pro", "GPT-5.5 Pro"),
+            ("gpt-5.4", "GPT-5.4"),
+            ("gpt-5.4-pro", "GPT-5.4 Pro"),
+            ("gpt-5.4-mini", "GPT-5.4 Mini"),
+            ("gpt-5.2", "GPT-5.2"),
+            ("gpt-5.2-codex", "GPT-5.2 Codex"),
+            ("gpt-5.1", "GPT-5.1"),
+            ("gpt-5.1-codex", "GPT-5.1 Codex"),
+            ("gpt-5", "GPT-5"),
+            ("gemini-3.5-flash", "Gemini 3.5 Flash"),
+            ("gemini-3.1-pro", "Gemini 3.1 Pro"),
+            ("gemini-3-flash", "Gemini 3 Flash"),
+            ("deepseek-v4-pro", "DeepSeek V4 Pro"),
+            ("deepseek-v4-flash", "DeepSeek V4 Flash"),
+            ("grok-4.5", "Grok 4.5"),
+            ("grok-build-0.1", "Grok Build 0.1"),
+            ("kimi-k2.7-code", "Kimi K2.7 Code"),
+            ("kimi-k2.6", "Kimi K2.6"),
+            ("qwen3.6-plus", "Qwen3.6 Plus"),
+            ("qwen3.5-plus", "Qwen3.5 Plus"),
+            ("minimax-m3", "MiniMax M3"),
+            ("glm-5.2", "GLM-5.2"),
         ],
         _ => &[],
     }
@@ -226,6 +270,12 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     }
     if url_lower.contains("openrouter.ai") {
         return ProviderKind::OpenRouter;
+    }
+    if url_lower.contains("opencode.ai/zen/go") {
+        return ProviderKind::OpenCodeGo;
+    }
+    if url_lower.contains("opencode.ai") {
+        return ProviderKind::OpenCode;
     }
     if url_lower.contains("cohere.com") || url_lower.contains("cohere.ai") {
         return ProviderKind::Cohere;
@@ -307,6 +357,8 @@ pub enum ProviderKind {
     Together,
     Zhipu,
     OpenRouter,
+    OpenCode,
+    OpenCodeGo,
     Cohere,
     Perplexity,
     Nvidia,
@@ -325,6 +377,8 @@ impl ProviderKind {
             Self::Mistral,
             Self::Nvidia,
             Self::OpenRouter,
+            Self::OpenCode,
+            Self::OpenCodeGo,
             Self::Groq,
             Self::Together,
             Self::Zhipu,
@@ -364,6 +418,8 @@ impl ProviderKind {
             | Self::Together
             | Self::Zhipu
             | Self::OpenRouter
+            | Self::OpenCode
+            | Self::OpenCodeGo
             | Self::Cohere
             | Self::Perplexity
             | Self::Nvidia
@@ -386,6 +442,8 @@ impl ProviderKind {
             Self::Together => Some("https://api.together.xyz/v1"),
             Self::Zhipu => Some("https://open.bigmodel.cn/api/paas/v4"),
             Self::OpenRouter => Some("https://openrouter.ai/api/v1"),
+            Self::OpenCode => Some("https://opencode.ai/zen/v1"),
+            Self::OpenCodeGo => Some("https://opencode.ai/zen/go/v1"),
             Self::Cohere => Some("https://api.cohere.com/v2"),
             Self::Perplexity => Some("https://api.perplexity.ai"),
             Self::Nvidia => Some("https://integrate.api.nvidia.com/v1"),
@@ -408,6 +466,8 @@ impl ProviderKind {
             Self::Together => "TOGETHER_API_KEY",
             Self::Zhipu => "ZHIPU_API_KEY",
             Self::OpenRouter => "OPENROUTER_API_KEY",
+            Self::OpenCode => "OPENCODE_API_KEY",
+            Self::OpenCodeGo => "OPENCODE_GO_API_KEY",
             Self::Cohere => "COHERE_API_KEY",
             Self::Perplexity => "PERPLEXITY_API_KEY",
             Self::Nvidia => "NVIDIA_API_KEY",

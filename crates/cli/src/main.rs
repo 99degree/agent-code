@@ -663,6 +663,8 @@ async fn async_main() -> anyhow::Result<()> {
             "nvidia" | "nim" => ProviderKind::Nvidia,
             "azure" | "azure-openai" => ProviderKind::AzureOpenAi,
             "openrouter" | "or" => ProviderKind::OpenRouter,
+            "opencode" | "oc" | "zen" => ProviderKind::OpenCode,
+            "opencode-go" | "oc-go" | "zen-go" => ProviderKind::OpenCodeGo,
             _ => detect_provider(&config.api.model, &config.api.base_url),
         },
     };
