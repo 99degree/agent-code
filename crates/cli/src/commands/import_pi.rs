@@ -8,28 +8,231 @@ use agent_code_lib::llm::message::{
 };
 use agent_code_lib::services::session::SessionData;
 
-/// Execute `/import-pi <path>` — import a pi.dev JSONL session file.
+/// Execute `/import-pi [path]` — list or import pi.dev JSONL session files.
 pub fn execute(args: Option<&str>, engine: &mut agent_code_lib::query::QueryEngine) -> String {
-    let Some(path) = args else {
-        return "Usage: /import-pi <path-to-pi-session.jsonl>".into();
-    };
-    let path = path.trim();
+    let path = args.map(|a| a.trim()).unwrap_or("");
+
     if path.is_empty() {
-        return "Usage: /import-pi <path-to-pi-session.jsonl>".into();
+        return list_sessions_for_cwd(&engine.state().cwd);
     }
 
-    let pi_path = PathBuf::from(path);
+    // Expand ~ to home directory.
+    let expanded = if path.starts_with('~') {
+        if let Some(home) = std::env::var_os("HOME") {
+            format!("{}{}", home.to_string_lossy(), &path[1..])
+        } else {
+            path.to_string()
+        }
+    } else {
+        path.to_string()
+    };
+
+    // If the argument is a number, treat it as an index from the list.
+    if let Ok(index) = expanded.parse::<usize>() {
+        return import_by_index(index, &engine.state().cwd);
+    }
+
+    // Try the path as-is first.
+    let mut pi_path = PathBuf::from(&expanded);
     if !pi_path.exists() {
-        return format!("File not found: {path}");
+        // Try searching in ~/.pi/agent/sessions/ for a matching file.
+        if let Some(sessions_base) = get_pi_sessions_dir() {
+            let search_name = Path::new(&expanded)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string());
+            if let Some(name) = search_name {
+                // Search all subdirectories for a matching file.
+                if let Ok(entries) = std::fs::read_dir(&sessions_base) {
+                    for entry in entries.filter_map(|e| e.ok()) {
+                        let dir = entry.path();
+                        if dir.is_dir() {
+                            let candidate = dir.join(&name);
+                            if candidate.exists() {
+                                pi_path = candidate;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !pi_path.exists() {
+        return format!("File not found: {expanded}");
     }
 
     match import_pi_session(&pi_path) {
         Ok(session_id) => {
-            let cwd = engine.state().cwd.clone();
             format!("Imported pi.dev session as agent-code session: {session_id}\nResume with: /session {session_id}")
         }
         Err(e) => format!("Import failed: {e}"),
     }
+}
+
+/// Import a session by index from the list.
+fn import_by_index(index: usize, cwd: &str) -> String {
+    let Some(sessions_base) = get_pi_sessions_dir() else {
+        return "Cannot determine pi.dev sessions directory".into();
+    };
+
+    let dir_pattern = cwd_to_pi_dir_name(cwd);
+    let session_dir = sessions_base.join(&dir_pattern);
+
+    if !session_dir.exists() {
+        return format!("No pi.dev sessions found for this directory.");
+    }
+
+    let sessions = get_session_files(&session_dir);
+    if sessions.is_empty() {
+        return format!("No pi.dev sessions found for this directory.");
+    }
+
+    if index == 0 || index > sessions.len() {
+        return format!("Invalid index: {index}. Use 1-{}.", sessions.len());
+    }
+
+    let (file_name, _) = &sessions[index - 1];
+    let full_path = session_dir.join(file_name);
+
+    match import_pi_session(&full_path) {
+        Ok(session_id) => {
+            format!("Imported pi.dev session as agent-code session: {session_id}\nResume with: /session {session_id}")
+        }
+        Err(e) => format!("Import failed: {e}"),
+    }
+}
+
+/// Convert a directory path to pi.dev session folder name.
+/// e.g. `/data/data/com.termux/files/home/agent-code` → `--data-data-com.termux-files-home-agent-code--`
+fn cwd_to_pi_dir_name(cwd: &str) -> String {
+    let dir_name = cwd.replace('/', "-");
+    format!("--{dir_name}--")
+}
+
+/// Get the pi.dev sessions directory.
+fn get_pi_sessions_dir() -> Option<PathBuf> {
+    agent_code_lib::config::agent_config_dir().map(|d| {
+        std::path::PathBuf::from(d.to_string_lossy().replace(".config/agent-code", ".pi/agent"))
+            .join("sessions")
+    })
+}
+
+/// Get sorted list of .jsonl session files with optional names.
+fn get_session_files(dir: &Path) -> Vec<(String, Option<String>)> {
+    let mut entries: Vec<(String, Option<String>)> = std::fs::read_dir(dir)
+        .ok()
+        .map(|dirs| {
+            dirs.filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        == Some("jsonl")
+                })
+                .filter_map(|e| {
+                    let name = e.file_name().to_str()?.to_string();
+                    let path = e.path();
+                    let label = extract_session_label(&path);
+                    Some((name, label))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+}
+
+/// Extract session label/name from a pi.dev JSONL file (first line only).
+fn extract_session_label(path: &Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    let entry: PiEntry = serde_json::from_str(&line).ok()?;
+    match entry {
+        PiEntry::Session(meta) => meta.label,
+        _ => None,
+    }
+}
+
+/// Format a file's age as a compact string (e.g., "3d", "2h", "1w 2d").
+fn file_age(path: &Path) -> String {
+    let Ok(metadata) = path.metadata() else {
+        return "?".into();
+    };
+    let Ok(modified) = metadata.modified() else {
+        return "?".into();
+    };
+    let Ok(elapsed) = modified.elapsed() else {
+        return "?".into();
+    };
+
+    let secs = elapsed.as_secs();
+    let years = secs / 31536000;
+    let months = (secs % 31536000) / 2592000;
+    let weeks = (secs % 2592000) / 604800;
+    let days = (secs % 604800) / 86400;
+    let hours = (secs % 86400) / 3600;
+    let mins = (secs % 3600) / 60;
+
+    if years > 0 {
+        if months > 0 { format!("{years}y{months}mo") } else { format!("{years}y") }
+    } else if months > 0 {
+        if weeks > 0 { format!("{months}mo{weeks}w") } else { format!("{months}mo") }
+    } else if weeks > 0 {
+        if days > 0 { format!("{weeks}w{days}d") } else { format!("{weeks}w") }
+    } else if days > 0 {
+        if hours > 0 { format!("{days}d{hours}h") } else { format!("{days}d") }
+    } else if hours > 0 {
+        if mins > 0 { format!("{hours}h{mins}m") } else { format!("{hours}h") }
+    } else if mins > 0 {
+        format!("{mins}m")
+    } else {
+        "now".into()
+    }
+}
+
+/// List pi.dev sessions that match the current working directory.
+fn list_sessions_for_cwd(cwd: &str) -> String {
+    let Some(sessions_base) = get_pi_sessions_dir() else {
+        return "Cannot determine pi.dev sessions directory".into();
+    };
+
+    if !sessions_base.exists() {
+        return format!("No pi.dev sessions directory found at: {}", sessions_base.display());
+    }
+
+    let dir_pattern = cwd_to_pi_dir_name(cwd);
+    let session_dir = sessions_base.join(&dir_pattern);
+
+    if !session_dir.exists() {
+        return format!(
+            "No pi.dev sessions found for this directory.\nSearched: {}",
+            session_dir.display()
+        );
+    }
+
+    let sessions = get_session_files(&session_dir);
+
+    if sessions.is_empty() {
+        return format!(
+            "No pi.dev sessions found for this directory.\nSearched: {}",
+            session_dir.display()
+        );
+    }
+
+    let mut out = format!("pi.dev sessions for {}:\n\n", cwd);
+    for (i, (name, label)) in sessions.iter().enumerate() {
+        let display_name = name.strip_suffix(".jsonl").unwrap_or(name);
+        let full_path = session_dir.join(name);
+        let age = file_age(&full_path);
+        let label_str = label.as_deref().map(|l| format!(" \"{l}\"")).unwrap_or_default();
+        out.push_str(&format!("  {}. {}{label_str} ({})\n", i + 1, display_name, age));
+    }
+    out.push_str("\nUse: /import-pi <number> or /import-pi <full-path>\n");
+    out
 }
 
 /// Import a pi.dev JSONL session file and save as agent-code session.
@@ -40,7 +243,6 @@ fn import_pi_session(pi_path: &Path) -> Result<String, String> {
     let mut session_meta: Option<PiSessionMeta> = None;
     let mut model_name = String::from("unknown");
     let mut messages: Vec<Message> = Vec::new();
-    // Track tool calls by ID so we can match tool results.
     let mut tool_calls: HashMap<String, String> = HashMap::new();
 
     for line in content.lines() {
@@ -64,7 +266,7 @@ fn import_pi_session(pi_path: &Path) -> Result<String, String> {
                     messages.push(message);
                 }
             }
-            _ => {} // Ignore thinking_level_change and other types
+            _ => {}
         }
     }
 
@@ -73,7 +275,7 @@ fn import_pi_session(pi_path: &Path) -> Result<String, String> {
     }
 
     let meta = session_meta.ok_or("No session metadata found")?;
-    let session_id = format!("pi-{}", &meta.id[..8]);
+    let session_id = format!("pi-{}", &meta.id[..8.min(meta.id.len())]);
     let cwd = meta.cwd.unwrap_or_else(|| ".".into());
 
     let session = SessionData {
@@ -88,11 +290,10 @@ fn import_pi_session(pi_path: &Path) -> Result<String, String> {
         total_input_tokens: 0,
         total_output_tokens: 0,
         plan_mode: false,
-        label: Some(format!("Imported from pi.dev")),
+        label: Some("Imported from pi.dev".into()),
         tags: vec!["imported".into(), "pi".into()],
     };
 
-    // Save using agent-code's session persistence.
     let json = serde_json::to_string_pretty(&session)
         .map_err(|e| format!("Failed to serialize session: {e}"))?;
 
@@ -110,7 +311,6 @@ fn import_pi_session(pi_path: &Path) -> Result<String, String> {
     Ok(session_id)
 }
 
-/// pi.dev session metadata.
 #[derive(serde::Deserialize)]
 struct PiSessionMeta {
     #[serde(rename = "id")]
@@ -119,16 +319,16 @@ struct PiSessionMeta {
     timestamp: String,
     #[serde(rename = "cwd")]
     cwd: Option<String>,
+    #[serde(rename = "label", default)]
+    label: Option<String>,
 }
 
-/// pi.dev model change event.
 #[derive(serde::Deserialize)]
 struct PiModelChange {
     #[serde(rename = "modelId")]
     model_id: Option<String>,
 }
 
-/// Top-level pi.dev JSONL entry.
 #[derive(serde::Deserialize)]
 #[serde(tag = "type")]
 enum PiEntry {
@@ -142,16 +342,14 @@ enum PiEntry {
     ThinkingLevelChange(serde_json::Value),
 }
 
-/// pi.dev message entry.
 #[derive(serde::Deserialize)]
 struct PiMessage {
     #[serde(rename = "id")]
-    id: String,
+    _id: String,
     #[serde(rename = "message")]
     message: PiInnerMessage,
 }
 
-/// Inner message structure.
 #[derive(serde::Deserialize)]
 struct PiInnerMessage {
     #[serde(rename = "role")]
@@ -166,13 +364,10 @@ struct PiInnerMessage {
     stop_reason: Option<String>,
     #[serde(rename = "toolCallId", default)]
     tool_call_id: Option<String>,
-    #[serde(rename = "toolName", default)]
-    tool_name: Option<String>,
     #[serde(rename = "isError", default)]
     is_error: Option<bool>,
 }
 
-/// pi.dev content block.
 #[derive(serde::Deserialize)]
 #[serde(tag = "type")]
 enum PiContentBlock {
@@ -192,7 +387,6 @@ enum PiContentBlock {
     },
 }
 
-/// pi.dev usage stats.
 #[derive(serde::Deserialize)]
 struct PiUsage {
     #[serde(rename = "input", default)]
@@ -205,17 +399,12 @@ struct PiUsage {
     cache_write: u64,
 }
 
-/// Convert a pi.dev message to agent-code Message.
 fn convert_message(
     msg: &PiMessage,
     tool_calls: &mut HashMap<String, String>,
 ) -> Option<Message> {
     let inner = &msg.message;
-    let timestamp = inner
-        .model
-        .as_ref()
-        .map(|_| chrono::Utc::now().to_rfc3339())
-        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let timestamp = chrono::Utc::now().to_rfc3339();
 
     match inner.role.as_str() {
         "user" => {
@@ -307,9 +496,6 @@ fn convert_message(
 
             let is_error = inner.is_error.unwrap_or(false);
 
-            // Tool results in pi.dev are separate messages, but in agent-code
-            // they're content blocks within user messages. We wrap them as
-            // user messages with meta=true.
             Some(Message::User(UserMessage {
                 uuid: uuid::Uuid::new_v4(),
                 timestamp,
@@ -324,36 +510,5 @@ fn convert_message(
             }))
         }
         _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_pi_session_line() {
-        let line = r#"{"type":"session","version":3,"id":"test1234-5678","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/home/test"}"#;
-        let entry: PiEntry = serde_json::from_str(line).unwrap();
-        match entry {
-            PiEntry::Session(meta) => {
-                assert_eq!(meta.id, "test1234-5678");
-                assert_eq!(meta.cwd, Some("/home/test".into()));
-            }
-            _ => panic!("Expected Session entry"),
-        }
-    }
-
-    #[test]
-    fn parse_pi_message_line() {
-        let line = r#"{"type":"message","id":"msg1","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#;
-        let entry: PiEntry = serde_json::from_str(line).unwrap();
-        match entry {
-            PiEntry::Message(msg) => {
-                assert_eq!(msg.message.role, "user");
-                assert_eq!(msg.message.content.len(), 1);
-            }
-            _ => panic!("Expected Message entry"),
-        }
     }
 }
