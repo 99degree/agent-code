@@ -52,12 +52,12 @@ pub(crate) fn format_model_catalog(_provider: agent_code_lib::llm::provider::Pro
     let mut lines = vec![format!("Model: {current}")];
 
     // Collect all configured providers with models.
-    let mut configured: Vec<(agent_code_lib::llm::provider::ProviderKind, &str)> = Vec::new();
+    let mut configured: Vec<(agent_code_lib::llm::provider::ProviderKind, String)> = Vec::new();
     for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
         if kind.is_configured() {
             let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
             if !models.is_empty() {
-                configured.push((kind, models[0].0)); // Just check if has models
+                configured.push((kind, models[0].0.clone())); // Just check if has models
             }
         }
     }

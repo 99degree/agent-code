@@ -237,6 +237,26 @@ fn complete_from_names(names: &[&str], partial: &str) -> Vec<Pair> {
     scored.into_iter().map(|(_, p)| p).collect()
 }
 
+/// Completion candidates from String names.
+fn complete_from_names_strs(names: &[String], partial: &str) -> Vec<Pair> {
+    let mut scored: Vec<(i32, Pair)> = names
+        .iter()
+        .filter_map(|name| {
+            let score = score_command(name, &[], partial)?;
+            Some((
+                score,
+                Pair {
+                    display: name.clone(),
+                    replacement: name.clone(),
+                },
+            ))
+        })
+        .collect();
+    scored
+        .sort_by(|(sa, pa), (sb, pb)| sb.cmp(sa).then_with(|| pa.replacement.cmp(&pb.replacement)));
+    scored.into_iter().map(|(_, p)| p).collect()
+}
+
 /// Completion candidates for `/tasks <partial>`: the management
 /// subcommands, scored against `partial` with the slash-command matcher.
 fn complete_tasks_subcommand(partial: &str) -> Vec<Pair> {
@@ -576,12 +596,12 @@ impl Completer for CommandCompleter {
                 .ok()
                 .map(|ctx| {
                     let provider = agent_code_lib::llm::provider::detect_provider(&ctx.0, &ctx.1);
-                    let names: Vec<&str> =
+                    let names: Vec<String> =
                         agent_code_lib::llm::provider::models_for_provider_with_custom(provider)
                             .iter()
-                            .map(|(id, _)| *id)
+                            .map(|(id, _)| id.clone())
                             .collect();
-                    complete_from_names(&names, partial)
+                    complete_from_names_strs(&names, partial)
                 })
                 .unwrap_or_default();
             if !pairs.is_empty() {
