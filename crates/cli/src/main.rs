@@ -662,6 +662,7 @@ async fn async_main() -> anyhow::Result<()> {
             "zhipu" | "glm" | "z.ai" => ProviderKind::Zhipu,
             "nvidia" | "nim" => ProviderKind::Nvidia,
             "azure" | "azure-openai" => ProviderKind::AzureOpenAi,
+            "openrouter" | "or" => ProviderKind::OpenRouter,
             _ => detect_provider(&config.api.model, &config.api.base_url),
         },
     };
