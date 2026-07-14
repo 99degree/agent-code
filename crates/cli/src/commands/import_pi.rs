@@ -1,10 +1,23 @@
 //! Import pi.dev JSONL session files into agent-code format.
+//!
+//! Pi.dev session entry types:
+//! - `session` - Session header (id, timestamp, cwd, version)
+//! - `message` - User/assistant/toolResult/custom messages
+//! - `thinking_level_change` - Thinking level changes
+//! - `model_change` - Model changes (provider, modelId)
+//! - `compaction` - Compaction summaries (summary, firstKeptEntryId, tokensBefore)
+//! - `custom` - Extension entries (not in LLM context)
+//! - `session_info` - Session display name
+//! - `custom_message` - Extension messages (in LLM context)
+//! - `label` - Bookmarks on entries
+//! - `branch_summary` - Summary of abandoned paths
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use agent_code_lib::llm::message::{
-    AssistantMessage, ContentBlock, Message, StopReason, Usage, UserMessage,
+    AssistantMessage, ContentBlock, Message, StopReason, SystemMessage, SystemMessageType,
+    Usage, UserMessage,
 };
 use agent_code_lib::services::session::SessionData;
 
@@ -41,7 +54,6 @@ pub fn execute(args: Option<&str>, engine: &mut agent_code_lib::query::QueryEngi
                 .file_name()
                 .map(|f| f.to_string_lossy().to_string());
             if let Some(name) = search_name {
-                // Search all subdirectories for a matching file.
                 if let Ok(entries) = std::fs::read_dir(&sessions_base) {
                     for entry in entries.filter_map(|e| e.ok()) {
                         let dir = entry.path();
@@ -63,9 +75,7 @@ pub fn execute(args: Option<&str>, engine: &mut agent_code_lib::query::QueryEngi
     }
 
     match import_pi_session(&pi_path) {
-        Ok(session_id) => {
-            format!("Imported pi.dev session as agent-code session: {session_id}\nResume with: /session {session_id}")
-        }
+        Ok(result) => result,
         Err(e) => format!("Import failed: {e}"),
     }
 }
@@ -80,12 +90,12 @@ fn import_by_index(index: usize, cwd: &str) -> String {
     let session_dir = sessions_base.join(&dir_pattern);
 
     if !session_dir.exists() {
-        return format!("No pi.dev sessions found for this directory.");
+        return "No pi.dev sessions found for this directory.".into();
     }
 
     let sessions = get_session_files(&session_dir);
     if sessions.is_empty() {
-        return format!("No pi.dev sessions found for this directory.");
+        return "No pi.dev sessions found for this directory.".into();
     }
 
     if index == 0 || index > sessions.len() {
@@ -96,15 +106,12 @@ fn import_by_index(index: usize, cwd: &str) -> String {
     let full_path = session_dir.join(file_name);
 
     match import_pi_session(&full_path) {
-        Ok(session_id) => {
-            format!("Imported pi.dev session as agent-code session: {session_id}\nResume with: /session {session_id}")
-        }
+        Ok(result) => result,
         Err(e) => format!("Import failed: {e}"),
     }
 }
 
 /// Convert a directory path to pi.dev session folder name.
-/// e.g. `/data/data/com.termux/files/home/agent-code` → `--data-data-com.termux-files-home-agent-code--`
 fn cwd_to_pi_dir_name(cwd: &str) -> String {
     let dir_name = cwd.replace('/', "-");
     format!("--{dir_name}--")
@@ -118,7 +125,7 @@ fn get_pi_sessions_dir() -> Option<PathBuf> {
     })
 }
 
-/// Get sorted list of .jsonl session files with optional names.
+/// Get sorted list of .jsonl session files with optional labels.
 fn get_session_files(dir: &Path) -> Vec<(String, Option<String>)> {
     let mut entries: Vec<(String, Option<String>)> = std::fs::read_dir(dir)
         .ok()
@@ -178,15 +185,35 @@ fn file_age(path: &Path) -> String {
     let mins = (secs % 3600) / 60;
 
     if years > 0 {
-        if months > 0 { format!("{years}y{months}mo") } else { format!("{years}y") }
+        if months > 0 {
+            format!("{years}y{months}mo")
+        } else {
+            format!("{years}y")
+        }
     } else if months > 0 {
-        if weeks > 0 { format!("{months}mo{weeks}w") } else { format!("{months}mo") }
+        if weeks > 0 {
+            format!("{months}mo{weeks}w")
+        } else {
+            format!("{months}mo")
+        }
     } else if weeks > 0 {
-        if days > 0 { format!("{weeks}w{days}d") } else { format!("{weeks}w") }
+        if days > 0 {
+            format!("{weeks}w{days}d")
+        } else {
+            format!("{weeks}w")
+        }
     } else if days > 0 {
-        if hours > 0 { format!("{days}d{hours}h") } else { format!("{days}d") }
+        if hours > 0 {
+            format!("{days}d{hours}h")
+        } else {
+            format!("{days}d")
+        }
     } else if hours > 0 {
-        if mins > 0 { format!("{hours}h{mins}m") } else { format!("{hours}h") }
+        if mins > 0 {
+            format!("{hours}h{mins}m")
+        } else {
+            format!("{hours}h")
+        }
     } else if mins > 0 {
         format!("{mins}m")
     } else {
@@ -201,7 +228,10 @@ fn list_sessions_for_cwd(cwd: &str) -> String {
     };
 
     if !sessions_base.exists() {
-        return format!("No pi.dev sessions directory found at: {}", sessions_base.display());
+        return format!(
+            "No pi.dev sessions directory found at: {}",
+            sessions_base.display()
+        );
     }
 
     let dir_pattern = cwd_to_pi_dir_name(cwd);
@@ -228,7 +258,10 @@ fn list_sessions_for_cwd(cwd: &str) -> String {
         let display_name = name.strip_suffix(".jsonl").unwrap_or(name);
         let full_path = session_dir.join(name);
         let age = file_age(&full_path);
-        let label_str = label.as_deref().map(|l| format!(" \"{l}\"")).unwrap_or_default();
+        let label_str = label
+            .as_deref()
+            .map(|l| format!(" \"{l}\""))
+            .unwrap_or_default();
         out.push_str(&format!("  {}. {}{label_str} ({})\n", i + 1, display_name, age));
     }
     out.push_str("\nUse: /import-pi <number> or /import-pi <full-path>\n");
@@ -243,7 +276,7 @@ fn import_pi_session(pi_path: &Path) -> Result<String, String> {
     let mut session_meta: Option<PiSessionMeta> = None;
     let mut model_name = String::from("unknown");
     let mut messages: Vec<Message> = Vec::new();
-    let mut tool_calls: HashMap<String, String> = HashMap::new();
+    let mut _tool_calls: HashMap<String, String> = HashMap::new();
 
     for line in content.lines() {
         let line = line.trim();
@@ -262,11 +295,50 @@ fn import_pi_session(pi_path: &Path) -> Result<String, String> {
                 model_name = mc.model_id.unwrap_or_default();
             }
             PiEntry::Message(msg) => {
-                if let Some(message) = convert_message(&msg, &mut tool_calls) {
+                if let Some(message) = convert_message(&msg, &mut _tool_calls) {
                     messages.push(message);
                 }
             }
-            _ => {}
+            PiEntry::Compaction(comp) => {
+                if let Some(summary) = comp.summary {
+                    let tokens_info = comp
+                        .tokens_before
+                        .map(|t| format!(" (from {}k tokens)", t / 1000))
+                        .unwrap_or_default();
+                    messages.push(Message::System(SystemMessage {
+                        uuid: uuid::Uuid::new_v4(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        subtype: SystemMessageType::CompactBoundary,
+                        content: format!("[Compacted{tokens_info}]: {summary}"),
+                        level: agent_code_lib::llm::message::MessageLevel::Info,
+                    }));
+                }
+            }
+            PiEntry::BranchSummary(bs) => {
+                if let Some(summary) = bs.summary {
+                    messages.push(Message::System(SystemMessage {
+                        uuid: uuid::Uuid::new_v4(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        subtype: SystemMessageType::Informational,
+                        content: format!("[Branch summary]: {summary}"),
+                        level: agent_code_lib::llm::message::MessageLevel::Info,
+                    }));
+                }
+            }
+            PiEntry::SessionInfo(info) => {
+                // Use session_info name as label if no label set.
+                if session_meta.as_ref().and_then(|m| m.label.is_none().then(|| &m.id)).is_some() {
+                    if let Some(ref mut meta) = session_meta {
+                        meta.label = Some(info.name);
+                    }
+                }
+            }
+            PiEntry::ThinkingLevelChange(_)
+            | PiEntry::Custom(_)
+            | PiEntry::CustomMessage(_)
+            | PiEntry::Label(_) => {
+                // Ignored for import.
+            }
         }
     }
 
@@ -290,7 +362,7 @@ fn import_pi_session(pi_path: &Path) -> Result<String, String> {
         total_input_tokens: 0,
         total_output_tokens: 0,
         plan_mode: false,
-        label: Some("Imported from pi.dev".into()),
+        label: meta.label.or_else(|| Some("Imported from pi.dev".into())),
         tags: vec!["imported".into(), "pi".into()],
     };
 
@@ -308,8 +380,19 @@ fn import_pi_session(pi_path: &Path) -> Result<String, String> {
     std::fs::write(&session_path, &json)
         .map_err(|e| format!("Failed to write session file: {e}"))?;
 
-    Ok(session_id)
+    let label = session
+        .label
+        .as_deref()
+        .map(|l| format!(" \"{l}\""))
+        .unwrap_or_default();
+    Ok(format!(
+        "Imported pi.dev session{label} as: {session_id}\nResume with: /session {session_id}"
+    ))
 }
+
+// ============================================================================
+// Pi.dev entry types
+// ============================================================================
 
 #[derive(serde::Deserialize)]
 struct PiSessionMeta {
@@ -330,6 +413,46 @@ struct PiModelChange {
 }
 
 #[derive(serde::Deserialize)]
+struct PiCompaction {
+    #[serde(rename = "summary", default)]
+    summary: Option<String>,
+    #[serde(rename = "tokensBefore", default)]
+    tokens_before: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct PiBranchSummary {
+    #[serde(rename = "summary", default)]
+    summary: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct PiSessionInfo {
+    #[serde(rename = "name", default)]
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct PiCustom {
+    #[serde(rename = "customType", default)]
+    custom_type: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct PiCustomMessage {
+    #[serde(rename = "customType", default)]
+    custom_type: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct PiLabel {
+    #[serde(rename = "targetId", default)]
+    target_id: Option<String>,
+    #[serde(rename = "label", default)]
+    label: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
 #[serde(tag = "type")]
 enum PiEntry {
     #[serde(rename = "session")]
@@ -340,6 +463,18 @@ enum PiEntry {
     Message(PiMessage),
     #[serde(rename = "thinking_level_change")]
     ThinkingLevelChange(serde_json::Value),
+    #[serde(rename = "compaction")]
+    Compaction(PiCompaction),
+    #[serde(rename = "branch_summary")]
+    BranchSummary(PiBranchSummary),
+    #[serde(rename = "session_info")]
+    SessionInfo(PiSessionInfo),
+    #[serde(rename = "custom")]
+    Custom(PiCustom),
+    #[serde(rename = "custom_message")]
+    CustomMessage(PiCustomMessage),
+    #[serde(rename = "label")]
+    Label(PiLabel),
 }
 
 #[derive(serde::Deserialize)]
@@ -372,7 +507,9 @@ struct PiInnerMessage {
 #[serde(tag = "type")]
 enum PiContentBlock {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+    },
     #[serde(rename = "thinking")]
     Thinking {
         thinking: String,
@@ -399,6 +536,10 @@ struct PiUsage {
     cache_write: u64,
 }
 
+// ============================================================================
+// Conversion
+// ============================================================================
+
 fn convert_message(
     msg: &PiMessage,
     tool_calls: &mut HashMap<String, String>,
@@ -412,7 +553,9 @@ fn convert_message(
                 .content
                 .iter()
                 .filter_map(|cb| match cb {
-                    PiContentBlock::Text { text } => Some(ContentBlock::Text { text: text.clone() }),
+                    PiContentBlock::Text { text } => {
+                        Some(ContentBlock::Text { text: text.clone() })
+                    }
                     _ => None,
                 })
                 .collect();
@@ -443,7 +586,11 @@ fn convert_message(
                             signature: signature.clone(),
                         });
                     }
-                    PiContentBlock::ToolCall { id, name, arguments } => {
+                    PiContentBlock::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    } => {
                         tool_calls.insert(id.clone(), name.clone());
                         content.push(ContentBlock::ToolUse {
                             id: id.clone(),
