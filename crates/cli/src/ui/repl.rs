@@ -871,7 +871,7 @@ fn spawn_escape_watcher(
     engine: &QueryEngine,
     input_gate: Arc<std::sync::atomic::AtomicBool>,
 ) -> EscapeWatcherGuard {
-    let cancel_token = engine.cancel_token();
+    let cancel_handle = engine.cancel_handle();
     let steer = engine.steer_sender();
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop2 = stop.clone();
@@ -907,12 +907,12 @@ fn spawn_escape_watcher(
             {
                 match code {
                     KeyCode::Esc => {
-                        cancel_token.cancel();
+                        cancel_handle.lock().unwrap().cancel();
                         break;
                     }
                     // Also handle Ctrl+C here since raw mode intercepts it.
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                        cancel_token.cancel();
+                        cancel_handle.lock().unwrap().cancel();
                         break;
                     }
                     KeyCode::Enter => {

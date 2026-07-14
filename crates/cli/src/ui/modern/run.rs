@@ -504,6 +504,8 @@ fn is_interrupt_chord(key: &KeyEvent) -> bool {
         KeyCode::Esc => true,
         // Raw ETX (0x03) — some paths deliver the byte without CONTROL.
         KeyCode::Char('\u{3}') => true,
+        // Raw ESC (0x1b) — Termux may send the escape character directly.
+        KeyCode::Char('\u{1b}') => true,
         KeyCode::Char(c) if c.eq_ignore_ascii_case(&'c') => {
             key.modifiers.contains(KeyModifiers::CONTROL)
                 || key.modifiers.contains(KeyModifiers::SUPER)
