@@ -15,26 +15,6 @@ use super::terminal_caps::TerminalCaps;
 // `app::Modal` / `app::PendingPermission` paths keep working.
 pub use super::modal::{Modal, PendingPermission, PlanReview, QuestionState};
 
-/// Build the welcome message shown on startup.
-fn welcome_message() -> String {
-    let mut msg = "Modern TUI · Shift+Tab mode · Esc/Ctrl+C cancel turn / quit · Enter send".to_string();
-
-    // Show last session if available.
-    if let Some(last) = agent_code_lib::services::session::list_sessions(1).first() {
-        let label = last
-            .label
-            .as_deref()
-            .map(|l| format!(" \"{l}\""))
-            .unwrap_or_default();
-        msg.push_str(&format!(
-            "\nLast session: {}{label} (/session {})",
-            last.model, last.id
-        ));
-    }
-
-    msg
-}
-
 /// Local `/model` action deferred to the run loop (needs the engine lock).
 /// Classic uses an interactive stdin selector; under the alt-screen TUI we
 /// list models in the transcript and accept `/model <id>` to switch.
@@ -303,7 +283,15 @@ impl App {
             phase: Phase::Idle,
             waiting_on: WaitingOn::Model,
             modals: std::collections::VecDeque::new(),
-            transcript: vec![TranscriptItem::System(welcome_message())],
+            transcript: {
+                let mut t = vec![TranscriptItem::System(
+                    "Modern TUI · Shift+Tab mode · Esc/Ctrl+C cancel turn / quit · Enter send".into(),
+                )];
+                if let Some(last) = agent_code_lib::services::session::list_sessions(1).first() {
+                    t.push(TranscriptItem::System(format!("Last session: {}", last.id)));
+                }
+                t
+            },
             scroll: ScrollState::Follow,
             layout: LayoutCache::default(),
             viewport_h: 0,
