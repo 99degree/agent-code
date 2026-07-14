@@ -49,21 +49,19 @@ pub fn execute(args: Option<&str>, engine: &mut agent_code_lib::query::QueryEngi
     let mut pi_path = PathBuf::from(&expanded);
     if !pi_path.exists() {
         // Try searching in ~/.pi/agent/sessions/ for a matching file.
-        if let Some(sessions_base) = get_pi_sessions_dir() {
-            let search_name = Path::new(&expanded)
+        if let Some(sessions_base) = get_pi_sessions_dir()
+            && let Some(name) = Path::new(&expanded)
                 .file_name()
-                .map(|f| f.to_string_lossy().to_string());
-            if let Some(name) = search_name {
-                if let Ok(entries) = std::fs::read_dir(&sessions_base) {
-                    for entry in entries.filter_map(|e| e.ok()) {
-                        let dir = entry.path();
-                        if dir.is_dir() {
-                            let candidate = dir.join(&name);
-                            if candidate.exists() {
-                                pi_path = candidate;
-                                break;
-                            }
-                        }
+                .map(|f| f.to_string_lossy().to_string())
+            && let Ok(entries) = std::fs::read_dir(&sessions_base)
+        {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let dir = entry.path();
+                if dir.is_dir() {
+                    let candidate = dir.join(&name);
+                    if candidate.exists() {
+                        pi_path = candidate;
+                        break;
                     }
                 }
             }
