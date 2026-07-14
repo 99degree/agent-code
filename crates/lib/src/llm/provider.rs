@@ -400,6 +400,10 @@ impl ProviderKind {
                 // OPENCODE_ZEN_API_KEY → OPENCODE_API_KEY
                 std::env::var("OPENCODE_API_KEY").ok().filter(|k| !k.is_empty())
             }
+            Self::OpenCodeGo => {
+                // OPENCODE_GO_API_KEY → OPENCODE2_API_KEY
+                std::env::var("OPENCODE2_API_KEY").ok().filter(|k| !k.is_empty())
+            }
             _ => None,
         }
     }

@@ -293,44 +293,48 @@ id = "nvidia/nemotron-3-nano-30b-a3b"
 name = "Nemotron 3 Nano 30B · Fast"
 
 [[nvidia]]
-id = "nvidia/nvidia-nemotron-nano-9b-v2"
-name = "Nemotron Nano 9B · Fastest"
+id = "mistralai/mistral-large-3-675b-instruct-2512"
+name = "Mistral Large 3 (675B)"
+
+[[nvidia]]
+id = "mistralai/mistral-small-4-119b-2603"
+name = "Mistral Small 4 (119B)"
+
+[[nvidia]]
+id = "mistralai/mistral-medium-3.5-128b"
+name = "Mistral Medium 3.5 (128B)"
+
+[[nvidia]]
+id = "mistralai/ministral-14b-instruct-2512"
+name = "Ministral 14B"
+
+[[nvidia]]
+id = "deepseek-ai/deepseek-v4-pro"
+name = "DeepSeek V4 Pro"
+
+[[nvidia]]
+id = "deepseek-ai/deepseek-v4-flash"
+name = "DeepSeek V4 Flash"
+
+[[nvidia]]
+id = "z-ai/glm-5.2"
+name = "GLM 5.2"
+
+[[nvidia]]
+id = "minimaxai/minimax-m2.7"
+name = "MiniMax M2.7"
 
 [[nvidia]]
 id = "minimaxai/minimax-m3"
 name = "MiniMax M3"
 
 [[nvidia]]
-id = "moonshotai/kimi-k2.6"
-name = "Kimi K2.6"
-
-[[nvidia]]
-id = "z-ai/glm-5.2"
-name = "GLM-5.2"
-
-[[nvidia]]
-id = "meta/llama-3.3-70b-instruct"
-name = "Llama 3.3 70B"
-
-[[nvidia]]
-id = "meta/llama-3.1-8b-instruct"
-name = "Llama 3.1 8B · Fast"
-
-[[nvidia]]
-id = "openai/gpt-oss-120b"
-name = "GPT OSS 120B"
-
-[[nvidia]]
-id = "openai/gpt-oss-20b"
-name = "GPT OSS 20B · Fast"
-
-[[nvidia]]
-id = "stepfun-ai/step-3.7-flash"
-name = "Step 3.7 Flash"
+id = "qwen/qwen3.5-397b-a17b"
+name = "Qwen3.5 397B"
 
 [[nvidia]]
 id = "qwen/qwen3.5-122b-a10b"
-name = "Qwen 3.5 122B"
+name = "Qwen3.5 122B"
 
 # ============================================================================
 # OPENROUTER
@@ -438,6 +442,10 @@ name = "Codestral"
 [[openrouter]]
 id = "mistralai/devstral-2512"
 name = "Devstral"
+
+[[openrouter]]
+id = "hy3-free"
+name = "Hy3 Free"
 
 # ============================================================================
 # OPENCODE (Zen - paid)
@@ -597,10 +605,6 @@ name = "Grok 4.5"
 [[opencode]]
 id = "grok-build-0.1"
 name = "Grok Build 0.1"
-
-[[opencode]]
-id = "hy3-free"
-name = "Hy3 Free"
 
 [[opencode]]
 id = "kimi-k2.5"
