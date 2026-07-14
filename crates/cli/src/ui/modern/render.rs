@@ -345,6 +345,26 @@ fn draw_permission_modal(
         }
     }
 
+    // Show available actions so the user can see all choices.
+    let c = palette().accent;
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  [y] ", Style::default().fg(c)),
+        Span::raw("Allow once"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  [a] ", Style::default().fg(c)),
+        Span::raw("Allow for session"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  [A] ", Style::default().fg(c)),
+        Span::styled("Allow always", Style::default().add_modifier(Modifier::BOLD)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  [n] ", Style::default().fg(c)),
+        Span::raw("Deny"),
+    ]));
+
     // Keys live in a sticky footer (not the scrollable body) so long
     // descriptions / previews cannot clip them — that was leaving some
     // popups with no [y]/[n] guidance at all.
