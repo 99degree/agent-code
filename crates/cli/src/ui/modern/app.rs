@@ -48,7 +48,10 @@ pub(crate) fn parse_model_slash(input: &str) -> Option<PendingModelAction> {
 }
 
 /// Format `/model` catalog lines for the transcript (no stdin selector).
-pub(crate) fn format_model_catalog(_provider: agent_code_lib::llm::provider::ProviderKind, current: &str) -> Vec<String> {
+pub(crate) fn format_model_catalog(
+    _provider: agent_code_lib::llm::provider::ProviderKind,
+    current: &str,
+) -> Vec<String> {
     let mut lines = vec![format!("Model: {current}")];
 
     // Collect all configured providers with models.
@@ -306,7 +309,8 @@ impl App {
             modals: std::collections::VecDeque::new(),
             transcript: {
                 let mut t = vec![TranscriptItem::System(
-                    "Modern TUI · Shift+Tab mode · Esc/Ctrl+C cancel turn / quit · Enter send".into(),
+                    "Modern TUI · Shift+Tab mode · Esc/Ctrl+C cancel turn / quit · Enter send"
+                        .into(),
                 )];
                 if let Some(last) = agent_code_lib::services::session::list_sessions(1).first() {
                     t.push(TranscriptItem::System(format!("Last session: {}", last.id)));
@@ -690,7 +694,8 @@ impl App {
                 // Find provider for this model.
                 let mut found_provider = None;
                 for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
-                    let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
+                    let models =
+                        agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
                     if models.iter().any(|(n, _)| *n == name) {
                         found_provider = Some(kind);
                         break;
@@ -700,8 +705,9 @@ impl App {
                 self.model = name.clone();
                 self.status_message = format!("model → {name}");
                 if let Some(kind) = found_provider {
-                    self.transcript
-                        .push(TranscriptItem::System(format!("Model changed to: {name} [{kind:?}]")));
+                    self.transcript.push(TranscriptItem::System(format!(
+                        "Model changed to: {name} [{kind:?}]"
+                    )));
                 } else {
                     self.transcript
                         .push(TranscriptItem::System(format!("Model changed to: {name}")));
@@ -1114,7 +1120,8 @@ mod tests {
 
     #[test]
     fn format_model_catalog_marks_current() {
-        let lines = format_model_catalog(agent_code_lib::llm::provider::ProviderKind::Xai, "grok-4");
+        let lines =
+            format_model_catalog(agent_code_lib::llm::provider::ProviderKind::Xai, "grok-4");
         let joined = lines.join("\n");
         assert!(joined.contains("grok-4 ✔") || joined.contains("Model: grok-4"));
         assert!(joined.contains("Use /model") || joined.contains("Available models"));

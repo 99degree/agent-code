@@ -353,7 +353,10 @@ pub fn max_tokens_for_model(model_id: &str) -> Option<u64> {
 /// Get custom models for a provider from config.
 ///
 /// Returns empty slice if no custom models are configured.
-pub fn custom_models_for_provider(config: &ModelsConfig, kind: ProviderKind) -> &[(String, String)] {
+pub fn custom_models_for_provider(
+    _config: &ModelsConfig,
+    _kind: ProviderKind,
+) -> &[(String, String)] {
     // This is a bit awkward due to lifetime issues, so we'll return a empty slice
     // and handle the merging in the caller.
     &[]
@@ -365,7 +368,10 @@ mod tests {
 
     #[test]
     fn test_parse_provider_name() {
-        assert_eq!(parse_provider_name("anthropic"), Some(ProviderKind::Anthropic));
+        assert_eq!(
+            parse_provider_name("anthropic"),
+            Some(ProviderKind::Anthropic)
+        );
         assert_eq!(parse_provider_name("openai"), Some(ProviderKind::OpenAi));
         assert_eq!(parse_provider_name("or"), Some(ProviderKind::OpenRouter));
         assert_eq!(parse_provider_name("zen"), Some(ProviderKind::OpenCode));

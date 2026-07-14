@@ -628,6 +628,26 @@ pub(crate) const COLOR_THEME_NAMES: &[&str] = &[
     "auto",
 ];
 
+/// Run an async closure from a sync context, whether or not we're already
+/// inside a tokio runtime. Uses `block_in_place` when a runtime is present
+/// (multi-threaded), otherwise spins up a temporary runtime. This avoids the
+/// "Cannot start a runtime from within a runtime" panic when command handlers
+/// (which run synchronously inside the REPL's runtime) need to call async code.
+/// Returns the future's output (callers may ignore it).
+fn run_blocking_async<F, Fut, T>(f: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f())),
+        Err(_) => {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(f())
+        }
+    }
+}
+
 pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
     let input = input.trim_start_matches('/');
     let (cmd, args) = input
@@ -683,10 +703,9 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 engine.state().messages.as_slice(),
                 2,
             );
-            let handle = tokio::runtime::Handle::try_current();
-            if let Ok(ref h) = handle {
-                let _ = h.block_on(engine.fire_pre_compact_hooks(pre_len, estimated));
-            }
+            // Fire PreCompact hooks. block_in_place works inside the existing
+            // multi-threaded runtime; fall back to a fresh runtime if none.
+            let _ = run_blocking_async(|| engine.fire_pre_compact_hooks(pre_len, estimated));
             let freed = agent_code_lib::services::compact::microcompact(
                 &mut engine.state_mut().messages,
                 2,
@@ -701,9 +720,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             // was freed (freed == 0), firing gives hooks a chance to log
             // the no-op — /compact was still user-invoked.
             let post_len = engine.state().messages.len();
-            if let Ok(h) = handle {
-                let _ = h.block_on(engine.fire_post_compact_hooks(pre_len, post_len, freed));
-            }
+            let _ = run_blocking_async(|| engine.fire_post_compact_hooks(pre_len, post_len, freed));
             CommandResult::Handled
         }
         Some("cost") => {
@@ -757,11 +774,16 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 // Find provider for this model.
                 let mut found_provider = None;
                 for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
-                    let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
+                    let models =
+                        agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
                     if models.iter().any(|(n, _)| *n == new_model) {
                         found_provider = Some(kind);
                         if let Some(url) = kind.default_base_url() {
-                            tracing::info!("[model] Found in {:?}, setting base_url to {}", kind, url);
+                            tracing::info!(
+                                "[model] Found in {:?}, setting base_url to {}",
+                                kind,
+                                url
+                            );
                             engine.state_mut().config.api.base_url = url.to_string();
                         }
                         break;
@@ -770,12 +792,21 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 // Fallback: detect from current base_url.
                 if found_provider.is_none() {
                     let base_url = &engine.state().config.api.base_url;
-                    tracing::info!("[model] Not found in any provider list, detecting from base_url: {}", base_url);
-                    found_provider = Some(agent_code_lib::llm::provider::detect_provider(&new_model, base_url));
+                    tracing::info!(
+                        "[model] Not found in any provider list, detecting from base_url: {}",
+                        base_url
+                    );
+                    found_provider = Some(agent_code_lib::llm::provider::detect_provider(
+                        new_model, base_url,
+                    ));
                 }
                 engine.state_mut().config.api.model = new_model.to_string();
                 let final_base_url = &engine.state().config.api.base_url;
-                tracing::info!("[model] Final: model={}, base_url={}", new_model, final_base_url);
+                tracing::info!(
+                    "[model] Final: model={}, base_url={}",
+                    new_model,
+                    final_base_url
+                );
 
                 // Recreate provider with new base_url and swap it in.
                 if let Some(api_key) = engine.state().config.api.api_key.as_ref() {
@@ -799,12 +830,28 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
 
                 // Collect all configured providers with models.
                 // Store (model_name, description, provider_kind) tuples.
-                let mut all_models: Vec<(String, String, agent_code_lib::llm::provider::ProviderKind)> = Vec::new();
+                let mut all_models: Vec<(
+                    String,
+                    String,
+                    agent_code_lib::llm::provider::ProviderKind,
+                )> = Vec::new();
                 for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
                     if !kind.is_configured() {
                         continue;
                     }
-                    let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
+                    let models = {
+                        // Runtime-filter the list (e.g. OpenCode Zen only shows
+                        // models actually available for the key). Cached after
+                        // the first fetch, so repeated /model calls don't hit
+                        // the API each time. Falls back to the static source
+                        // list if the live fetch fails.
+                        let api_key = kind.api_key_from_env().unwrap_or_default();
+                        run_blocking_async(|| {
+                            agent_code_lib::llm::provider::models_for_provider_filtered(
+                                kind, &api_key,
+                            )
+                        })
+                    };
                     if models.is_empty() {
                         continue;
                     }
@@ -837,10 +884,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     let chosen = crate::ui::selector::select(&options);
                     if !chosen.is_empty() {
                         // Find the provider for this model and update base_url.
-                        if let Some((_, _, kind)) = all_models.iter().find(|(n, _, _)| n == &chosen) {
-                            if let Some(url) = kind.default_base_url() {
-                                engine.state_mut().config.api.base_url = url.to_string();
-                            }
+                        if let Some((_, _, kind)) = all_models.iter().find(|(n, _, _)| n == &chosen)
+                            && let Some(url) = kind.default_base_url()
+                        {
+                            engine.state_mut().config.api.base_url = url.to_string();
                         }
                         engine.state_mut().config.api.model = chosen.clone();
                         println!("Model changed to: {chosen}");
@@ -863,10 +910,12 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             state.total_usage.output_tokens = data.total_output_tokens;
                             state.plan_mode = restored_plan;
                             state.brief_mode = data.brief_mode;
-                            if !data.response_style.is_empty() {
-                                if let Some(style) = agent_code_lib::state::ResponseStyle::from_name(&data.response_style) {
-                                    state.response_style = style;
-                                }
+                            if !data.response_style.is_empty()
+                                && let Some(style) = agent_code_lib::state::ResponseStyle::from_name(
+                                    &data.response_style,
+                                )
+                            {
+                                state.response_style = style;
                             }
                             if !data.model.is_empty() {
                                 state.config.api.model = data.model.clone();
@@ -890,8 +939,16 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                                 &state.config.api.base_url,
                             );
                             // Re-apply model config from models.toml (max_context etc.).
-                            if let Some(max_ctx) = agent_code_lib::llm::models_config::max_context_for_model(&state.config.api.model) {
-                                tracing::info!("Model {} max_context from config: {}", state.config.api.model, max_ctx);
+                            if let Some(max_ctx) =
+                                agent_code_lib::llm::models_config::max_context_for_model(
+                                    &state.config.api.model,
+                                )
+                            {
+                                tracing::info!(
+                                    "Model {} max_context from config: {}",
+                                    state.config.api.model,
+                                    max_ctx
+                                );
                             }
                         }
                         engine.set_live_plan_mode(restored_plan);
@@ -3139,9 +3196,7 @@ fn execute_add_dir(args: Option<&str>, engine: &mut QueryEngine) {
 /// Fire `CwdChanged` hooks from the `/add-dir` subcommands. Bridges
 /// the sync command dispatcher into the async hook registry.
 fn fire_cwd_changed(engine: &QueryEngine, previous_cwd: &str) {
-    if let Ok(h) = tokio::runtime::Handle::try_current() {
-        let _ = h.block_on(engine.fire_cwd_changed_hooks(previous_cwd, "add-dir"));
-    }
+    let _ = run_blocking_async(|| engine.fire_cwd_changed_hooks(previous_cwd, "add-dir"));
 }
 
 /// Resolve a user-typed path fragment into a canonical directory path,
@@ -3230,12 +3285,9 @@ fn execute_cd(args: Option<&str>, engine: &mut QueryEngine) {
     engine.reset_system_prompt_cache();
 
     // Fire CwdChanged so file-indexer / repo-watcher hooks can retune
-    // without re-polling state. Use block_on to bridge the sync
-    // command dispatcher into the async hook registry; matches the
-    // /compact precedent.
-    if let Ok(h) = tokio::runtime::Handle::try_current() {
-        let _ = h.block_on(engine.fire_cwd_changed_hooks(&previous_cwd, "cd"));
-    }
+    // without re-polling state. Bridges the sync command dispatcher into
+    // the async hook registry.
+    let _ = run_blocking_async(|| engine.fire_cwd_changed_hooks(&previous_cwd, "cd"));
 
     println!("cwd: {new_cwd}");
 }
@@ -4754,16 +4806,10 @@ fn execute_reload(engine: &mut QueryEngine) {
     println!("System prompt cache cleared; changes take effect on next turn.");
 
     // Fire ConfigChange so external dashboards / CI watchers see the
-    // reload. Use block_on to bridge the sync dispatcher into the
-    // async hook registry; matches the /compact and /cd precedent.
-    if let Ok(h) = tokio::runtime::Handle::try_current() {
-        let _ = h.block_on(engine.fire_config_change_hooks(
-            skill_count,
-            agent_count,
-            hook_count,
-            mcp_count,
-        ));
-    }
+    // reload. Bridges the sync dispatcher into the async hook registry.
+    let _ = run_blocking_async(|| {
+        engine.fire_config_change_hooks(skill_count, agent_count, hook_count, mcp_count)
+    });
 }
 
 /// Render a one-line summary of the tool: name + first line of the
@@ -5737,10 +5783,11 @@ fn execute_session_picker(engine: &mut QueryEngine) {
                 state.total_usage.output_tokens = data.total_output_tokens;
                 state.plan_mode = restored_plan;
                 state.brief_mode = data.brief_mode;
-                if !data.response_style.is_empty() {
-                    if let Some(style) = agent_code_lib::state::ResponseStyle::from_name(&data.response_style) {
-                        state.response_style = style;
-                    }
+                if !data.response_style.is_empty()
+                    && let Some(style) =
+                        agent_code_lib::state::ResponseStyle::from_name(&data.response_style)
+                {
+                    state.response_style = style;
                 }
                 if !data.model.is_empty() {
                     state.config.api.model = data.model.clone();
@@ -5750,7 +5797,8 @@ fn execute_session_picker(engine: &mut QueryEngine) {
                 } else if !data.model.is_empty() {
                     // Fallback: detect base_url from model name.
                     for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
-                        let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
+                        let models =
+                            agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
                         if models.iter().any(|(n, _)| *n == data.model) {
                             if let Some(url) = kind.default_base_url() {
                                 state.config.api.base_url = url.to_string();
@@ -5764,8 +5812,14 @@ fn execute_session_picker(engine: &mut QueryEngine) {
                     &state.config.api.base_url,
                 );
                 // Re-apply model config from models.toml (max_context etc.).
-                if let Some(max_ctx) = agent_code_lib::llm::models_config::max_context_for_model(&state.config.api.model) {
-                    tracing::info!("Model {} max_context from config: {}", state.config.api.model, max_ctx);
+                if let Some(max_ctx) = agent_code_lib::llm::models_config::max_context_for_model(
+                    &state.config.api.model,
+                ) {
+                    tracing::info!(
+                        "Model {} max_context from config: {}",
+                        state.config.api.model,
+                        max_ctx
+                    );
                 }
             }
             engine.set_live_plan_mode(restored_plan);

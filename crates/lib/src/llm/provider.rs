@@ -15,6 +15,13 @@ use super::message::Message;
 use super::stream::StreamEvent;
 use crate::tools::ToolSchema;
 
+/// Cache of live model lists fetched from provider APIs (e.g. OpenCode Zen).
+/// Keyed by provider `toml_key()`. Populated once per provider for the life
+/// of the agent process, so switching models does not re-fetch the list.
+static LIVE_MODELS_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+> = std::sync::OnceLock::new();
+
 /// Unified provider trait. Both Anthropic and OpenAI-compatible
 /// endpoints implement this.
 #[async_trait]
@@ -100,35 +107,36 @@ impl std::fmt::Display for ProviderError {
 /// suggestions, not an allow-list — `/model <name>` accepts any string.
 pub fn models_for_provider(kind: ProviderKind) -> &'static [(String, String)] {
     use std::sync::OnceLock;
-    
-    static MODELS_DB: OnceLock<std::collections::HashMap<String, Vec<(String, String)>>> = OnceLock::new();
-    
+
+    static MODELS_DB: OnceLock<std::collections::HashMap<String, Vec<(String, String)>>> =
+        OnceLock::new();
+
     let map = MODELS_DB.get_or_init(|| {
         let toml_str = include_str!("models-db.toml");
         let mut map = std::collections::HashMap::new();
-        
+
         let mut current_section = String::new();
         let mut current_id = String::new();
-        
+
         for line in toml_str.lines() {
             let trimmed = line.trim();
-            
+
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            
+
             // Section header [[provider]]
             if trimmed.starts_with('[') && trimmed.ends_with(']') {
                 current_section = trimmed.trim_matches('[').trim_matches(']').to_string();
                 map.entry(current_section.clone()).or_insert_with(Vec::new);
                 continue;
             }
-            
+
             // Key-value pairs
             if let Some((key, value)) = trimmed.split_once('=') {
                 let key = key.trim();
                 let value = value.trim().trim_matches('"');
-                
+
                 match key {
                     "id" => current_id = value.to_string(),
                     "name" => {
@@ -140,10 +148,10 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(String, String)] {
                 }
             }
         }
-        
+
         map
     });
-    
+
     let key = kind.toml_key();
     map.get(key).map(|v| v.as_slice()).unwrap_or(&[])
 }
@@ -170,6 +178,95 @@ pub fn models_for_provider_with_custom(kind: ProviderKind) -> Vec<(String, Strin
     models
 }
 
+/// Fetch the list of models actually available from the OpenCode Zen API.
+/// Returns `None` if the request fails, so callers can fall back to the
+/// static source list. The Zen API exposes `/v1/models` and returns the
+/// free/open models currently provisioned for the key.
+pub async fn fetch_opencode_zen_live_models(api_key: &str) -> Option<Vec<String>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let resp = client
+        .get("https://opencode.ai/zen/v1/models")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let models = json
+        .get("data")?
+        .as_array()?
+        .iter()
+        .filter_map(|m| {
+            m.get("id")
+                .and_then(|id| id.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect();
+    Some(models)
+}
+
+/// Return the model list for a provider, filtered at runtime to only include
+/// models actually available from the provider's live API (when such an API
+/// exists). For OpenCode Zen this intersects the static source list with the
+/// models returned by the Zen API, so the `/model` picker only shows models
+/// the key can actually use. The source list in `models-db.toml` is never
+/// modified — filtering happens only at runtime. Other providers return their
+/// static list unchanged. If the live fetch fails, the static list is returned
+/// as a fallback.
+///
+/// The live model list is fetched once per provider and cached in memory, so
+/// switching models repeatedly does not trigger a new API request each time.
+pub async fn models_for_provider_filtered(
+    kind: ProviderKind,
+    api_key: &str,
+) -> Vec<(String, String)> {
+    let source = models_for_provider_with_custom(kind);
+    if kind != ProviderKind::OpenCode {
+        return source;
+    }
+    let cache_key = kind.toml_key().to_string();
+    // Use the cached live list if we've fetched it before.
+    let live = {
+        let cache = LIVE_MODELS_CACHE
+            .get_or_init(|| {
+                std::sync::Mutex::new(std::collections::HashMap::<String, Vec<String>>::new())
+            })
+            .lock()
+            .unwrap();
+        cache.get(&cache_key).cloned()
+    };
+    let live = match live {
+        Some(live) => live,
+        None => {
+            let fetched = fetch_opencode_zen_live_models(api_key).await;
+            match fetched {
+                Some(live) => {
+                    LIVE_MODELS_CACHE
+                        .get_or_init(|| {
+                            std::sync::Mutex::new(
+                                std::collections::HashMap::<String, Vec<String>>::new(),
+                            )
+                        })
+                        .lock()
+                        .unwrap()
+                        .insert(cache_key, live.clone());
+                    live
+                }
+                None => return source,
+            }
+        }
+    };
+    source
+        .into_iter()
+        .filter(|(id, _)| live.iter().any(|l| l.eq_ignore_ascii_case(id)))
+        .collect()
+}
+
 /// Create a provider from config (model, base_url, api_key).
 /// Used by `/model` to recreate the provider when switching models.
 pub fn create_provider_from_config(
@@ -178,26 +275,25 @@ pub fn create_provider_from_config(
     api_key: &str,
 ) -> std::sync::Arc<dyn Provider> {
     let kind = detect_provider(model, base_url);
+    // Prefer the provider-specific env var over the passed key. This ensures
+    // that switching to a provider like NVIDIA NIM (which only needs its own
+    // API key, no login) uses the correct credentials even if `config.api
+    // .api_key` holds a different provider's key.
+    let resolved_key = kind
+        .api_key_from_env()
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| api_key.to_string());
     match kind {
-        ProviderKind::AzureOpenAi => {
-            std::sync::Arc::new(crate::llm::azure_openai::AzureOpenAiProvider::new(
-                base_url,
-                api_key,
-            ))
-        }
+        ProviderKind::AzureOpenAi => std::sync::Arc::new(
+            crate::llm::azure_openai::AzureOpenAiProvider::new(base_url, &resolved_key),
+        ),
         _ => match kind.wire_format() {
-            WireFormat::Anthropic => {
-                std::sync::Arc::new(crate::llm::anthropic::AnthropicProvider::new(
-                    base_url,
-                    api_key,
-                ))
-            }
-            WireFormat::OpenAiCompatible => {
-                std::sync::Arc::new(crate::llm::openai::OpenAiProvider::new(
-                    base_url,
-                    api_key,
-                ))
-            }
+            WireFormat::Anthropic => std::sync::Arc::new(
+                crate::llm::anthropic::AnthropicProvider::new(base_url, &resolved_key),
+            ),
+            WireFormat::OpenAiCompatible => std::sync::Arc::new(
+                crate::llm::openai::OpenAiProvider::new(base_url, &resolved_key),
+            ),
         },
     }
 }
@@ -389,20 +485,24 @@ impl ProviderKind {
     /// Get API key from environment, with fallback support.
     pub fn api_key_from_env(&self) -> Option<String> {
         // Primary env var.
-        if let Ok(key) = std::env::var(self.env_var_name()) {
-            if !key.is_empty() {
-                return Some(key);
-            }
+        if let Ok(key) = std::env::var(self.env_var_name())
+            && !key.is_empty()
+        {
+            return Some(key);
         }
         // Fallback env vars.
         match self {
             Self::OpenCode => {
                 // OPENCODE_ZEN_API_KEY → OPENCODE_API_KEY
-                std::env::var("OPENCODE_API_KEY").ok().filter(|k| !k.is_empty())
+                std::env::var("OPENCODE_API_KEY")
+                    .ok()
+                    .filter(|k| !k.is_empty())
             }
             Self::OpenCodeGo => {
                 // OPENCODE_GO_API_KEY → OPENCODE2_API_KEY
-                std::env::var("OPENCODE2_API_KEY").ok().filter(|k| !k.is_empty())
+                std::env::var("OPENCODE2_API_KEY")
+                    .ok()
+                    .filter(|k| !k.is_empty())
             }
             _ => None,
         }

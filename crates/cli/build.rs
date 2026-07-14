@@ -1,6 +1,6 @@
+use std::fs;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::fs;
 
 fn main() {
     // Force this build script to re-run on every `cargo build` so the
@@ -26,7 +26,9 @@ fn main() {
         .ok()
         .and_then(|o| {
             if o.status.success() {
-                String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
             } else {
                 None
             }

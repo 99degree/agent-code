@@ -32,7 +32,7 @@ pub fn execute(args: Option<&str>, engine: &mut agent_code_lib::query::QueryEngi
     // Expand ~ to home directory.
     let expanded = if path.starts_with('~') {
         if let Some(home) = std::env::var_os("HOME") {
-            format!("{}{}", home.to_string_lossy(), &path[1..])
+            format!("{}{}", home.to_string_lossy(), path.strip_prefix('~').unwrap_or(path))
         } else {
             path.to_string()
         }

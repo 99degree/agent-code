@@ -336,7 +336,7 @@ impl OpenAiProvider {
             .json(&body)
             .build()
             .map_err(|e| ProviderError::Network(e.to_string()))?;
-        
+
         let response = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(ProviderError::Network("cancelled".into())),
@@ -389,7 +389,7 @@ impl OpenAiProvider {
             .json(&body)
             .build()
             .map_err(|e| ProviderError::Network(e.to_string()))?;
-        
+
         let response = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(ProviderError::Network("cancelled".into())),
