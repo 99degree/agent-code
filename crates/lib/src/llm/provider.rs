@@ -314,6 +314,42 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
+    /// All provider kinds (for iteration).
+    pub fn all() -> &'static [ProviderKind] {
+        &[
+            Self::Anthropic,
+            Self::OpenAi,
+            Self::Xai,
+            Self::Google,
+            Self::DeepSeek,
+            Self::Mistral,
+            Self::Nvidia,
+            Self::OpenRouter,
+            Self::Groq,
+            Self::Together,
+            Self::Zhipu,
+            Self::Cohere,
+            Self::Perplexity,
+            Self::Bedrock,
+            Self::Vertex,
+            Self::AzureOpenAi,
+            Self::OpenAiCompatible,
+        ]
+    }
+
+    /// Check if this provider has an API key configured.
+    pub fn is_configured(&self) -> bool {
+        // Skip providers that don't use simple API key auth.
+        if matches!(self, Self::Bedrock | Self::Vertex) {
+            return false;
+        }
+        // OpenAiCompatible is a fallback, not a real provider.
+        if matches!(self, Self::OpenAiCompatible) {
+            return false;
+        }
+        std::env::var(self.env_var_name()).is_ok()
+    }
+
     /// Which wire format this provider uses.
     pub fn wire_format(&self) -> WireFormat {
         match self {
