@@ -48,23 +48,37 @@ pub(crate) fn parse_model_slash(input: &str) -> Option<PendingModelAction> {
 }
 
 /// Format `/model` catalog lines for the transcript (no stdin selector).
-pub(crate) fn format_model_catalog(provider: agent_code_lib::llm::provider::ProviderKind, current: &str) -> Vec<String> {
-    let models = agent_code_lib::llm::provider::models_for_provider(provider);
+pub(crate) fn format_model_catalog(_provider: agent_code_lib::llm::provider::ProviderKind, current: &str) -> Vec<String> {
     let mut lines = vec![format!("Model: {current}")];
 
-    // Check if provider has an API key configured.
-    let env_var = provider.env_var_name();
-    let has_key = std::env::var(env_var).is_ok();
+    // Collect all configured providers with models.
+    let mut configured: Vec<(agent_code_lib::llm::provider::ProviderKind, &str)> = Vec::new();
+    for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
+        if kind.is_configured() {
+            let models = agent_code_lib::llm::provider::models_for_provider(kind);
+            if !models.is_empty() {
+                configured.push((kind, models[0].0)); // Just check if has models
+            }
+        }
+    }
 
-    if models.is_empty() {
-        lines.push("Use /model <name> to change.".into());
-    } else if !has_key {
-        lines.push(format!("Provider not configured (set {env_var} to browse models)."));
+    if configured.is_empty() {
+        lines.push("No providers configured. Set an API key to browse models.".into());
     } else {
         lines.push("Available models (use /model <id>):".into());
-        for (name, desc) in models {
-            let mark = if *name == current { " ✔" } else { "" };
-            lines.push(format!("  {name}{mark}  — {desc}"));
+        for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
+            if !kind.is_configured() {
+                continue;
+            }
+            let models = agent_code_lib::llm::provider::models_for_provider(kind);
+            if models.is_empty() {
+                continue;
+            }
+            lines.push(format!("\n  [{:?}]", kind));
+            for (name, desc) in models {
+                let mark = if *name == current { " ✔" } else { "" };
+                lines.push(format!("    {name}{mark}  — {desc}"));
+            }
         }
     }
     lines
