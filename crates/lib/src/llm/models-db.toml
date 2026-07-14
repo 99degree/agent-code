@@ -575,6 +575,10 @@ id = "glm-5.2"
 name = "GLM-5.2"
 
 [[opencode]]
+id = "hy3-free"
+name = "Hy3 Free"
+
+[[opencode]]
 id = "gpt-5"
 name = "GPT-5"
 
