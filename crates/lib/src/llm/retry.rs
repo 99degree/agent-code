@@ -20,6 +20,10 @@ pub struct RetryConfig {
     pub multiplier: f64,
     /// Maximum 529 (overloaded) retries before falling back.
     pub max_overload_retries: u32,
+    /// Maximum retry-after duration we'll accept from the API (milliseconds).
+    /// If the API specifies a longer wait, we abort instead of retrying.
+    /// Set to 0 to use the API's value regardless of duration.
+    pub max_retry_after_ms: u64,
 }
 
 impl Default for RetryConfig {
@@ -30,6 +34,7 @@ impl Default for RetryConfig {
             max_backoff: Duration::from_secs(60),
             multiplier: 2.0,
             max_overload_retries: 3,
+            max_retry_after_ms: 0,
         }
     }
 }
