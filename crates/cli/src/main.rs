@@ -53,9 +53,16 @@ fn detect_agent_kind() -> AgentKind {
     }
 }
 
+/// Returns the combined version string: `CARGO_PKG_VERSION-GIT_VERSION`.
+///
+/// `GIT_VERSION` is set by `build.rs` from `git describe --always --dirty`.
+const fn const_version() -> &'static str {
+    concat!(env!("CARGO_PKG_VERSION"), "-", env!("GIT_VERSION"))
+}
+
 /// AI-powered coding agent for the terminal.
 #[derive(Parser, Debug)]
-#[command(name = "agent", version, about)]
+#[command(name = "agent", version = const_version(), about)]
 struct Cli {
     /// Execute a single prompt and exit (non-interactive mode).
     #[arg(short, long)]
