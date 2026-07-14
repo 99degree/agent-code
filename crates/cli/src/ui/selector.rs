@@ -99,6 +99,12 @@ fn select_index(options: &[SelectOption]) -> (usize, bool) {
                     break;
                 }
                 KeyCode::Char(c) => {
+                    // 'f' is a shortcut for the third option ("Allow always")
+                    // in permission prompts.
+                    if c == 'f' && options.len() > 2 {
+                        selected = 2;
+                        break;
+                    }
                     let idx = c.to_ascii_lowercase() as usize - 'a' as usize;
                     if idx < options.len() {
                         selected = idx;
