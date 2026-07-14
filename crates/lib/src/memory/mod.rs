@@ -382,10 +382,13 @@ fn load_truncated_file(path: &Path) -> Option<String> {
     let mut was_byte_truncated = false;
 
     if result.len() > MAX_MEMORY_FILE_BYTES {
-        if let Some(pos) = result[..MAX_MEMORY_FILE_BYTES].rfind('\n') {
+        // Snap to a char boundary so the byte slice and truncate below
+        // never land inside a multi-byte UTF-8 sequence (e.g. an em dash).
+        let end = result.ceil_char_boundary(MAX_MEMORY_FILE_BYTES);
+        if let Some(pos) = result[..end].rfind('\n') {
             result.truncate(pos);
         } else {
-            result.truncate(MAX_MEMORY_FILE_BYTES);
+            result.truncate(end);
         }
         was_byte_truncated = true;
     }
@@ -673,6 +676,30 @@ mod tests {
         std::fs::write(&path, "a\n".repeat(300)).unwrap();
         let loaded = load_truncated_file(&path).unwrap();
         assert!(loaded.contains("truncated"));
+    }
+
+    #[test]
+    fn test_load_truncated_file_multibyte_boundary() {
+        // Regression: truncation must snap to a char boundary. Build a
+        // string whose 25000th byte lands inside a 3-byte em dash (—),
+        // which used to panic with "end byte index ... is not a char
+        // boundary".
+        let mut content = "a".repeat(24999);
+        content.push('—'); // bytes 24999..25002
+        content.push_str(&"b".repeat(200));
+        assert!(content.len() > MAX_MEMORY_FILE_BYTES);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multibyte.md");
+        std::fs::write(&path, &content).unwrap();
+
+        let loaded = load_truncated_file(&path).unwrap();
+        assert!(loaded.contains("truncated"));
+        // Result must be a valid prefix ending on a char boundary.
+        assert!(
+            content.starts_with(&loaded.replace("\n\n(truncated)", "")),
+            "truncated output must be a prefix of the input"
+        );
     }
 
     #[test]
