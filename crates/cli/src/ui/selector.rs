@@ -127,6 +127,9 @@ fn render_all(options: &[SelectOption], selected: usize, has_preview: bool) {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
+    // Blank separator line so options aren't glued to the banner above.
+    write!(out, "\r\n").ok();
+
     // Render options.
     for (i, opt) in options.iter().enumerate() {
         let letter = (b'A' + i as u8) as char;

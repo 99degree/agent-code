@@ -298,8 +298,8 @@ async fn event_loop(
             match engine_arc.try_lock() {
                 Ok(mut eng) => {
                     let current = eng.state().config.api.model.clone();
-                    let base_url = eng.state().config.api.base_url.clone();
-                    app.apply_model_action(action, &current, &base_url, |name| {
+                    let provider = eng.state().provider_kind;
+                    app.apply_model_action(action, provider, &current, |name| {
                         eng.state_mut().config.api.model = name;
                     });
                 }
