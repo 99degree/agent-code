@@ -873,6 +873,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                                 &state.config.api.model,
                                 &state.config.api.base_url,
                             );
+                            // Re-apply model config from models.toml (max_context etc.).
+                            if let Some(max_ctx) = agent_code_lib::llm::models_config::max_context_for_model(&state.config.api.model) {
+                                tracing::info!("Model {} max_context from config: {}", state.config.api.model, max_ctx);
+                            }
                         }
                         engine.set_live_plan_mode(restored_plan);
                         println!(
@@ -5743,6 +5747,10 @@ fn execute_session_picker(engine: &mut QueryEngine) {
                     &state.config.api.model,
                     &state.config.api.base_url,
                 );
+                // Re-apply model config from models.toml (max_context etc.).
+                if let Some(max_ctx) = agent_code_lib::llm::models_config::max_context_for_model(&state.config.api.model) {
+                    tracing::info!("Model {} max_context from config: {}", state.config.api.model, max_ctx);
+                }
             }
             engine.set_live_plan_mode(restored_plan);
             println!(

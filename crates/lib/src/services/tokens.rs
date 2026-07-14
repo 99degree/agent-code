@@ -106,6 +106,11 @@ pub fn estimate_context_tokens(messages: &[Message]) -> u64 {
 
 /// Get the context window size for a model.
 pub fn context_window_for_model(model: &str) -> u64 {
+    // First, check models.toml for custom context_window or max_context.
+    if let Some(max_ctx) = crate::llm::models_config::max_context_for_model(model) {
+        return max_ctx;
+    }
+
     let lower = model.to_lowercase();
 
     // Check for extended context variants first.
