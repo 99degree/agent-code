@@ -757,40 +757,39 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 engine.state_mut().config.api.model = new_model.to_string();
                 println!("Model changed to: {new_model}");
             } else {
-                // Interactive model selector based on configured provider.
+                // Interactive model selector showing all configured providers.
                 let current = engine.state().config.api.model.clone();
-                let base_url = engine.state().config.api.base_url.clone();
-                let provider = agent_code_lib::llm::provider::detect_provider(&current, &base_url);
 
-                let models = agent_code_lib::llm::provider::models_for_provider(provider);
-                let env_var = provider.env_var_name();
-                let has_key = std::env::var(env_var).is_ok();
+                // Collect all configured providers with models.
+                let mut all_options: Vec<crate::ui::selector::SelectOption> = Vec::new();
+                for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
+                    if !kind.is_configured() {
+                        continue;
+                    }
+                    let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                    if models.is_empty() {
+                        continue;
+                    }
+                    for (name, desc) in models {
+                        let check = if *name == current { " ✔" } else { "" };
+                        all_options.push(crate::ui::selector::SelectOption {
+                            label: format!("{name}{check}"),
+                            description: format!("[{:?}] {}", kind, desc),
+                            value: name.to_string(),
+                            preview: None,
+                        });
+                    }
+                }
 
-                if models.is_empty() {
+                if all_options.is_empty() {
                     println!("Model: {current}");
-                    println!("Use /model <name> to change.");
-                } else if !has_key {
-                    println!("Model: {current}");
-                    println!("Provider not configured (set {env_var} to browse models).");
+                    println!("No providers configured. Set an API key to browse models.");
                 } else {
                     println!();
                     println!("  Select model");
                     println!();
 
-                    let options: Vec<crate::ui::selector::SelectOption> = models
-                        .iter()
-                        .map(|(name, desc)| {
-                            let check = if *name == current { " ✔" } else { "" };
-                            crate::ui::selector::SelectOption {
-                                label: format!("{name}{check}"),
-                                description: desc.to_string(),
-                                value: name.to_string(),
-                                preview: None,
-                            }
-                        })
-                        .collect();
-
-                    let chosen = crate::ui::selector::select(&options);
+                    let chosen = crate::ui::selector::select(&all_options);
                     if !chosen.is_empty() {
                         engine.state_mut().config.api.model = chosen.clone();
                         println!("Model changed to: {chosen}");
