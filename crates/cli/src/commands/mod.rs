@@ -754,8 +754,24 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
         }
         Some("model") => {
             if let Some(new_model) = args {
+                // Find provider for this model.
+                let mut found_provider = None;
+                for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
+                    let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                    if models.iter().any(|(n, _)| *n == new_model) {
+                        found_provider = Some(kind);
+                        if let Some(url) = kind.default_base_url() {
+                            engine.state_mut().config.api.base_url = url.to_string();
+                        }
+                        break;
+                    }
+                }
                 engine.state_mut().config.api.model = new_model.to_string();
-                println!("Model changed to: {new_model}");
+                if let Some(kind) = found_provider {
+                    println!("Model changed to: {new_model} [{kind:?}]");
+                } else {
+                    println!("Model changed to: {new_model}");
+                }
             } else {
                 // Interactive model selector showing all configured providers.
                 let current = engine.state().config.api.model.clone();

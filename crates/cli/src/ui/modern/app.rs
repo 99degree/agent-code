@@ -687,11 +687,25 @@ impl App {
                 }
             }
             PendingModelAction::Set(name) => {
+                // Find provider for this model.
+                let mut found_provider = None;
+                for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
+                    let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                    if models.iter().any(|(n, _)| *n == name) {
+                        found_provider = Some(kind);
+                        break;
+                    }
+                }
                 set_model(name.clone());
                 self.model = name.clone();
                 self.status_message = format!("model → {name}");
-                self.transcript
-                    .push(TranscriptItem::System(format!("Model changed to: {name}")));
+                if let Some(kind) = found_provider {
+                    self.transcript
+                        .push(TranscriptItem::System(format!("Model changed to: {name} [{kind:?}]")));
+                } else {
+                    self.transcript
+                        .push(TranscriptItem::System(format!("Model changed to: {name}")));
+                }
             }
         }
         self.dirty = true;
