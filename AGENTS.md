@@ -70,6 +70,19 @@ cargo test -p agent-code     <test_name>          # CLI crate
 
 There is **no `rustfmt.toml` and no `clippy.toml`** — defaults only. Do not add one without discussion; style changes cascade through the whole tree. The `-D warnings` flag means any new clippy lint must be fixed, not suppressed. Prefer fixing the code; use `#[allow(...)]` only with a one-line comment explaining why.
 
+### Install (Termux/Android)
+
+After a successful build, install to both binary locations:
+
+```bash
+rm -f /data/data/com.termux/files/usr/bin/agent \
+      /data/data/com.termux/files/home/.cargo/bin/agent
+cp target/debug/agent /data/data/com.termux/files/usr/bin/agent
+cp target/debug/agent /data/data/com.termux/files/home/.cargo/bin/agent
+```
+
+Both paths must be cleaned before copying (the binary may be locked if running). The `/usr/bin` path takes precedence in `$PATH`.
+
 ---
 
 ## 3. Security rules — non-negotiable
