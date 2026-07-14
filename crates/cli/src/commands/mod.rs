@@ -761,7 +761,8 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 let current = engine.state().config.api.model.clone();
 
                 // Collect all configured providers with models.
-                let mut all_options: Vec<crate::ui::selector::SelectOption> = Vec::new();
+                // Store (model_name, description, provider_kind) tuples.
+                let mut all_models: Vec<(String, String, agent_code_lib::llm::provider::ProviderKind)> = Vec::new();
                 for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
                     if !kind.is_configured() {
                         continue;
@@ -771,17 +772,11 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         continue;
                     }
                     for (name, desc) in models {
-                        let check = if *name == current { " ✔" } else { "" };
-                        all_options.push(crate::ui::selector::SelectOption {
-                            label: format!("{name}{check}"),
-                            description: format!("[{:?}] {}", kind, desc),
-                            value: name.to_string(),
-                            preview: None,
-                        });
+                        all_models.push((name.to_string(), desc.to_string(), kind));
                     }
                 }
 
-                if all_options.is_empty() {
+                if all_models.is_empty() {
                     println!("Model: {current}");
                     println!("No providers configured. Set an API key to browse models.");
                 } else {
@@ -789,8 +784,27 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     println!("  Select model");
                     println!();
 
-                    let chosen = crate::ui::selector::select(&all_options);
+                    let options: Vec<crate::ui::selector::SelectOption> = all_models
+                        .iter()
+                        .map(|(name, desc, kind)| {
+                            let check = if *name == current { " ✔" } else { "" };
+                            crate::ui::selector::SelectOption {
+                                label: format!("{name}{check}"),
+                                description: format!("[{:?}] {}", kind, desc),
+                                value: name.to_string(),
+                                preview: None,
+                            }
+                        })
+                        .collect();
+
+                    let chosen = crate::ui::selector::select(&options);
                     if !chosen.is_empty() {
+                        // Find the provider for this model and update base_url.
+                        if let Some((_, _, kind)) = all_models.iter().find(|(n, _, _)| n == &chosen) {
+                            if let Some(url) = kind.default_base_url() {
+                                engine.state_mut().config.api.base_url = url.to_string();
+                            }
+                        }
                         engine.state_mut().config.api.model = chosen.clone();
                         println!("Model changed to: {chosen}");
                     }
