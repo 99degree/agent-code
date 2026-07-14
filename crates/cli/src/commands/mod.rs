@@ -825,9 +825,33 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             state.total_usage.input_tokens = data.total_input_tokens;
                             state.total_usage.output_tokens = data.total_output_tokens;
                             state.plan_mode = restored_plan;
+                            state.brief_mode = data.brief_mode;
+                            if !data.response_style.is_empty() {
+                                if let Some(style) = agent_code_lib::state::ResponseStyle::from_name(&data.response_style) {
+                                    state.response_style = style;
+                                }
+                            }
                             if !data.model.is_empty() {
                                 state.config.api.model = data.model.clone();
                             }
+                            if !data.base_url.is_empty() {
+                                state.config.api.base_url = data.base_url.clone();
+                            } else if !data.model.is_empty() {
+                                // Fallback: detect base_url from model name.
+                                for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
+                                    let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                                    if models.iter().any(|(n, _)| *n == data.model) {
+                                        if let Some(url) = kind.default_base_url() {
+                                            state.config.api.base_url = url.to_string();
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            state.provider_kind = agent_code_lib::llm::provider::detect_provider(
+                                &state.config.api.model,
+                                &state.config.api.base_url,
+                            );
                         }
                         engine.set_live_plan_mode(restored_plan);
                         println!(
@@ -5671,9 +5695,33 @@ fn execute_session_picker(engine: &mut QueryEngine) {
                 state.total_usage.input_tokens = data.total_input_tokens;
                 state.total_usage.output_tokens = data.total_output_tokens;
                 state.plan_mode = restored_plan;
+                state.brief_mode = data.brief_mode;
+                if !data.response_style.is_empty() {
+                    if let Some(style) = agent_code_lib::state::ResponseStyle::from_name(&data.response_style) {
+                        state.response_style = style;
+                    }
+                }
                 if !data.model.is_empty() {
                     state.config.api.model = data.model.clone();
                 }
+                if !data.base_url.is_empty() {
+                    state.config.api.base_url = data.base_url.clone();
+                } else if !data.model.is_empty() {
+                    // Fallback: detect base_url from model name.
+                    for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
+                        let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                        if models.iter().any(|(n, _)| *n == data.model) {
+                            if let Some(url) = kind.default_base_url() {
+                                state.config.api.base_url = url.to_string();
+                            }
+                            break;
+                        }
+                    }
+                }
+                state.provider_kind = agent_code_lib::llm::provider::detect_provider(
+                    &state.config.api.model,
+                    &state.config.api.base_url,
+                );
             }
             engine.set_live_plan_mode(restored_plan);
             println!(
