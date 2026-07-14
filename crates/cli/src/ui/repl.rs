@@ -837,7 +837,7 @@ impl StreamSink for TerminalSink {
     fn on_warning(&self, msg: &str) {
         let t = super::theme::current();
         raw_eprint(&format!(
-            "{} {msg}\n",
+            "\n{} {msg}\n",
             super::theme::label(" WARN ", t.warning, crossterm::style::Color::Black)
         ));
     }

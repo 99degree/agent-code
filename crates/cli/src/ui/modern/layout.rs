@@ -204,6 +204,7 @@ pub fn render_item(item: &TranscriptItem) -> Vec<Line<'static>> {
             )));
         }
         TranscriptItem::Warning(t) => {
+            lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 format!("  ! {t}"),
                 Style::default().fg(Color::Yellow),
