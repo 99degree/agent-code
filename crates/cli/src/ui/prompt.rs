@@ -64,6 +64,14 @@ pub fn ask_permission_detailed(
 
     eprintln!();
 
+    // Show available actions so the user can see all choices.
+    let c = t.accent;
+    eprintln!("  {}{}", "[y] ".with(c), "Allow once".with(t.text));
+    eprintln!("  {}{}", "[a] ".with(c), "Allow for session".with(t.text));
+    eprintln!("  {}{}", "[A] ".with(c), "Allow always".with(t.text).bold());
+    eprintln!("  {}{}", "[n] ".with(c), "Deny".with(t.text));
+    eprintln!();
+
     // Cancellable: dismissing the modal with Esc/q must Deny, not fall through
     // to the highlighted default (which is Allow) and execute the tool.
     let choice = super::selector::select_cancellable(&[
