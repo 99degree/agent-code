@@ -10,6 +10,7 @@
 //! the conversation, change settings, or execute side effects.
 
 mod heapdump;
+mod import_pi;
 mod settings_sync;
 mod uninstall;
 
@@ -203,6 +204,12 @@ pub const COMMANDS: &[Command] = &[
         name: "export",
         aliases: &[],
         description: "Export conversation as markdown",
+        hidden: false,
+    },
+    Command {
+        name: "import-pi",
+        aliases: &[],
+        description: "Import pi.dev JSONL session file",
         hidden: false,
     },
     Command {
@@ -1319,6 +1326,11 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     Err(e) => println!("Export failed: {e}"),
                 }
             }
+            CommandResult::Handled
+        }
+        Some("import-pi") => {
+            let result = import_pi::execute(args, engine);
+            println!("{result}");
             CommandResult::Handled
         }
         Some("copy") => {
