@@ -298,7 +298,7 @@ pub(super) async fn event_loop(
                     app.apply_model_action(action, provider, &current, |name| {
                         // Find the provider for this model and update base_url.
                         for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
-                            let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                            let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
                             if models.iter().any(|(n, _)| *n == name) {
                                 if let Some(url) = kind.default_base_url() {
                                     eng.state_mut().config.api.base_url = url.to_string();
