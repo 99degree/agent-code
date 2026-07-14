@@ -1049,6 +1049,13 @@ impl QueryEngine {
                         break 'acquire rx;
                     }
                     Err(e) => {
+                        // Cancelled requests (Esc/Ctrl+C) must NOT be retried —
+                        // abort the turn immediately. The provider returns
+                        // `Network("cancelled")` when the cancel token fires.
+                        if self.cancel.is_cancelled() {
+                            warn!("LLM call cancelled by user; aborting turn");
+                            return Ok(());
+                        }
                         let retryable = match &e {
                             ProviderError::RateLimited { retry_after_ms } => {
                                 crate::llm::retry::RetryableError::RateLimited {
