@@ -7,6 +7,25 @@ use serde::Deserialize;
 
 use super::provider::ProviderKind;
 
+/// Default template for models.toml.
+const DEFAULT_TEMPLATE: &str = r#"# Custom model lists per provider.
+# Models defined here are added to the built-in lists for /model.
+#
+# Each section is [provider-name.models] with id and description fields.
+# Provider names: anthropic, openai, xai, google, deepseek, mistral,
+#                 nvidia, openrouter, opencode, opencode-go, groq,
+#                 together, zhipu, cohere, perplexity
+#
+# Example:
+# [openrouter.models]
+# id = "company/llama-3-70b"
+# description = "Llama 3 70B via OpenRouter"
+#
+# [nvidia.models]
+# id = "my-org/my-model"
+# description = "Custom model on NVIDIA NIM"
+"#;
+
 /// Top-level config structure.
 #[derive(Debug, Default, Deserialize)]
 pub struct ModelsConfig {
@@ -38,20 +57,25 @@ pub struct CustomModel {
 /// Looks for `models.toml` in:
 /// 1. `$XDG_CONFIG_HOME/agent-code/models.toml`
 /// 2. `~/.config/agent-code/models.toml`
+///
+/// If the file doesn't exist, creates it with a sample template.
 pub fn load_models_config() -> ModelsConfig {
     let path = models_config_path();
     if let Some(p) = path {
-        if p.exists() {
-            match std::fs::read_to_string(&p) {
-                Ok(content) => match toml::from_str::<ModelsConfig>(&content) {
-                    Ok(config) => return config,
-                    Err(e) => {
-                        tracing::warn!("Failed to parse {}: {e}", p.display());
-                    }
-                },
+        if !p.exists() {
+            // Create default template.
+            let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
+            let _ = std::fs::write(&p, DEFAULT_TEMPLATE);
+        }
+        match std::fs::read_to_string(&p) {
+            Ok(content) => match toml::from_str::<ModelsConfig>(&content) {
+                Ok(config) => return config,
                 Err(e) => {
-                    tracing::warn!("Failed to read {}: {e}", p.display());
+                    tracing::warn!("Failed to parse {}: {e}", p.display());
                 }
+            },
+            Err(e) => {
+                tracing::warn!("Failed to read {}: {e}", p.display());
             }
         }
     }
