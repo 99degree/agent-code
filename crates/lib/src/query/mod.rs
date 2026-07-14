@@ -1186,6 +1186,8 @@ impl QueryEngine {
                                             let cwd = std::path::PathBuf::from(&self.state.cwd);
                                             let cancel = self.cancel.clone();
                                             let perm = self.permissions.clone();
+                                            let session_allows = self.session_allows.clone();
+                                            let session_allow_all = self.session_allow_all.clone();
                                             let tool_id = id.clone();
                                             let tool_name = name.clone();
                                             let tool_events = Some(tool_event_tx.clone());
@@ -1215,8 +1217,8 @@ impl QueryEngine {
                                                             denial_tracker: None,
                                                             task_manager: None,
                                                             subagent_colors: None,
-                                                            session_allows: None,
-                session_allow_all: None,
+                                                            session_allows: Some(session_allows),
+                                                            session_allow_all: Some(session_allow_all),
                                                             permission_prompter: None,
                                                             question_asker: None,
                                                             agent_origin: None,
