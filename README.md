@@ -51,6 +51,7 @@ Works with any LLM. Set one env var and go:
 | Mistral | `MISTRAL_API_KEY` | mistral-large |
 | Together | `TOGETHER_API_KEY` | meta-llama-3.1-70b |
 | Zhipu (z.ai) | `ZHIPU_API_KEY` | glm-4.7 |
+| NVIDIA (NIM) | `NVIDIA_API_KEY` | nvidia/nemotron-3-super-120b-a12b |
 | Ollama | (none) | qwen3:latest |
 | AWS Bedrock | `AGENT_CODE_USE_BEDROCK` | claude-sonnet-5 |
 | Google Vertex | `AGENT_CODE_USE_VERTEX` | claude-sonnet-5 |

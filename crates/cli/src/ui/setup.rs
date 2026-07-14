@@ -178,6 +178,30 @@ pub fn run_setup() -> Option<SetupResult> {
             preview: None,
         },
         SelectOption {
+            label: "NVIDIA (NIM)".into(),
+            description: "Nemotron, Llama, Qwen, DeepSeek — paste NVIDIA_API_KEY".into(),
+            value: "nvidia".into(),
+            preview: None,
+        },
+        SelectOption {
+            label: "OpenRouter".into(),
+            description: "Claude, GPT, Grok, Llama — 100s of models".into(),
+            value: "openrouter".into(),
+            preview: None,
+        },
+        SelectOption {
+            label: "Cohere".into(),
+            description: "Command R+ — paste COHERE_API_KEY".into(),
+            value: "cohere".into(),
+            preview: None,
+        },
+        SelectOption {
+            label: "Perplexity".into(),
+            description: "Sonar — web search, paste PERPLEXITY_API_KEY".into(),
+            value: "perplexity".into(),
+            preview: None,
+        },
+        SelectOption {
             label: "Ollama (local)".into(),
             description: "Run models locally, no API key needed".into(),
             value: "ollama".into(),
@@ -314,6 +338,26 @@ pub fn run_setup() -> Option<SetupResult> {
             "ZHIPU_API_KEY",
             "https://open.bigmodel.cn/api/paas/v4",
             "glm-4.7",
+        ),
+        "nvidia" => (
+            "NVIDIA_API_KEY",
+            "https://integrate.api.nvidia.com/v1",
+            "nvidia/nemotron-3-super-120b-a12b",
+        ),
+        "openrouter" => (
+            "OPENROUTER_API_KEY",
+            "https://openrouter.ai/api/v1",
+            "anthropic/claude-sonnet-5",
+        ),
+        "cohere" => (
+            "COHERE_API_KEY",
+            "https://api.cohere.com/v2",
+            "command-r-plus",
+        ),
+        "perplexity" => (
+            "PERPLEXITY_API_KEY",
+            "https://api.perplexity.ai",
+            "sonar-pro",
         ),
         "ollama" => ("", "http://localhost:11434/v1", "qwen3:latest"),
         "custom" => ("AGENT_CODE_API_KEY", "", ""),

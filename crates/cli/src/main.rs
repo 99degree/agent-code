@@ -661,6 +661,8 @@ async fn async_main() -> anyhow::Result<()> {
             "together" => ProviderKind::Together,
             "zhipu" | "glm" | "z.ai" => ProviderKind::Zhipu,
             "nvidia" | "nim" => ProviderKind::Nvidia,
+            "cohere" => ProviderKind::Cohere,
+            "perplexity" => ProviderKind::Perplexity,
             "azure" | "azure-openai" => ProviderKind::AzureOpenAi,
             "openrouter" | "or" => ProviderKind::OpenRouter,
             "opencode" | "oc" | "zen" => ProviderKind::OpenCode,
