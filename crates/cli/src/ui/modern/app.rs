@@ -581,7 +581,7 @@ impl App {
         if text == "/help" {
             self.transcript.push(TranscriptItem::System(
                 "Keys: Enter send · Shift+Tab mode · Esc/Ctrl+C cancel turn (again to quit) · \
-                 Ctrl+T tasks · permission prompt: y once / a session / n deny · \
+                 Ctrl+T tasks · permission prompt: y once / a session / f always / n deny · \
                  Skills: /commit /review /test /… (same as classic) · \
                  /model [id] · /clear /terminal-setup /stats /exit"
                     .into(),
