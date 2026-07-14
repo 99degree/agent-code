@@ -48,8 +48,7 @@ pub(crate) fn parse_model_slash(input: &str) -> Option<PendingModelAction> {
 }
 
 /// Format `/model` catalog lines for the transcript (no stdin selector).
-pub(crate) fn format_model_catalog(current: &str, base_url: &str) -> Vec<String> {
-    let provider = agent_code_lib::llm::provider::detect_provider(current, base_url);
+pub(crate) fn format_model_catalog(provider: agent_code_lib::llm::provider::ProviderKind, current: &str) -> Vec<String> {
     let models = agent_code_lib::llm::provider::models_for_provider(provider);
     let mut lines = vec![format!("Model: {current}")];
     if models.is_empty() {
@@ -650,13 +649,13 @@ impl App {
     pub fn apply_model_action(
         &mut self,
         action: PendingModelAction,
+        provider: agent_code_lib::llm::provider::ProviderKind,
         current_model: &str,
-        base_url: &str,
         set_model: impl FnOnce(String),
     ) {
         match action {
             PendingModelAction::Show => {
-                for line in format_model_catalog(current_model, base_url) {
+                for line in format_model_catalog(provider, current_model) {
                     self.transcript.push(TranscriptItem::System(line));
                 }
             }
@@ -1032,8 +1031,8 @@ mod tests {
         let mut engine_model = "old-model".to_string();
         app.apply_model_action(
             PendingModelAction::Set("new-model".into()),
+            agent_code_lib::llm::provider::ProviderKind::OpenAi,
             "old-model",
-            "",
             |name| engine_model = name,
         );
         assert_eq!(engine_model, "new-model");
@@ -1051,8 +1050,8 @@ mod tests {
         let before = app.transcript.len();
         app.apply_model_action(
             PendingModelAction::Show,
+            agent_code_lib::llm::provider::ProviderKind::Xai,
             "grok-4",
-            "https://api.x.ai/v1",
             |_| {},
         );
         assert!(app.transcript.len() > before);
@@ -1074,7 +1073,7 @@ mod tests {
 
     #[test]
     fn format_model_catalog_marks_current() {
-        let lines = format_model_catalog("grok-4", "https://api.x.ai/v1");
+        let lines = format_model_catalog(agent_code_lib::llm::provider::ProviderKind::Xai, "grok-4");
         let joined = lines.join("\n");
         assert!(joined.contains("grok-4 ✔") || joined.contains("Model: grok-4"));
         assert!(joined.contains("Use /model") || joined.contains("Available models"));

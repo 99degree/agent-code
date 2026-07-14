@@ -818,6 +818,10 @@ async fn async_main() -> anyhow::Result<()> {
     let permission_checker = PermissionChecker::from_config(&config.permissions)
         .with_project_root(session_env.project_root.clone());
     let mut app_state = AppState::new(config.clone());
+    // Carry the selected provider so `/model` shortlists the right catalog
+    // even for self-hosted endpoints whose URL doesn't match a provider
+    // pattern (e.g. a self-hosted NVIDIA NIM).
+    app_state.provider_kind = provider_kind;
 
     // Subagents spawned by the parent's `Agent` tool inherit the
     // parent's active disk-loaded output style via

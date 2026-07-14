@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use crate::config::Config;
 use crate::llm::message::{Message, Usage};
+use crate::llm::provider::{ProviderKind, detect_provider};
 use crate::output_styles::{AgentKind, OutputStyle};
 
 /// Preset response styles selectable via `/output-style`.
@@ -134,6 +135,11 @@ pub struct AppState {
     /// `/output-style <name>` populates this when the chosen id maps
     /// to a disk style; choosing a built-in clears it.
     pub disk_output_style: Option<OutputStyle>,
+    /// Selected provider kind (from `--provider`, or detected from the
+    /// model/base URL). Carried on state so `/model` can shortlist the
+    /// right catalog even when the base URL (e.g. a self-hosted NIM)
+    /// does not match a known provider pattern.
+    pub provider_kind: ProviderKind,
     /// Saved `config.api.model` before `/fast` swapped in the fast
     /// alternative. `Some` ⇔ currently in fast mode. Restored on the
     /// next `/fast` toggle. Session-local — not persisted.
@@ -145,6 +151,7 @@ impl AppState {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".into());
+        let provider_kind = detect_provider(&config.api.model, &config.api.base_url);
 
         Self {
             config,
@@ -170,6 +177,7 @@ impl AppState {
             response_style: ResponseStyle::default(),
             disk_output_style: None,
             pre_fast_model: None,
+            provider_kind,
         }
     }
 
