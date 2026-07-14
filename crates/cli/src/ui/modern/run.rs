@@ -300,6 +300,16 @@ async fn event_loop(
                     let current = eng.state().config.api.model.clone();
                     let provider = eng.state().provider_kind;
                     app.apply_model_action(action, provider, &current, |name| {
+                        // Find the provider for this model and update base_url.
+                        for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
+                            let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                            if models.iter().any(|(n, _)| *n == name) {
+                                if let Some(url) = kind.default_base_url() {
+                                    eng.state_mut().config.api.base_url = url.to_string();
+                                }
+                                break;
+                            }
+                        }
                         eng.state_mut().config.api.model = name;
                     });
                 }
