@@ -1180,6 +1180,15 @@ pub async fn run_repl(engine: &mut QueryEngine) -> anyhow::Result<()> {
     );
     println!("  {}   {}", "  ▘▘  ".with(t.accent), cwd.with(t.muted),);
 
+    // Show last session ID if available.
+    if let Some(last) = agent_code_lib::services::session::list_sessions(1).first() {
+        println!(
+            "  {}   {}",
+            "     ".with(t.accent),
+            format!("last: {}", last.id).with(t.muted),
+        );
+    }
+
     println!();
     println!("{}", divider.with(t.muted));
 
