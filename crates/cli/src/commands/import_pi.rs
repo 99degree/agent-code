@@ -210,15 +210,26 @@ struct ScanMeta {
     label: Option<String>,
 }
 
-/// Lightweight scan of a pi.dev JSONL file for model + message count + label.
+/// Lightweight scan - reads first ~100 lines for model/label, uses filename for label fallback.
 fn scan_session_meta(path: &Path) -> ScanMeta {
     use std::io::{BufRead, BufReader};
     let mut model: Option<String> = None;
     let mut message_count = 0usize;
     let mut label: Option<String> = None;
+
+    // Get label from filename (format: timestamp_id.jsonl -> use id as label)
+    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        if let Some(idx) = stem.rfind('_') {
+            label = Some(stem[idx+1..].to_string());
+        }
+    }
+
     if let Ok(file) = std::fs::File::open(path) {
         let reader = BufReader::new(file);
+        let mut lines_scanned = 0usize;
         for line in reader.lines().flatten() {
+            if lines_scanned >= 100 { break; }
+            lines_scanned += 1;
             let entry: PiEntry = match serde_json::from_str(&line) {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -231,15 +242,23 @@ fn scan_session_meta(path: &Path) -> ScanMeta {
                 }
                 PiEntry::Message(_) => message_count += 1,
                 PiEntry::Session(meta) => {
-                    label = meta.label;
+                    if label.is_none() {
+                        label = meta.label;
+                    }
                 }
                 PiEntry::SessionInfo(info) => {
                     if label.is_none() {
                         label = Some(info.name);
                     }
+                    break;
                 }
                 _ => {}
             }
+        }
+        // Extrapolate message count from line density
+        if message_count > 0 && lines_scanned > 0 {
+            let total_lines = std::fs::read_to_string(path).ok().map(|s| s.lines().count()).unwrap_or(lines_scanned);
+            message_count = message_count * total_lines / lines_scanned;
         }
     }
     ScanMeta { model, message_count, label }
