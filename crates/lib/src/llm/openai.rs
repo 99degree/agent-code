@@ -327,14 +327,22 @@ impl OpenAiProvider {
 
         debug!("OpenAI request to {url}");
 
-        let response = self
+        // Make the request cancellable during the send phase.
+        let cancel = request.cancel.clone();
+        let req = self
             .http
             .post(&url)
             .headers(headers)
             .json(&body)
-            .send()
-            .await
+            .build()
             .map_err(|e| ProviderError::Network(e.to_string()))?;
+        
+        let response = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ProviderError::Network("cancelled".into())),
+            resp = self.http.execute(req) => resp,
+        }
+        .map_err(|e| ProviderError::Network(e.to_string()))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -372,14 +380,22 @@ impl OpenAiProvider {
 
         debug!("OpenAI Responses request to {url}");
 
-        let response = self
+        // Make the request cancellable during the send phase.
+        let cancel = request.cancel.clone();
+        let req = self
             .http
             .post(&url)
             .headers(headers)
             .json(&body)
-            .send()
-            .await
+            .build()
             .map_err(|e| ProviderError::Network(e.to_string()))?;
+        
+        let response = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ProviderError::Network("cancelled".into())),
+            resp = self.http.execute(req) => resp,
+        }
+        .map_err(|e| ProviderError::Network(e.to_string()))?;
 
         let status = response.status();
         if !status.is_success() {
