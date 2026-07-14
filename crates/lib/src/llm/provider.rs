@@ -160,6 +160,7 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
                 "nvidia/llama-3.1-nemotron-70b-instruct",
                 "Nemotron 70B · Instruct",
             ),
+            ("minimaxai/minimax-m3", "MiniMax M3"),
         ],
         ProviderKind::OpenRouter => &[
             ("anthropic/claude-sonnet-5", "Claude Sonnet 5 · Balanced"),
