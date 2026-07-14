@@ -35,7 +35,7 @@ use tracing_subscriber::EnvFilter;
 use std::sync::Arc;
 
 use agent_code_lib::config::{ApiAuthMode, Config};
-use agent_code_lib::llm::provider::{ProviderKind, WireFormat, detect_provider};
+use agent_code_lib::llm::provider::{ProviderKind, detect_provider};
 use agent_code_lib::output_styles::AgentKind;
 use agent_code_lib::permissions::PermissionChecker;
 use agent_code_lib::query::QueryEngine;
@@ -708,28 +708,14 @@ async fn async_main() -> anyhow::Result<()> {
         }
         ApiAuthMode::ApiKey => {
             let api_key = api_key.expect("api_key is set for ApiAuthMode::ApiKey");
-            match provider_kind {
-                ProviderKind::AzureOpenAi => {
-                    Arc::new(agent_code_lib::llm::azure_openai::AzureOpenAiProvider::new(
-                        &config.api.base_url,
-                        api_key,
-                    ))
-                }
-                _ => match provider_kind.wire_format() {
-                    WireFormat::Anthropic => {
-                        Arc::new(agent_code_lib::llm::anthropic::AnthropicProvider::new(
-                            &config.api.base_url,
-                            api_key,
-                        ))
-                    }
-                    WireFormat::OpenAiCompatible => {
-                        Arc::new(agent_code_lib::llm::openai::OpenAiProvider::new(
-                            &config.api.base_url,
-                            api_key,
-                        ))
-                    }
-                },
-            }
+            // Use create_provider_from_config so the provider-specific env var
+            // (e.g. NVIDIA_API_KEY, OPENCODE_API_KEY) is preferred over the
+            // generic config.api.api_key. This matches the /model swap path.
+            agent_code_lib::llm::provider::create_provider_from_config(
+                &config.api.model,
+                &config.api.base_url,
+                api_key,
+            )
         }
     };
     tracing::info!(

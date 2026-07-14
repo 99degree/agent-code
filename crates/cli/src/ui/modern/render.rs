@@ -358,7 +358,10 @@ fn draw_permission_modal(
     ]));
     lines.push(Line::from(vec![
         Span::styled("  [f] ", Style::default().fg(c)),
-        Span::styled("Allow always", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Allow always",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  [n] ", Style::default().fg(c)),
