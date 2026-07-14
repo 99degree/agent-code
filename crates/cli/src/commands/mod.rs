@@ -763,10 +763,15 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 let provider = agent_code_lib::llm::provider::detect_provider(&current, &base_url);
 
                 let models = agent_code_lib::llm::provider::models_for_provider(provider);
+                let env_var = provider.env_var_name();
+                let has_key = std::env::var(env_var).is_ok();
 
                 if models.is_empty() {
                     println!("Model: {current}");
                     println!("Use /model <name> to change.");
+                } else if !has_key {
+                    println!("Model: {current}");
+                    println!("Provider not configured (set {env_var} to browse models).");
                 } else {
                     println!();
                     println!("  Select model");
