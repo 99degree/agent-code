@@ -489,7 +489,7 @@ struct PiMessage {
 struct PiInnerMessage {
     #[serde(rename = "role")]
     role: String,
-    #[serde(rename = "content")]
+    #[serde(rename = "content", default)]
     content: Vec<PiContentBlock>,
     #[serde(rename = "model", default)]
     model: Option<String>,
@@ -501,6 +501,13 @@ struct PiInnerMessage {
     tool_call_id: Option<String>,
     #[serde(rename = "isError", default)]
     is_error: Option<bool>,
+    // bashExecution fields
+    #[serde(rename = "command", default)]
+    command: Option<String>,
+    #[serde(rename = "output", default)]
+    output: Option<String>,
+    #[serde(rename = "exitCode", default)]
+    exit_code: Option<i32>,
 }
 
 #[derive(serde::Deserialize)]
@@ -648,6 +655,31 @@ fn convert_message(
                 timestamp,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: tool_call_id,
+                    content: text,
+                    is_error,
+                    extra_content: vec![],
+                }],
+                is_meta: true,
+                is_compact_summary: false,
+            }))
+        }
+        "bashExecution" => {
+            // Convert bashExecution to a user message with tool result.
+            let cmd = inner.command.as_deref().unwrap_or("unknown");
+            let output = inner.output.as_deref().unwrap_or("");
+            let exit_code = inner.exit_code.unwrap_or(0);
+            let is_error = exit_code != 0;
+            let text = if output.is_empty() {
+                format!("Command exited with code {exit_code}")
+            } else {
+                output.to_string()
+            };
+
+            Some(Message::User(UserMessage {
+                uuid: uuid::Uuid::new_v4(),
+                timestamp,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: format!("bash-{cmd}"),
                     content: text,
                     is_error,
                     extra_content: vec![],
