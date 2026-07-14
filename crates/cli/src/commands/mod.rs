@@ -761,6 +761,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     if models.iter().any(|(n, _)| *n == new_model) {
                         found_provider = Some(kind);
                         if let Some(url) = kind.default_base_url() {
+                            tracing::info!("[model] Found in {:?}, setting base_url to {}", kind, url);
                             engine.state_mut().config.api.base_url = url.to_string();
                         }
                         break;
@@ -769,9 +770,12 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 // Fallback: detect from current base_url.
                 if found_provider.is_none() {
                     let base_url = &engine.state().config.api.base_url;
+                    tracing::info!("[model] Not found in any provider list, detecting from base_url: {}", base_url);
                     found_provider = Some(agent_code_lib::llm::provider::detect_provider(&new_model, base_url));
                 }
                 engine.state_mut().config.api.model = new_model.to_string();
+                let final_base_url = &engine.state().config.api.base_url;
+                tracing::info!("[model] Final: model={}, base_url={}", new_model, final_base_url);
                 if let Some(kind) = found_provider {
                     println!("Model changed to: {new_model} [{kind:?}]");
                 } else {
