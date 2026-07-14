@@ -227,7 +227,7 @@ fn scan_session_meta(path: &Path) -> ScanMeta {
     if let Ok(file) = std::fs::File::open(path) {
         let reader = BufReader::new(file);
         let mut lines_scanned = 0usize;
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if lines_scanned >= 100 { break; }
             lines_scanned += 1;
             let entry: PiEntry = match serde_json::from_str(&line) {
