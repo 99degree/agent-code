@@ -55,7 +55,7 @@ pub struct QueryEngineConfig {
 /// Manages conversation history, context compaction, tool execution,
 /// error recovery, and hook dispatch. Create via [`QueryEngine::new`].
 pub struct QueryEngine {
-    llm: Arc<dyn Provider>,
+    llm: tokio::sync::RwLock<Arc<dyn Provider>>,
     tools: ToolRegistry,
     file_cache: Arc<tokio::sync::Mutex<crate::services::file_cache::FileCache>>,
     permissions: Arc<PermissionChecker>,
@@ -196,7 +196,7 @@ impl QueryEngine {
         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
         let live_plan_mode = Arc::new(std::sync::atomic::AtomicBool::new(state.plan_mode));
         Self {
-            llm,
+            llm: tokio::sync::RwLock::new(llm),
             tools,
             file_cache: Arc::new(tokio::sync::Mutex::new(
                 crate::services::file_cache::FileCache::new(),
@@ -235,6 +235,26 @@ impl QueryEngine {
     /// Live plan-mode flag (lock-free mid-turn updates).
     pub fn live_plan_mode_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
         self.live_plan_mode.clone()
+    }
+
+    /// Swap the LLM provider (e.g. after `/model` changes the base URL).
+    pub async fn set_provider(&self, provider: Arc<dyn Provider>) {
+        *self.llm.write().await = provider;
+    }
+
+    /// Swap the LLM provider synchronously (for use in sync command handlers).
+    pub fn set_provider_sync(&self, provider: Arc<dyn Provider>) {
+        // Use try_write since we might be inside a tokio runtime.
+        if let Ok(mut guard) = self.llm.try_write() {
+            *guard = provider;
+        } else {
+            tracing::warn!("Could not swap provider: lock held");
+        }
+    }
+
+    /// Get the current provider name.
+    pub async fn provider_name(&self) -> String {
+        self.llm.read().await.name().to_string()
     }
 
     /// Set plan mode for the next permission / executor check without
@@ -854,9 +874,10 @@ impl QueryEngine {
                 if post_mc_tokens >= threshold {
                     // Full LLM-based compaction: summarize older messages.
                     info!("Microcompact insufficient, attempting LLM compaction");
+                    let llm_guard = self.llm.read().await;
                     match compact::compact_with_llm(
                         &mut self.state.messages,
-                        &*self.llm,
+                        llm_guard.as_ref(),
                         &model,
                         self.cancel.clone(),
                     )
@@ -1022,7 +1043,7 @@ impl QueryEngine {
                     cancel: self.cancel.clone(),
                 };
 
-                match self.llm.stream(&request).await {
+                match self.llm.read().await.stream(&request).await {
                     Ok(rx) => {
                         retry_state.reset();
                         break 'acquire rx;
@@ -1426,7 +1447,7 @@ impl QueryEngine {
                 {
                     let extraction_messages = self.state.messages.clone();
                     let extraction_state = self.extraction_state.clone();
-                    let extraction_llm = self.llm.clone();
+                    let extraction_llm = self.llm.read().await.clone();
                     let extraction_model = model.clone();
                     tokio::spawn(async move {
                         crate::memory::extraction::extract_memories_background(

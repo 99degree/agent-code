@@ -268,6 +268,38 @@ pub fn models_for_provider_with_custom(kind: ProviderKind) -> Vec<(&'static str,
     models
 }
 
+/// Create a provider from config (model, base_url, api_key).
+/// Used by `/model` to recreate the provider when switching models.
+pub fn create_provider_from_config(
+    model: &str,
+    base_url: &str,
+    api_key: &str,
+) -> std::sync::Arc<dyn Provider> {
+    let kind = detect_provider(model, base_url);
+    match kind {
+        ProviderKind::AzureOpenAi => {
+            std::sync::Arc::new(crate::llm::azure_openai::AzureOpenAiProvider::new(
+                base_url,
+                api_key,
+            ))
+        }
+        _ => match kind.wire_format() {
+            WireFormat::Anthropic => {
+                std::sync::Arc::new(crate::llm::anthropic::AnthropicProvider::new(
+                    base_url,
+                    api_key,
+                ))
+            }
+            WireFormat::OpenAiCompatible => {
+                std::sync::Arc::new(crate::llm::openai::OpenAiProvider::new(
+                    base_url,
+                    api_key,
+                ))
+            }
+        },
+    }
+}
+
 pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     let model_lower = model.to_lowercase();
     let url_lower = base_url.to_lowercase();

@@ -776,6 +776,18 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 engine.state_mut().config.api.model = new_model.to_string();
                 let final_base_url = &engine.state().config.api.base_url;
                 tracing::info!("[model] Final: model={}, base_url={}", new_model, final_base_url);
+
+                // Recreate provider with new base_url and swap it in.
+                if let Some(api_key) = engine.state().config.api.api_key.as_ref() {
+                    let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
+                        new_model,
+                        final_base_url,
+                        api_key,
+                    );
+                    engine.set_provider_sync(new_provider);
+                    tracing::info!("[model] Provider swapped to match new model");
+                }
+
                 if let Some(kind) = found_provider {
                     println!("Model changed to: {new_model} [{kind:?}]");
                 } else {
