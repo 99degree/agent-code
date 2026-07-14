@@ -766,6 +766,11 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         break;
                     }
                 }
+                // Fallback: detect from current base_url.
+                if found_provider.is_none() {
+                    let base_url = &engine.state().config.api.base_url;
+                    found_provider = Some(agent_code_lib::llm::provider::detect_provider(&new_model, base_url));
+                }
                 engine.state_mut().config.api.model = new_model.to_string();
                 if let Some(kind) = found_provider {
                     println!("Model changed to: {new_model} [{kind:?}]");
