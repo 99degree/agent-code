@@ -29,6 +29,9 @@ pub struct SessionData {
     pub cwd: String,
     /// Model used in this session.
     pub model: String,
+    /// Base URL for the provider.
+    #[serde(default)]
+    pub base_url: String,
     /// Conversation messages.
     pub messages: Vec<Message>,
     /// Total turns completed.
@@ -45,6 +48,12 @@ pub struct SessionData {
     /// Whether plan mode was active.
     #[serde(default)]
     pub plan_mode: bool,
+    /// Brief mode setting.
+    #[serde(default)]
+    pub brief_mode: bool,
+    /// Response style name.
+    #[serde(default)]
+    pub response_style: String,
     /// Optional human-readable label set via `/rename`. Not used for
     /// lookup — the session ID is still the primary key — but shown
     /// in `/sessions` and the resume picker.
@@ -81,7 +90,7 @@ pub fn save_session(
     turn_count: usize,
 ) -> Result<PathBuf, String> {
     save_session_full(
-        session_id, messages, cwd, model, turn_count, 0.0, 0, 0, false,
+        session_id, messages, cwd, model, turn_count, 0.0, 0, 0, false, false, "", "",
     )
 }
 
@@ -97,6 +106,9 @@ pub fn save_session_full(
     total_input_tokens: u64,
     total_output_tokens: u64,
     plan_mode: bool,
+    brief_mode: bool,
+    response_style: &str,
+    base_url: &str,
 ) -> Result<PathBuf, String> {
     let dir = sessions_dir().ok_or("Could not determine sessions directory")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create sessions dir: {e}"))?;
@@ -122,12 +134,15 @@ pub fn save_session_full(
         updated_at: chrono::Utc::now().to_rfc3339(),
         cwd: cwd.to_string(),
         model: model.to_string(),
+        base_url: base_url.to_string(),
         messages: messages.to_vec(),
         turn_count,
         total_cost_usd,
         total_input_tokens,
         total_output_tokens,
         plan_mode,
+        brief_mode,
+        response_style: response_style.to_string(),
         label,
         tags,
     };

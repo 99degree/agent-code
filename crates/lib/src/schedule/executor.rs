@@ -156,6 +156,9 @@ impl ScheduleExecutor {
             state.total_usage.input_tokens,
             state.total_usage.output_tokens,
             false,
+            state.brief_mode,
+            state.response_style.name(),
+            &state.config.api.base_url,
         );
 
         // Truncate summary.
