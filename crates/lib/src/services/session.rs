@@ -851,6 +851,9 @@ mod tests {
             brief_mode: false,
             response_style: String::new(),
             label: None,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             tags: Vec::new(),
         }
     }
@@ -913,6 +916,9 @@ mod tests {
             brief_mode: false,
             response_style: String::new(),
             label: None,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             tags: Vec::new(),
         };
         let json = serde_json::to_string_pretty(&data).unwrap();
@@ -946,6 +952,9 @@ mod tests {
             brief_mode: false,
             response_style: String::new(),
             label: None,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             tags: Vec::new(),
         };
 
@@ -978,6 +987,9 @@ mod tests {
             brief_mode: false,
             response_style: String::new(),
             label: None,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             tags: Vec::new(),
         };
         let out = serialize_masked(&data).unwrap();
@@ -1010,6 +1022,9 @@ mod tests {
             brief_mode: false,
             response_style: String::new(),
             label: None,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             tags: Vec::new(),
         };
         let out = serialize_masked(&data).unwrap();
@@ -1039,6 +1054,9 @@ mod tests {
             brief_mode: false,
             response_style: String::new(),
             label: None,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             tags: Vec::new(),
         };
         let out = serialize_masked(&data).unwrap();
@@ -1080,6 +1098,9 @@ mod tests {
                 brief_mode: false,
                 response_style: String::new(),
                 label: None,
+                base_url: String::new(),
+                brief_mode: false,
+                response_style: String::new(),
                 tags: Vec::new(),
             };
             let out = serialize_masked(&data).unwrap();
@@ -1188,6 +1209,9 @@ mod tests {
             brief_mode: false,
             response_style: String::new(),
             label: None,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             tags: Vec::new(),
         };
         let out = serialize_masked(&data).unwrap();
@@ -1213,6 +1237,9 @@ mod tests {
             brief_mode: false,
             response_style: String::new(),
             label: Some("refactor pass".into()),
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             tags: Vec::new(),
         };
         let json = serde_json::to_string(&data).unwrap();
@@ -1307,6 +1334,9 @@ mod tests {
             brief_mode: false,
             response_style: String::new(),
             label: None,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             tags: Vec::new(),
         };
         let json = serde_json::to_string_pretty(&data).unwrap();
