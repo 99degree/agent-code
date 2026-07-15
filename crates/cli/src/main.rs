@@ -152,6 +152,10 @@ struct Cli {
     #[arg(long)]
     acp: bool,
 
+    /// Resume a specific session by ID.
+    #[arg(long, short = 's')]
+    session: Option<String>,
+
     /// Interactive TUI surface: `modern` (fullscreen ratatui, default) or
     /// `classic` (rustyline REPL). Overrides `[ui] tui` and `AGENT_CODE_TUI`.
     #[arg(long, value_name = "KIND")]
@@ -964,6 +968,61 @@ async fn async_main() -> anyhow::Result<()> {
         );
     }
 
+    // Resume session if --session was provided.
+    if let Some(ref session_id) = cli.session {
+        match agent_code_lib::services::session::load_session(session_id) {
+            Ok(data) => {
+                let restored_plan = data.plan_mode;
+                {
+                    let state = engine.state_mut();
+                    state.messages = data.messages;
+                    state.turn_count = data.turn_count;
+                    state.total_cost_usd = data.total_cost_usd;
+                    state.total_usage.input_tokens = data.total_input_tokens;
+                    state.total_usage.output_tokens = data.total_output_tokens;
+                    state.plan_mode = restored_plan;
+                    state.brief_mode = data.brief_mode;
+                    if !data.response_style.is_empty()
+                        && let Some(style) = agent_code_lib::state::ResponseStyle::from_name(
+                            &data.response_style,
+                        )
+                    {
+                        state.response_style = style;
+                    }
+                    if !data.model.is_empty() {
+                        state.config.api.model = data.model.clone();
+                    }
+                    if !data.base_url.is_empty() {
+                        state.config.api.base_url = data.base_url.clone();
+                    }
+                    state.provider_kind = agent_code_lib::llm::provider::detect_provider(
+                        &state.config.api.model,
+                        &state.config.api.base_url,
+                    );
+                    // Re-apply model config from models.toml (max_context etc.).
+                    if let Some(max_ctx) =
+                        agent_code_lib::llm::models_config::max_context_for_model(
+                            &state.config.api.model,
+                        )
+                    {
+                        state.config.api.max_context = Some(max_ctx);
+                    }
+                }
+                // Recreate provider with restored base_url.
+                let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
+                    &engine.state().config.api.model,
+                    &engine.state().config.api.base_url,
+                    &engine.state().config,
+                );
+                engine.set_provider_sync(new_provider);
+                eprintln!("Resumed session: {}", &session_id[..session_id.len().min(12)]);
+            }
+            Err(e) => {
+                eprintln!("Failed to resume session {}: {e}", &session_id[..session_id.len().min(12)]);
+            }
+        }
+    }
+
     // Install Ctrl+C handler for graceful cancellation.
     engine.install_signal_handler();
 
@@ -1064,6 +1123,10 @@ async fn async_main() -> anyhow::Result<()> {
             }
             let tui_kind =
                 ui::modern::resolve_tui_kind(cli.tui.as_deref(), &engine.state().config.ui.tui);
+
+            // Capture session_id before TUI takes ownership.
+            let session_id = engine.state().session_id.clone();
+
             match tui_kind {
                 ui::modern::TuiKind::Modern => {
                     // Modern TUI takes ownership of the engine via Session
@@ -1084,6 +1147,11 @@ async fn async_main() -> anyhow::Result<()> {
             if let Ok(Some(check)) = update_handle.await {
                 update::print_update_hint(&check);
             }
+
+            // Print goodbye message with session resume command.
+            let short_id: String = session_id.chars().take(12).collect();
+            eprintln!("\nGoodbye. Session: {short_id}");
+            eprintln!("Resume: agent --session {short_id}");
         }
     }
 
