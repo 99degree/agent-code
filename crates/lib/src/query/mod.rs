@@ -782,7 +782,9 @@ impl QueryEngine {
             )
             .await;
 
-        let max_turns = self.config.max_turns.unwrap_or(50);
+        let max_turns = self.config.max_turns
+            .or(self.state.config.api.max_turns)
+            .unwrap_or(50);
         let mut compact_tracking = CompactTracking::default();
         let mut retry_state = crate::llm::retry::RetryState::default();
         let retry_config = crate::llm::retry::RetryConfig {
