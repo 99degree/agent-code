@@ -990,18 +990,21 @@ async fn async_main() -> anyhow::Result<()> {
                     }
                     if !data.base_url.is_empty() {
                         state.config.api.base_url = data.base_url.clone();
+                    } else if !data.model.is_empty() {
+                        // Session didn't store a base_url — the one from
+                        // settings.toml may belong to a different provider.
+                        // Clear it so the catalog lookup below resolves the
+                        // correct URL for the session's model.
+                        state.config.api.base_url.clear();
                     }
-                    // If base_url is still empty, try to find the provider
-                    // from the model catalog (model name → provider kind).
-                    if state.config.api.base_url.is_empty() {
-                        for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
-                            let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
-                            if models.iter().any(|(n, _)| n == &state.config.api.model) {
-                                if let Some(url) = kind.default_base_url() {
-                                    state.config.api.base_url = url.to_string();
-                                }
-                                break;
+                    // Find the provider from the model catalog (model name → provider kind).
+                    for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
+                        let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
+                        if models.iter().any(|(n, _)| n == &state.config.api.model) {
+                            if let Some(url) = kind.default_base_url() {
+                                state.config.api.base_url = url.to_string();
                             }
+                            break;
                         }
                     }
                     state.provider_kind = agent_code_lib::llm::provider::detect_provider(
