@@ -367,6 +367,20 @@ pub(super) async fn event_loop(
             }
         }
 
+        // Apply deferred `/normalize`. try_lock so it doesn't block the UI.
+        if app.pending_normalize {
+            let engine_arc = session.engine();
+            match engine_arc.try_lock() {
+                Ok(mut eng) => {
+                    app.apply_normalize_action(&mut eng);
+                    app.pending_normalize = false;
+                }
+                Err(_) => {
+                    // Retry next iteration.
+                }
+            }
+        }
+
         // Start a pending turn if idle.
         if turn.is_none()
             && let Some(prompt) = app.pending_submit.take()

@@ -95,6 +95,17 @@ pub fn validate_alternation(messages: &[Message]) -> Result<(), String> {
     Ok(())
 }
 
+/// Convenience wrapper: run the full normalization suite on a message
+/// vector. Call this after loading messages from disk (session resume,
+/// history import) to guarantee API-compatible alternation.
+pub fn normalize_messages(messages: &mut Vec<Message>) {
+    ensure_tool_result_pairing(messages);
+    strip_empty_blocks(messages);
+    remove_empty_messages(messages);
+    cap_document_blocks(messages, 500_000);
+    merge_consecutive_user_messages(messages);
+}
+
 /// Remove empty messages (messages with no content blocks after stripping).
 pub fn remove_empty_messages(messages: &mut Vec<Message>) {
     messages.retain(|msg| match msg {
@@ -147,6 +158,119 @@ pub fn merge_consecutive_user_messages(messages: &mut Vec<Message>) {
             i += 1;
         }
     }
+}
+
+/// Report of changes made during a normalization pass.
+#[derive(Debug, Default, Clone)]
+pub struct NormalizeReport {
+    /// Orphaned tool_use blocks that got synthetic error tool_results.
+    pub tool_results_added: usize,
+    /// Empty text blocks removed from messages.
+    pub empty_blocks_removed: usize,
+    /// Messages removed because they had no content blocks.
+    pub empty_messages_removed: usize,
+    /// Oversized document blocks capped to text placeholders.
+    pub documents_capped: usize,
+    /// Consecutive user messages merged into one.
+    pub consecutive_user_merged: usize,
+}
+
+impl std::fmt::Display for NormalizeReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut parts = Vec::new();
+        if self.tool_results_added > 0 {
+            parts.push(format!(
+                "{} orphaned tool calls repaired",
+                self.tool_results_added
+            ));
+        }
+        if self.empty_blocks_removed > 0 {
+            parts.push(format!("{} empty blocks removed", self.empty_blocks_removed));
+        }
+        if self.empty_messages_removed > 0 {
+            parts.push(format!(
+                "{} empty messages removed",
+                self.empty_messages_removed
+            ));
+        }
+        if self.documents_capped > 0 {
+            parts.push(format!(
+                "{} oversized documents capped",
+                self.documents_capped
+            ));
+        }
+        if self.consecutive_user_merged > 0 {
+            parts.push(format!(
+                "{} consecutive user messages merged",
+                self.consecutive_user_merged
+            ));
+        }
+        if parts.is_empty() {
+            write!(f, "Session messages are already normalized.")
+        } else {
+            write!(f, "Normalized: {}", parts.join(", "))
+        }
+    }
+}
+
+/// Run the full normalization suite and return a report of what changed.
+/// This is the diagnostic version of [`normalize_messages`] — it counts
+/// every mutation so callers can display a summary.
+pub fn normalize_all(messages: &mut Vec<Message>) -> NormalizeReport {
+    let mut report = NormalizeReport::default();
+
+    // 1. Tool-result pairing.
+    let before = messages.len();
+    ensure_tool_result_pairing(messages);
+    report.tool_results_added = messages.len() - before;
+
+    // 2. Strip empty text blocks.
+    let before = count_text_blocks(messages);
+    strip_empty_blocks(messages);
+    report.empty_blocks_removed = before.saturating_sub(count_text_blocks(messages));
+
+    // 3. Remove empty messages.
+    let before = messages.len();
+    remove_empty_messages(messages);
+    report.empty_messages_removed = before.saturating_sub(messages.len());
+
+    // 4. Cap oversized documents.
+    let before = count_document_blocks(messages);
+    cap_document_blocks(messages, 500_000);
+    report.documents_capped = before.saturating_sub(count_document_blocks(messages));
+
+    // 5. Merge consecutive user messages.
+    let before = messages.len();
+    merge_consecutive_user_messages(messages);
+    report.consecutive_user_merged = before.saturating_sub(messages.len());
+
+    report
+}
+
+fn count_text_blocks(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::User(u) => Some(u.content.as_slice()),
+            Message::Assistant(a) => Some(a.content.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|b| matches!(b, ContentBlock::Text { .. }))
+        .count()
+}
+
+fn count_document_blocks(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::User(u) => Some(u.content.as_slice()),
+            Message::Assistant(a) => Some(a.content.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|b| matches!(b, ContentBlock::Document { .. }))
+        .count()
 }
 
 #[cfg(test)]
@@ -535,5 +659,125 @@ mod tests {
                 panic!("Expected text block after capping");
             }
         }
+    }
+
+    #[test]
+    fn test_normalize_all_orphaned_tool_calls() {
+        let mut messages = vec![
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "call_1".into(),
+                        name: "Bash".into(),
+                        input: serde_json::json!({}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call_2".into(),
+                        name: "FileRead".into(),
+                        input: serde_json::json!({}),
+                    },
+                ],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+
+        let report = normalize_all(&mut messages);
+        assert_eq!(report.tool_results_added, 2);
+        assert_eq!(messages.len(), 3);
+    }
+
+    #[test]
+    fn test_normalize_all_empty_blocks_and_messages() {
+        let mut messages = vec![
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![
+                    ContentBlock::Text {
+                        text: "".into(),
+                    },
+                    ContentBlock::Text {
+                        text: "keep".into(),
+                    },
+                ],
+                is_meta: false,
+                is_compact_summary: false,
+            }),
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![],
+                is_meta: false,
+                is_compact_summary: false,
+            }),
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::Text {
+                    text: "also keep".into(),
+                }],
+                is_meta: false,
+                is_compact_summary: false,
+            }),
+        ];
+
+        let report = normalize_all(&mut messages);
+        assert!(report.empty_blocks_removed >= 1);
+        assert!(report.empty_messages_removed >= 1);
+        assert!(report.consecutive_user_merged >= 1);
+    }
+
+    #[test]
+    fn test_normalize_all_already_clean() {
+        let mut messages = vec![
+            user_message("hello"),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::Text {
+                    text: "hi".into(),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+            user_message("bye"),
+        ];
+
+        let report = normalize_all(&mut messages);
+        assert_eq!(report.tool_results_added, 0);
+        assert_eq!(report.empty_blocks_removed, 0);
+        assert_eq!(report.empty_messages_removed, 0);
+        assert_eq!(report.consecutive_user_merged, 0);
+    }
+
+    #[test]
+    fn test_normalize_report_display() {
+        let report = NormalizeReport {
+            tool_results_added: 2,
+            empty_blocks_removed: 1,
+            empty_messages_removed: 0,
+            documents_capped: 0,
+            consecutive_user_merged: 3,
+        };
+        let s = report.to_string();
+        assert!(s.contains("2 orphaned tool calls repaired"));
+        assert!(s.contains("1 empty blocks removed"));
+        assert!(s.contains("3 consecutive user messages merged"));
+    }
+
+    #[test]
+    fn test_normalize_report_display_clean() {
+        let report = NormalizeReport::default();
+        assert_eq!(
+            report.to_string(),
+            "Session messages are already normalized."
+        );
     }
 }

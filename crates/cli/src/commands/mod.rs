@@ -953,9 +953,12 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 match agent_code_lib::services::session::load_session(id) {
                     Ok(data) => {
                         let restored_plan = data.plan_mode;
+                        let normalize_report;
                         {
                             let state = engine.state_mut();
                             state.messages = data.messages;
+                            normalize_report =
+                                agent_code_lib::llm::normalize::normalize_all(&mut state.messages);
                             state.turn_count = data.turn_count;
                             state.total_cost_usd = data.total_cost_usd;
                             state.total_usage.input_tokens = data.total_input_tokens;
@@ -1032,6 +1035,9 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             data.turn_count,
                             data.total_cost_usd,
                         );
+                        if !normalize_report.to_string().contains("already normalized") {
+                            println!("{}", normalize_report);
+                        }
                     }
                     Err(e) => println!("Failed to resume: {e}"),
                 }
@@ -5873,9 +5879,12 @@ fn execute_session_picker(engine: &mut QueryEngine) {
     match agent_code_lib::services::session::load_session(&chosen) {
         Ok(data) => {
             let restored_plan = data.plan_mode;
+            let normalize_report;
             {
                 let state = engine.state_mut();
                 state.messages = data.messages;
+                normalize_report =
+                    agent_code_lib::llm::normalize::normalize_all(&mut state.messages);
                 state.turn_count = data.turn_count;
                 state.total_cost_usd = data.total_cost_usd;
                 state.total_usage.input_tokens = data.total_input_tokens;
@@ -5933,6 +5942,9 @@ fn execute_session_picker(engine: &mut QueryEngine) {
                 data.turn_count,
                 data.total_cost_usd,
             );
+            if !normalize_report.to_string().contains("already normalized") {
+                println!("{}", normalize_report);
+            }
         }
         Err(e) => eprintln!("Failed to resume session: {e}"),
     }

@@ -236,6 +236,7 @@ pub(crate) fn try_expand_skill_slash(
             | "session"
             | "sessions"
             | "resume"
+            | "normalize"
     ) {
         return None;
     }
@@ -364,6 +365,8 @@ pub struct App {
     pub pending_model: Option<PendingModelAction>,
     /// `/session` / `/resume` action waiting for the run loop (needs the engine lock).
     pub pending_resume: Option<PendingSessionAction>,
+    /// `/normalize` action waiting for the run loop (needs the engine lock).
+    pub pending_normalize: bool,
     /// Prompts typed mid-turn, sent FIFO when the turn ends (plan §M5).
     pub queue: std::collections::VecDeque<String>,
     /// When true, runtime should cancel the active turn.
@@ -448,6 +451,7 @@ impl App {
             pending_submit: None,
             pending_model: None,
             pending_resume: None,
+            pending_normalize: false,
             queue: std::collections::VecDeque::new(),
             cancel_requested: false,
             quit_armed: false,
@@ -731,7 +735,7 @@ impl App {
                 "Keys: Enter send · Shift+Tab mode · Esc/Ctrl+C cancel turn (again to quit) · \
                  Ctrl+T tasks · permission prompt: y once / a session / f always / n deny · \
                  Skills: /commit /review /test /… (same as classic) · \
-                 /model [id] · /session [id] · /resume <id> · /clear /terminal-setup /stats /exit"
+                 /model [id] · /session [id] · /resume <id> · /normalize · /clear /terminal-setup /stats /exit"
                     .into(),
             ));
             self.input.clear();
@@ -782,6 +786,14 @@ impl App {
         // /session and /resume also need the engine lock (to restore state).
         if let Some(action) = parse_session_slash(&text) {
             self.pending_resume = Some(action);
+            self.input.clear();
+            self.cursor = 0;
+            self.dirty = true;
+            return;
+        }
+        // /normalize runs the full normalization suite on the engine's messages.
+        if text.trim().eq_ignore_ascii_case("/normalize") {
+            self.pending_normalize = true;
             self.input.clear();
             self.cursor = 0;
             self.dirty = true;
@@ -886,6 +898,9 @@ impl App {
                 {
                     let state = engine.state_mut();
                     state.messages = data.messages;
+                    // Normalize: fill orphaned tool_use with dummy results,
+                    // strip empties, merge consecutive user messages.
+                    agent_code_lib::llm::normalize::normalize_messages(&mut state.messages);
                     state.turn_count = data.turn_count;
                     state.total_cost_usd = data.total_cost_usd;
                     state.total_usage.input_tokens = data.total_input_tokens;
@@ -967,6 +982,16 @@ impl App {
             }
         }
         self.scroll = ScrollState::Follow;
+    }
+
+    /// Apply a deferred `/normalize` action. Runs the full normalization
+    /// suite on the engine's messages and shows the report in the transcript.
+    pub fn apply_normalize_action(&mut self, engine: &mut agent_code_lib::query::QueryEngine) {
+        let report =
+            agent_code_lib::llm::normalize::normalize_all(&mut engine.state_mut().messages);
+        self.transcript
+            .push(TranscriptItem::System(report.to_string()));
+        self.dirty = true;
     }
 
     /// Resolve user text into a turn: expand `/skill` invocations the same
@@ -2012,5 +2037,30 @@ mod tests {
         assert!(joined.contains("my session"));
         assert!(joined.contains("[rust, wip]"));
         assert!(joined.contains("resume"));
+    }
+
+    #[test]
+    fn submit_normalize_sets_pending() {
+        let mut app = App::new("grok-4", "/tmp", "s");
+        app.input = "/normalize".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert!(app.pending_normalize);
+        assert!(app.pending_submit.is_none());
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn submit_normalize_case_insensitive() {
+        let mut app = App::new("grok-4", "/tmp", "s");
+        app.input = "/NORMALIZE".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert!(app.pending_normalize);
+    }
+
+    #[test]
+    fn try_expand_skill_slash_ignores_normalize() {
+        assert!(try_expand_skill_slash("/normalize", "/tmp", false).is_none());
     }
 }

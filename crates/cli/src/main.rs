@@ -529,7 +529,9 @@ async fn async_main() -> anyhow::Result<()> {
             "accept_edits" => agent_code_lib::config::PermissionMode::AcceptEdits,
             "ask" => agent_code_lib::config::PermissionMode::Ask,
             _ => {
-                tracing::warn!("Unknown --permission-mode '{mode}', falling back to config default");
+                tracing::warn!(
+                    "Unknown --permission-mode '{mode}', falling back to config default"
+                );
                 config.permissions.default_mode
             }
         };
@@ -980,6 +982,9 @@ async fn async_main() -> anyhow::Result<()> {
                 {
                     let state = engine.state_mut();
                     state.messages = data.messages;
+                    // Normalize: fill orphaned tool_use with dummy results,
+                    // strip empties, merge consecutive user messages.
+                    agent_code_lib::llm::normalize::normalize_messages(&mut state.messages);
                     state.turn_count = data.turn_count;
                     state.total_cost_usd = data.total_cost_usd;
                     state.total_usage.input_tokens = data.total_input_tokens;
@@ -1006,7 +1011,8 @@ async fn async_main() -> anyhow::Result<()> {
                     }
                     // Find the provider from the model catalog (model name → provider kind).
                     for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
-                        let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
+                        let models =
+                            agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
                         if models.iter().any(|(n, _)| n == &state.config.api.model) {
                             if let Some(url) = kind.default_base_url() {
                                 state.config.api.base_url = url.to_string();
