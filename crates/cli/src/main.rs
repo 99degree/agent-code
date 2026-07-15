@@ -1124,9 +1124,6 @@ async fn async_main() -> anyhow::Result<()> {
             let tui_kind =
                 ui::modern::resolve_tui_kind(cli.tui.as_deref(), &engine.state().config.ui.tui);
 
-            // Capture session_id before TUI takes ownership.
-            let session_id = engine.state().session_id.clone();
-
             match tui_kind {
                 ui::modern::TuiKind::Modern => {
                     // Modern TUI takes ownership of the engine via Session
@@ -1147,11 +1144,6 @@ async fn async_main() -> anyhow::Result<()> {
             if let Ok(Some(check)) = update_handle.await {
                 update::print_update_hint(&check);
             }
-
-            // Print goodbye message with session resume command.
-            let short_id: String = session_id.chars().take(12).collect();
-            eprintln!("\nGoodbye. Session: {short_id}");
-            eprintln!("Resume: agent --session {short_id}");
         }
     }
 

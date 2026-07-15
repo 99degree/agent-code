@@ -1707,6 +1707,7 @@ pub async fn run_repl(engine: &mut QueryEngine) -> anyhow::Result<()> {
             session_id_display.as_str().with(t.muted)
         );
     }
+    println!("  Resume: {}", format!("agent --session {session_id_display}").with(t.muted));
 
     Ok(())
 }
