@@ -440,6 +440,13 @@ fn import_pi_session(pi_path: &Path) -> Result<String, String> {
         return Err("No messages found in pi.dev session".into());
     }
 
+    // Normalize: ensure tool_use blocks have matching tool_results,
+    // strip empty blocks, and merge consecutive user messages.
+    agent_code_lib::llm::normalize::ensure_tool_result_pairing(&mut messages);
+    agent_code_lib::llm::normalize::strip_empty_blocks(&mut messages);
+    agent_code_lib::llm::normalize::remove_empty_messages(&mut messages);
+    agent_code_lib::llm::normalize::merge_consecutive_user_messages(&mut messages);
+
     let meta = session_meta.ok_or("No session metadata found")?;
     let session_id = format!("pi-{}", &meta.id[..8.min(meta.id.len())]);
     let cwd = meta.cwd.unwrap_or_else(|| ".".into());
