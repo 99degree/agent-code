@@ -781,28 +781,48 @@ impl StreamSink for TerminalSink {
                 first_line.with(t.error)
             ));
         } else {
-            let preview: String = result
-                .content
-                .lines()
-                .next()
-                .unwrap_or("(ok)")
+            let all_lines: Vec<&str> = result.content.lines().collect();
+            let preview: String = all_lines
+                .first()
+                .unwrap_or(&"(ok)")
                 .chars()
                 .take(80)
                 .collect();
-            let line_count = result.content.lines().count();
-            let suffix = if line_count > 1 {
-                format!(" (+{} lines)", line_count - 1)
-                    .with(t.muted)
-                    .to_string()
+            if all_lines.len() <= 6 {
+                // Short result — show every line.
+                raw_eprint(&format!(
+                    "  {} {}\n",
+                    "✓".with(t.success),
+                    preview.with(t.muted),
+                ));
+                for line in &all_lines[1..] {
+                    raw_eprint(&format!(
+                        "  {} {}\n",
+                        " ".with(t.muted),
+                        line.with(t.muted),
+                    ));
+                }
             } else {
-                String::new()
-            };
-            raw_eprint(&format!(
-                "  {} {}{}\n",
-                "✓".with(t.success),
-                preview.with(t.muted),
-                suffix
-            ));
+                // Long result — first line, separator, last 5.
+                raw_eprint(&format!(
+                    "  {} {}\n",
+                    "✓".with(t.success),
+                    preview.with(t.muted),
+                ));
+                raw_eprint(&format!(
+                    "  {} {}\n",
+                    " ".with(t.muted),
+                    "...".with(t.muted),
+                ));
+                let tail_start = all_lines.len().saturating_sub(5);
+                for line in &all_lines[tail_start..] {
+                    raw_eprint(&format!(
+                        "  {} {}\n",
+                        " ".with(t.muted),
+                        line.with(t.muted),
+                    ));
+                }
+            }
         }
         self.restart_indicator();
     }

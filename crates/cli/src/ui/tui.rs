@@ -49,7 +49,7 @@ pub struct ToolEntry {
     pub detail: String,
     pub result_preview: Option<String>,
     pub is_error: bool,
-    pub line_count: usize,
+    pub result_lines: Vec<String>,
 }
 
 /// Accumulated state for the current turn's TUI display.
@@ -79,7 +79,7 @@ impl TurnState {
             detail: detail.to_string(),
             result_preview: None,
             is_error: false,
-            line_count: 0,
+            result_lines: Vec::new(),
         });
     }
 
@@ -88,7 +88,7 @@ impl TurnState {
             let preview = result.lines().next().unwrap_or("(ok)");
             tool.result_preview = Some(truncate(preview, 80));
             tool.is_error = is_error;
-            tool.line_count = result.lines().count();
+            tool.result_lines = result.lines().map(String::from).collect();
         }
     }
 }
@@ -218,12 +218,17 @@ pub fn render_turn_summary(state: &TurnState, turn: usize, hide_details: bool) {
             };
 
             let result_info = if let Some(ref preview) = tool.result_preview {
-                let suffix = if tool.line_count > 1 {
-                    format!(" (+{})", tool.line_count - 1)
+                let lines = &tool.result_lines;
+                if lines.len() <= 1 {
+                    format!(" → {}", truncate(preview, 50))
+                } else if lines.len() <= 6 {
+                    let joined: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+                    format!(" → {}", truncate(&joined.join(" | "), 50))
                 } else {
-                    String::new()
-                };
-                format!(" → {}{}", truncate(preview, 50), suffix)
+                    let tail_start = lines.len().saturating_sub(5);
+                    let tail: Vec<&str> = lines[tail_start..].iter().map(|s| s.as_str()).collect();
+                    format!(" → {} | … | {}", truncate(&lines[0], 25), truncate(&tail.join(" | "), 25))
+                }
             } else {
                 String::new()
             };
