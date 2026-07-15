@@ -796,11 +796,7 @@ impl StreamSink for TerminalSink {
                     preview.with(t.muted),
                 ));
                 for line in &all_lines[1..] {
-                    raw_eprint(&format!(
-                        "  {} {}\n",
-                        " ".with(t.muted),
-                        line.with(t.muted),
-                    ));
+                    raw_eprint(&format!("  {} {}\n", " ".with(t.muted), line.with(t.muted),));
                 }
             } else {
                 // Long result — first line, separator, last 5.
@@ -816,11 +812,7 @@ impl StreamSink for TerminalSink {
                 ));
                 let tail_start = all_lines.len().saturating_sub(5);
                 for line in &all_lines[tail_start..] {
-                    raw_eprint(&format!(
-                        "  {} {}\n",
-                        " ".with(t.muted),
-                        line.with(t.muted),
-                    ));
+                    raw_eprint(&format!("  {} {}\n", " ".with(t.muted), line.with(t.muted),));
                 }
             }
         }
@@ -1655,6 +1647,10 @@ pub async fn run_repl(engine: &mut QueryEngine) -> anyhow::Result<()> {
                         state.brief_mode,
                         state.response_style.name(),
                         &state.config.api.base_url,
+                        &agent_code_lib::services::git::repo_name_sync(std::path::Path::new(
+                            &state.cwd,
+                        ))
+                        .unwrap_or_default(),
                     );
                 }
             }
@@ -1706,6 +1702,8 @@ pub async fn run_repl(engine: &mut QueryEngine) -> anyhow::Result<()> {
             state.brief_mode,
             state.response_style.name(),
             &state.config.api.base_url,
+            &agent_code_lib::services::git::repo_name_sync(std::path::Path::new(&state.cwd))
+                .unwrap_or_default(),
         ) {
             Ok(_) => {}
             Err(e) => eprintln!(

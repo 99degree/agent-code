@@ -1888,6 +1888,8 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 state.brief_mode,
                 state.response_style.name(),
                 &state.config.api.base_url,
+                &agent_code_lib::services::git::repo_name_sync(std::path::Path::new(&state.cwd))
+                    .unwrap_or_default(),
             ) {
                 Ok(_) => {
                     println!("Forked conversation at message {msg_count} -> session {fork_id}",);

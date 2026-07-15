@@ -455,6 +455,7 @@ fn import_pi_session(pi_path: &Path) -> Result<String, String> {
         cwd,
         model: model_name,
         base_url: String::new(),
+        repo: String::new(),
         messages,
         turn_count: 0,
         total_cost_usd: 0.0,

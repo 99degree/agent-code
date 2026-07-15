@@ -73,6 +73,71 @@ pub async fn canonical_root(cwd: &Path) -> Option<String> {
     }
 }
 
+/// Get the repository name from the origin remote (e.g., "owner/repo").
+/// Returns `None` if not in a git repo or no origin remote is set.
+/// Sync version for use in non-async contexts.
+pub fn repo_name_sync(cwd: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Parse "owner/repo" from various URL formats:
+    //   https://github.com/owner/repo.git
+    //   git@github.com:owner/repo.git
+    //   ssh://git@github.com/owner/repo.git
+    let path = url
+        .trim_end_matches(".git")
+        .split(['/', ':'])
+        .collect::<Vec<_>>();
+
+    if path.len() >= 2 {
+        Some(format!("{}/{}", path[path.len() - 2], path[path.len() - 1]))
+    } else {
+        None
+    }
+}
+
+/// Get the repository name from the origin remote (e.g., "owner/repo").
+/// Returns `None` if not in a git repo or no origin remote is set.
+/// Async version.
+pub async fn repo_name(cwd: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(cwd)
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Parse "owner/repo" from various URL formats:
+    //   https://github.com/owner/repo.git
+    //   git@github.com:owner/repo.git
+    //   ssh://git@github.com/owner/repo.git
+    let path = url
+        .trim_end_matches(".git")
+        .split(['/', ':'])
+        .collect::<Vec<_>>();
+
+    if path.len() >= 2 {
+        Some(format!("{}/{}", path[path.len() - 2], path[path.len() - 1]))
+    } else {
+        None
+    }
+}
+
 /// Check if the repository is a shallow clone.
 pub async fn is_shallow(cwd: &Path) -> bool {
     Command::new("git")

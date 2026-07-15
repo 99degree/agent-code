@@ -27,6 +27,9 @@ pub struct SessionData {
     pub updated_at: String,
     /// Working directory at session start.
     pub cwd: String,
+    /// Repository name (e.g. "owner/repo") if in a git repo.
+    #[serde(default)]
+    pub repo: String,
     /// Model used in this session.
     pub model: String,
     /// Base URL for the provider.
@@ -90,7 +93,7 @@ pub fn save_session(
     turn_count: usize,
 ) -> Result<PathBuf, String> {
     save_session_full(
-        session_id, messages, cwd, model, turn_count, 0.0, 0, 0, false, false, "", "",
+        session_id, messages, cwd, model, turn_count, 0.0, 0, 0, false, false, "", "", "",
     )
 }
 
@@ -109,23 +112,36 @@ pub fn save_session_full(
     brief_mode: bool,
     response_style: &str,
     base_url: &str,
+    repo: &str,
 ) -> Result<PathBuf, String> {
     let dir = sessions_dir().ok_or("Could not determine sessions directory")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create sessions dir: {e}"))?;
 
     let path = dir.join(format!("{session_id}.json"));
 
-    // Preserve original created_at, label, and tags if file exists.
+    // Preserve original created_at, label, tags, and repo if file exists.
     // All are orthogonal to the per-turn save path, so re-read rather
     // than thread them through every call site.
-    let (created_at, label, tags) = if path.exists() {
+    let (created_at, label, tags, existing_repo) = if path.exists() {
         std::fs::read_to_string(&path)
             .ok()
             .and_then(|c| serde_json::from_str::<SessionData>(&c).ok())
-            .map(|d| (d.created_at, d.label, d.tags))
-            .unwrap_or_else(|| (chrono::Utc::now().to_rfc3339(), None, Vec::new()))
+            .map(|d| (d.created_at, d.label, d.tags, d.repo))
+            .unwrap_or_else(|| {
+                (
+                    chrono::Utc::now().to_rfc3339(),
+                    None,
+                    Vec::new(),
+                    String::new(),
+                )
+            })
     } else {
-        (chrono::Utc::now().to_rfc3339(), None, Vec::new())
+        (
+            chrono::Utc::now().to_rfc3339(),
+            None,
+            Vec::new(),
+            String::new(),
+        )
     };
 
     let data = SessionData {
@@ -135,6 +151,11 @@ pub fn save_session_full(
         cwd: cwd.to_string(),
         model: model.to_string(),
         base_url: base_url.to_string(),
+        repo: if repo.is_empty() {
+            existing_repo
+        } else {
+            repo.to_string()
+        },
         messages: messages.to_vec(),
         turn_count,
         total_cost_usd,
@@ -898,6 +919,7 @@ mod tests {
             cwd: "/work".into(),
             model: "test-model".into(),
             base_url: String::new(),
+            repo: String::new(),
             messages,
             turn_count: 1,
             total_cost_usd: 0.0,
@@ -960,6 +982,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             model: "test-model".to_string(),
             base_url: String::new(),
+            repo: String::new(),
             messages: messages.clone(),
             turn_count: 5,
             total_cost_usd: 0.0,
@@ -992,6 +1015,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             cwd: "/home/user/project".to_string(),
             model: "claude-sonnet-4".to_string(),
+            repo: String::new(),
             base_url: String::new(),
             messages: vec![user_message("test")],
             turn_count: 3,
@@ -1023,6 +1047,7 @@ mod tests {
             created_at: "2026-04-15T00:00:00Z".to_string(),
             updated_at: "2026-04-15T00:00:00Z".to_string(),
             cwd: "/work".to_string(),
+            repo: String::new(),
             model: "test-model".to_string(),
             base_url: String::new(),
             messages: vec![user_message(format!("here is my key {aws_key}"))],
@@ -1054,6 +1079,7 @@ mod tests {
             id: "sess-2".to_string(),
             created_at: "2026-04-15T00:00:00Z".to_string(),
             updated_at: "2026-04-15T00:00:00Z".to_string(),
+            repo: String::new(),
             cwd: "/work".to_string(),
             model: "test-model".to_string(),
             base_url: String::new(),
@@ -1082,6 +1108,7 @@ mod tests {
         let data = SessionData {
             id: "probe".to_string(),
             created_at: "2026-04-15T00:00:00Z".to_string(),
+            repo: String::new(),
             updated_at: "2026-04-15T00:00:00Z".to_string(),
             cwd: "/work".to_string(),
             model: "test-model".to_string(),
@@ -1122,6 +1149,7 @@ mod tests {
         for shape in shapes {
             let data = SessionData {
                 id: "probe".to_string(),
+                repo: String::new(),
                 created_at: "2026-04-15T00:00:00Z".to_string(),
                 updated_at: "2026-04-15T00:00:00Z".to_string(),
                 cwd: "/work".to_string(),
@@ -1229,6 +1257,7 @@ mod tests {
     #[test]
     fn serialize_masked_leaves_innocuous_content_intact() {
         let data = SessionData {
+            repo: String::new(),
             id: "sess-3".to_string(),
             created_at: "2026-04-15T00:00:00Z".to_string(),
             updated_at: "2026-04-15T00:00:00Z".to_string(),
@@ -1260,6 +1289,7 @@ mod tests {
             cwd: "/work".into(),
             model: "m".into(),
             base_url: String::new(),
+            repo: String::new(),
             messages: vec![],
             turn_count: 1,
             total_cost_usd: 0.0,
@@ -1354,6 +1384,7 @@ mod tests {
             cwd: "/w".into(),
             model: "m".into(),
             base_url: String::new(),
+            repo: String::new(),
             messages: Vec::new(),
             turn_count: 0,
             total_cost_usd: 0.0,
