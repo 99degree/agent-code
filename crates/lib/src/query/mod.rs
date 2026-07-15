@@ -1178,6 +1178,21 @@ impl QueryEngine {
                                         continue 'turn;
                                     }
                                 }
+                                // Surface the error as an assistant message so
+                                // the user sees it in the conversation (not
+                                // only in logs).
+                                let err_text = format!("⚠ {reason}");
+                                let err_assistant = Message::Assistant(AssistantMessage {
+                                    uuid: Uuid::new_v4(),
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                    content: vec![ContentBlock::Text { text: err_text }],
+                                    model: None,
+                                    usage: None,
+                                    stop_reason: None,
+                                    request_id: None,
+                                });
+                                self.state.push_message(err_assistant);
+
                                 sink.on_error(&reason);
                                 self.state.is_query_active = false;
                                 // Error hooks fire once per turn that
