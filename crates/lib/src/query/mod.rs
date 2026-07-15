@@ -782,7 +782,9 @@ impl QueryEngine {
             )
             .await;
 
-        let max_turns = self.config.max_turns
+        let max_turns = self
+            .config
+            .max_turns
             .or(self.state.config.api.max_turns)
             .unwrap_or(50);
         let mut compact_tracking = CompactTracking::default();
@@ -1361,11 +1363,8 @@ impl QueryEngine {
                     // orphaned tool_calls.
                     for block in &content_blocks {
                         if let ContentBlock::ToolUse { id, name, .. } = block {
-                            let result_msg = crate::llm::message::tool_result_message(
-                                id,
-                                "(cancelled)",
-                                true,
-                            );
+                            let result_msg =
+                                crate::llm::message::tool_result_message(id, "(cancelled)", true);
                             self.state.push_message(result_msg);
                             sink.on_tool_call_result(
                                 id,

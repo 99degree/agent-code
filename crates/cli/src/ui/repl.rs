@@ -598,7 +598,8 @@ impl Completer for CommandCompleter {
                         if !kind.is_configured() {
                             continue;
                         }
-                        let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
+                        let models =
+                            agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
                         for (id, _) in models {
                             all_names.push(id.clone());
                         }
@@ -1707,7 +1708,10 @@ pub async fn run_repl(engine: &mut QueryEngine) -> anyhow::Result<()> {
             session_id_display.as_str().with(t.muted)
         );
     }
-    println!("  Resume: {}", format!("agent --session {session_id_display}").with(t.muted));
+    println!(
+        "  Resume: {}",
+        format!("agent --session {session_id_display}").with(t.muted)
+    );
 
     Ok(())
 }

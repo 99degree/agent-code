@@ -79,7 +79,10 @@ fn select_index(options: &[SelectOption]) -> (usize, bool) {
     render_all_filtered(options, &filtered_indices, selected, has_preview, &filter);
 
     loop {
-        if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = event::read() {
+        if let Ok(Event::Key(KeyEvent {
+            code, modifiers, ..
+        })) = event::read()
+        {
             match code {
                 KeyCode::Up | KeyCode::Char('k') => {
                     selected = if selected > 0 {
@@ -259,7 +262,13 @@ fn render_all_filtered(
 
     // Show filter input.
     write!(out, "\r\n").ok();
-    write!(out, "  {}{}\r\n", "> ".with(t.accent).bold(), filter.with(t.text)).ok();
+    write!(
+        out,
+        "  {}{}\r\n",
+        "> ".with(t.accent).bold(),
+        filter.with(t.text)
+    )
+    .ok();
 
     // Render filtered options.
     for (display_idx, &orig_idx) in filtered_indices.iter().enumerate() {

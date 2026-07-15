@@ -528,6 +528,62 @@ pub(crate) fn prune_older_than_in(
     Ok(stats)
 }
 
+/// Delete sessions with fewer than `min_messages` messages.
+///
+/// Sessions with unparseable data or zero messages are kept
+/// defensively. The sidecar index is dropped when anything is removed.
+pub fn prune_by_message_count(min_messages: usize) -> Result<PruneStats, String> {
+    let dir = sessions_dir().ok_or("Could not determine sessions directory")?;
+    if !dir.is_dir() {
+        return Ok(PruneStats::default());
+    }
+
+    let mut stats = PruneStats::default();
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("Read {dir:?} failed: {e}"))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => {
+                stats.kept += 1;
+                continue;
+            }
+        };
+        let data: SessionData = match serde_json::from_str(&content) {
+            Ok(d) => d,
+            Err(_) => {
+                stats.kept += 1;
+                continue;
+            }
+        };
+
+        if data.messages.len() < min_messages {
+            if std::fs::remove_file(&path).is_ok() {
+                stats.removed += 1;
+            } else {
+                stats.kept += 1;
+            }
+        } else {
+            stats.kept += 1;
+        }
+    }
+
+    if stats.removed > 0 {
+        let _ = std::fs::remove_file(dir.join(INDEX_FILE));
+    }
+
+    debug!(
+        "Session prune by count: removed {} kept {} (min_messages {})",
+        stats.removed, stats.kept, min_messages
+    );
+    Ok(stats)
+}
+
 /// Brief summary of a session for listing.
 #[derive(Debug)]
 pub struct SessionSummary {

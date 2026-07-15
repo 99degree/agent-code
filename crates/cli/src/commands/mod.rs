@@ -106,6 +106,12 @@ pub const COMMANDS: &[Command] = &[
         hidden: false,
     },
     Command {
+        name: "clean-sessions",
+        aliases: &[],
+        description: "Remove sessions with fewer than N messages (default 20)",
+        hidden: false,
+    },
+    Command {
         name: "session",
         aliases: &["pick-session"],
         description: "Interactively pick a recent session to resume",
@@ -810,9 +816,11 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 );
 
                 // Recreate provider with new base_url and swap it in.
-                let swap_kind = found_provider
-                    .unwrap_or_else(|| detect_provider(new_model, final_base_url));
-                if agent_code_lib::llm::provider::resolve_api_key(swap_kind, &engine.state().config).is_some() {
+                let swap_kind =
+                    found_provider.unwrap_or_else(|| detect_provider(new_model, final_base_url));
+                if agent_code_lib::llm::provider::resolve_api_key(swap_kind, &engine.state().config)
+                    .is_some()
+                {
                     let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
                         new_model,
                         final_base_url,
@@ -823,7 +831,9 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 } else {
                     println!(
                         "⚠ No API key for {:?}. Set {} or add a [api.provider_keys.{}] entry in config.toml.",
-                        swap_kind, swap_kind.env_var_name(), swap_kind.toml_key()
+                        swap_kind,
+                        swap_kind.env_var_name(),
+                        swap_kind.toml_key()
                     );
                 }
                 // Update provider_kind to match the new model.
@@ -894,7 +904,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     let chosen = crate::ui::selector::select(&options);
                     if !chosen.is_empty() {
                         // Find the provider for this model and update base_url.
-                        let found_kind = all_models.iter().find(|(n, _, _)| n == &chosen).map(|(_, _, k)| *k);
+                        let found_kind = all_models
+                            .iter()
+                            .find(|(n, _, _)| n == &chosen)
+                            .map(|(_, _, k)| *k);
                         if let Some(kind) = found_kind {
                             if let Some(url) = kind.default_base_url() {
                                 engine.state_mut().config.api.base_url = url.to_string();
@@ -904,15 +917,20 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
 
                         // Recreate provider with new base_url and swap it in.
                         let final_base_url = &engine.state().config.api.base_url;
-                        let swap_kind = found_kind.unwrap_or_else(|| detect_provider(&chosen, final_base_url));
+                        let swap_kind =
+                            found_kind.unwrap_or_else(|| detect_provider(&chosen, final_base_url));
                         if agent_code_lib::llm::provider::resolve_api_key(
-                            swap_kind, &engine.state().config,
-                        ).is_some() {
-                            let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
-                                &chosen,
-                                final_base_url,
-                                &engine.state().config,
-                            );
+                            swap_kind,
+                            &engine.state().config,
+                        )
+                        .is_some()
+                        {
+                            let new_provider =
+                                agent_code_lib::llm::provider::create_provider_from_config(
+                                    &chosen,
+                                    final_base_url,
+                                    &engine.state().config,
+                                );
                             engine.set_provider_sync(new_provider);
                             tracing::info!("[model] Provider swapped to match new model");
                         }
@@ -984,12 +1002,18 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             let model = engine.state().config.api.model.clone();
                             let base_url = engine.state().config.api.base_url.clone();
                             let kind = detect_provider(&model, &base_url);
-                            if agent_code_lib::llm::provider::resolve_api_key(kind, &engine.state().config).is_some() {
-                                let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
-                                    &model,
-                                    &base_url,
-                                    &engine.state().config,
-                                );
+                            if agent_code_lib::llm::provider::resolve_api_key(
+                                kind,
+                                &engine.state().config,
+                            )
+                            .is_some()
+                            {
+                                let new_provider =
+                                    agent_code_lib::llm::provider::create_provider_from_config(
+                                        &model,
+                                        &base_url,
+                                        &engine.state().config,
+                                    );
                                 engine.set_provider_sync(new_provider);
                                 tracing::info!("[resume] Provider swapped to match restored model");
                             }
@@ -1063,6 +1087,25 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     );
                 }
                 println!("\nUse /resume <id> to restore, or /sessions --tag <tag> to filter.");
+            }
+            CommandResult::Handled
+        }
+        Some("clean-sessions") => {
+            let min: usize = args.and_then(|a| a.trim().parse().ok()).unwrap_or(20);
+            match agent_code_lib::services::session::prune_by_message_count(min) {
+                Ok(stats) => {
+                    if stats.removed == 0 {
+                        println!("No sessions with fewer than {min} messages.");
+                    } else {
+                        println!(
+                            "Cleaned {} session{} ({} kept, threshold: <{min} messages).",
+                            stats.removed,
+                            if stats.removed == 1 { "" } else { "s" },
+                            stats.kept,
+                        );
+                    }
+                }
+                Err(e) => println!("Error: {e}"),
             }
             CommandResult::Handled
         }

@@ -683,12 +683,11 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Resolve the API key per-provider (never substitute a different provider's key).
-    let resolved_key: Option<String> =
-        if config.api.auth_mode == ApiAuthMode::ApiKey {
-            agent_code_lib::llm::provider::resolve_api_key(provider_kind, &config)
-        } else {
-            None
-        };
+    let resolved_key: Option<String> = if config.api.auth_mode == ApiAuthMode::ApiKey {
+        agent_code_lib::llm::provider::resolve_api_key(provider_kind, &config)
+    } else {
+        None
+    };
 
     // Require a key for the detected provider (unless dumping the system prompt).
     if config.api.auth_mode == ApiAuthMode::ApiKey
@@ -726,13 +725,11 @@ async fn async_main() -> anyhow::Result<()> {
                 ),
             )
         }
-        ApiAuthMode::ApiKey => {
-            agent_code_lib::llm::provider::create_provider_from_config(
-                &config.api.model,
-                &config.api.base_url,
-                &config,
-            )
-        }
+        ApiAuthMode::ApiKey => agent_code_lib::llm::provider::create_provider_from_config(
+            &config.api.model,
+            &config.api.base_url,
+            &config,
+        ),
     };
     tracing::info!(
         "Using {:?} provider at {}",
@@ -983,9 +980,8 @@ async fn async_main() -> anyhow::Result<()> {
                     state.plan_mode = restored_plan;
                     state.brief_mode = data.brief_mode;
                     if !data.response_style.is_empty()
-                        && let Some(style) = agent_code_lib::state::ResponseStyle::from_name(
-                            &data.response_style,
-                        )
+                        && let Some(style) =
+                            agent_code_lib::state::ResponseStyle::from_name(&data.response_style)
                     {
                         state.response_style = style;
                     }
@@ -1000,11 +996,9 @@ async fn async_main() -> anyhow::Result<()> {
                         &state.config.api.base_url,
                     );
                     // Re-apply model config from models.toml (max_context etc.).
-                    if let Some(max_ctx) =
-                        agent_code_lib::llm::models_config::max_context_for_model(
-                            &state.config.api.model,
-                        )
-                    {
+                    if let Some(max_ctx) = agent_code_lib::llm::models_config::max_context_for_model(
+                        &state.config.api.model,
+                    ) {
                         state.config.api.max_context = Some(max_ctx);
                     }
                 }
@@ -1015,10 +1009,16 @@ async fn async_main() -> anyhow::Result<()> {
                     &engine.state().config,
                 );
                 engine.set_provider_sync(new_provider);
-                eprintln!("Resumed session: {}", &session_id[..session_id.len().min(12)]);
+                eprintln!(
+                    "Resumed session: {}",
+                    &session_id[..session_id.len().min(12)]
+                );
             }
             Err(e) => {
-                eprintln!("Failed to resume session {}: {e}", &session_id[..session_id.len().min(12)]);
+                eprintln!(
+                    "Failed to resume session {}: {e}",
+                    &session_id[..session_id.len().min(12)]
+                );
             }
         }
     }

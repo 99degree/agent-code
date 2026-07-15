@@ -301,7 +301,10 @@ pub fn resolve_api_key(kind: ProviderKind, config: &crate::config::Config) -> Op
         return Some(key.clone());
     }
     // 3. Fallback for providers that can use the generic key.
-    if matches!(kind, ProviderKind::OpenAiCompatible | ProviderKind::AgentCode | ProviderKind::OpenAi) {
+    if matches!(
+        kind,
+        ProviderKind::OpenAiCompatible | ProviderKind::AgentCode | ProviderKind::OpenAi
+    ) {
         return config.api.api_key.clone();
     }
     None
@@ -616,7 +619,11 @@ impl ProviderKind {
             Self::Perplexity => Some("https://api.perplexity.ai"),
             Self::Nvidia => Some("https://integrate.api.nvidia.com/v1"),
             // These require user-supplied URLs.
-            Self::Bedrock | Self::Vertex | Self::AzureOpenAi | Self::OpenAiCompatible | Self::AgentCode => None,
+            Self::Bedrock
+            | Self::Vertex
+            | Self::AzureOpenAi
+            | Self::OpenAiCompatible
+            | Self::AgentCode => None,
         }
     }
 
