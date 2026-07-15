@@ -299,6 +299,7 @@ pub(super) async fn event_loop(
                     let provider = eng.state().provider_kind;
                     app.apply_model_action(action, provider, &current, |name| {
                         // Find the provider for this model and update base_url.
+                        let mut swap_kind = None;
                         for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
                             let models =
                                 agent_code_lib::llm::provider::models_for_provider_with_custom(
@@ -308,6 +309,7 @@ pub(super) async fn event_loop(
                                 if let Some(url) = kind.default_base_url() {
                                     eng.state_mut().config.api.base_url = url.to_string();
                                 }
+                                swap_kind = Some(kind);
                                 break;
                             }
                         }
@@ -315,7 +317,9 @@ pub(super) async fn event_loop(
 
                         // Recreate provider with new base_url and swap it in.
                         let final_base_url = eng.state().config.api.base_url.clone();
-                        let kind = agent_code_lib::llm::provider::detect_provider(&name, &final_base_url);
+                        let kind = swap_kind.unwrap_or_else(||
+                            agent_code_lib::llm::provider::detect_provider(&name, &final_base_url),
+                        );
                         if agent_code_lib::llm::provider::resolve_api_key(kind, &eng.state().config).is_some() {
                             let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
                                 &name,
@@ -325,11 +329,7 @@ pub(super) async fn event_loop(
                             eng.set_provider_sync(new_provider);
                             tracing::info!("[model] Provider swapped to match new model");
                         }
-                        // Update provider_kind to match the new model.
-                        eng.state_mut().provider_kind = agent_code_lib::llm::provider::detect_provider(
-                            &name,
-                            &final_base_url,
-                        );
+                        eng.state_mut().provider_kind = kind;
                     });
                 }
                 Err(_) => {

@@ -827,10 +827,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     );
                 }
                 // Update provider_kind to match the new model.
-                engine.state_mut().provider_kind = agent_code_lib::llm::provider::detect_provider(
-                    new_model,
-                    final_base_url,
-                );
+                engine.state_mut().provider_kind = swap_kind;
 
                 if let Some(kind) = found_provider {
                     println!("Model changed to: {new_model} [{kind:?}]");
@@ -897,18 +894,19 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     let chosen = crate::ui::selector::select(&options);
                     if !chosen.is_empty() {
                         // Find the provider for this model and update base_url.
-                        if let Some((_, _, kind)) = all_models.iter().find(|(n, _, _)| n == &chosen)
-                            && let Some(url) = kind.default_base_url()
-                        {
-                            engine.state_mut().config.api.base_url = url.to_string();
+                        let found_kind = all_models.iter().find(|(n, _, _)| n == &chosen).map(|(_, _, k)| *k);
+                        if let Some(kind) = found_kind {
+                            if let Some(url) = kind.default_base_url() {
+                                engine.state_mut().config.api.base_url = url.to_string();
+                            }
                         }
                         engine.state_mut().config.api.model = chosen.clone();
 
                         // Recreate provider with new base_url and swap it in.
                         let final_base_url = &engine.state().config.api.base_url;
+                        let swap_kind = found_kind.unwrap_or_else(|| detect_provider(&chosen, final_base_url));
                         if agent_code_lib::llm::provider::resolve_api_key(
-                            detect_provider(&chosen, final_base_url),
-                            &engine.state().config,
+                            swap_kind, &engine.state().config,
                         ).is_some() {
                             let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
                                 &chosen,
@@ -918,11 +916,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             engine.set_provider_sync(new_provider);
                             tracing::info!("[model] Provider swapped to match new model");
                         }
-                        // Update provider_kind to match the new model.
-                        engine.state_mut().provider_kind = agent_code_lib::llm::provider::detect_provider(
-                            &chosen,
-                            final_base_url,
-                        );
+                        engine.state_mut().provider_kind = swap_kind;
 
                         println!("Model changed to: {chosen}");
                     }
