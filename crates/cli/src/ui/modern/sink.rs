@@ -282,24 +282,30 @@ fn tool_detail(name: &str, input: &serde_json::Value) -> String {
             .unwrap_or("")
             .to_string()
     };
-    let raw = match name {
-        "Bash" | "PowerShell" => pick(&["command"]),
-        "FileRead" | "FileWrite" | "FileEdit" | "MultiEdit" => pick(&["file_path", "path"]),
-        "Grep" => pick(&["pattern"]),
-        "Glob" => pick(&["pattern"]),
-        "Agent" => pick(&["description"]),
-        "WebFetch" => pick(&["url"]),
-        "WebSearch" => pick(&["query"]),
-        _ => input
-            .as_object()
-            .and_then(|o| o.values().find_map(|v| v.as_str()))
-            .unwrap_or("")
-            .to_string(),
+    let (raw, full_command) = match name {
+        "Bash" | "PowerShell" => (pick(&["command"]), true),
+        "FileRead" | "FileWrite" | "FileEdit" | "MultiEdit" => {
+            (pick(&["file_path", "path"]), false)
+        }
+        "Grep" => (pick(&["pattern"]), false),
+        "Glob" => (pick(&["pattern"]), false),
+        "Agent" => (pick(&["description"]), false),
+        "WebFetch" => (pick(&["url"]), false),
+        "WebSearch" => (pick(&["query"]), false),
+        _ => (
+            input
+                .as_object()
+                .and_then(|o| o.values().find_map(|v| v.as_str()))
+                .unwrap_or("")
+                .to_string(),
+            false,
+        ),
     };
-    if raw.chars().count() > 72 {
-        format!("{}…", raw.chars().take(71).collect::<String>())
-    } else {
+    // Bash/PowerShell commands are the most important detail — show full.
+    if full_command || raw.chars().count() <= 72 {
         raw
+    } else {
+        format!("{}…", raw.chars().take(71).collect::<String>())
     }
 }
 

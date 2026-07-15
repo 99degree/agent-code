@@ -240,18 +240,41 @@ fn render_tool_card(
         Span::styled("· ", Style::default().fg(Color::DarkGray)),
         Span::styled(detail.to_string(), Style::default().fg(Color::Gray)),
     ])];
-    // Errors keep their output visible; successes show a dim one-line summary.
+    // Errors keep their output visible; successes show a dim summary.
+    // Strategy: show the first line, then (if long) a separator + last
+    // 5 lines.  This gives context without flooding the transcript.
     if let Some(r) = result
         && !r.is_empty()
     {
-        lines.push(Line::from(Span::styled(
-            format!("   ↳ {r}"),
-            Style::default().fg(if is_error {
-                Color::Red
-            } else {
-                Color::DarkGray
-            }),
-        )));
+        let all_lines: Vec<&str> = r.lines().collect();
+        let color = if is_error { Color::Red } else { Color::DarkGray };
+        let style = Style::default().fg(color);
+        if all_lines.len() <= 6 {
+            // Short result — show everything.
+            for line in &all_lines {
+                lines.push(Line::from(Span::styled(
+                    format!("   ↳ {line}"),
+                    style,
+                )));
+            }
+        } else {
+            // Long result — first line + last 5.
+            lines.push(Line::from(Span::styled(
+                format!("   ↳ {}", all_lines[0]),
+                style,
+            )));
+            lines.push(Line::from(Span::styled(
+                "   ↳ ...",
+                Style::default().fg(Color::DarkGray),
+            )));
+            let tail_start = all_lines.len() - 5;
+            for line in &all_lines[tail_start..] {
+                lines.push(Line::from(Span::styled(
+                    format!("   ↳ {line}"),
+                    style,
+                )));
+            }
+        }
     }
     lines
 }
