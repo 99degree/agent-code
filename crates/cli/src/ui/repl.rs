@@ -586,22 +586,24 @@ impl Completer for CommandCompleter {
             }
         }
 
-        // `/model <name>` completion: offer the current provider's
-        // models. The provider is derived from the live (model, base_url)
-        // snapshot, so switching providers mid-session updates the list.
+        // `/model <name>` completion: offer models from ALL configured providers.
         if let Some((token_idx, partial)) = find_command_arg_context(line, pos, "model") {
             let pairs = self
                 .model_ctx
                 .lock()
                 .ok()
-                .map(|ctx| {
-                    let provider = agent_code_lib::llm::provider::detect_provider(&ctx.0, &ctx.1);
-                    let names: Vec<String> =
-                        agent_code_lib::llm::provider::models_for_provider_with_custom(provider)
-                            .iter()
-                            .map(|(id, _)| id.clone())
-                            .collect();
-                    complete_from_names_strs(&names, partial)
+                .map(|_ctx| {
+                    let mut all_names: Vec<String> = Vec::new();
+                    for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
+                        if !kind.is_configured() {
+                            continue;
+                        }
+                        let models = agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
+                        for (id, _) in models {
+                            all_names.push(id.clone());
+                        }
+                    }
+                    complete_from_names_strs(&all_names, partial)
                 })
                 .unwrap_or_default();
             if !pairs.is_empty() {
