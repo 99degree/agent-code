@@ -50,15 +50,28 @@ pub fn ask_permission_detailed(
     // Show the action description.
     eprintln!("  {}", description.with(t.muted));
 
-    // Show input preview if available.
+    // Show input preview if available — pretty-print JSON for readability.
     if let Some(preview) = input_preview {
         eprintln!();
-        let lines: Vec<&str> = preview.lines().take(5).collect();
-        for line in &lines {
-            eprintln!("  {}", line.with(t.inactive));
-        }
-        if preview.lines().count() > 5 {
-            eprintln!("  {}", "...".with(t.muted));
+        match serde_json::from_str::<serde_json::Value>(preview) {
+            Ok(v) => {
+                let pretty = serde_json::to_string_pretty(&v).unwrap_or_default();
+                for line in pretty.lines().take(10) {
+                    eprintln!("  {}", line.with(t.inactive));
+                }
+                if pretty.lines().count() > 10 {
+                    eprintln!("  {}", "...".with(t.muted));
+                }
+            }
+            Err(_) => {
+                let lines: Vec<&str> = preview.lines().take(5).collect();
+                for line in &lines {
+                    eprintln!("  {}", line.with(t.inactive));
+                }
+                if preview.lines().count() > 5 {
+                    eprintln!("  {}", "...".with(t.muted));
+                }
+            }
         }
     }
 
