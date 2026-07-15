@@ -311,7 +311,24 @@ pub(super) async fn event_loop(
                                 break;
                             }
                         }
-                        eng.state_mut().config.api.model = name;
+                        eng.state_mut().config.api.model = name.clone();
+
+                        // Recreate provider with new base_url and swap it in.
+                        let final_base_url = eng.state().config.api.base_url.clone();
+                        if let Some(api_key) = eng.state().config.api.api_key.clone() {
+                            let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
+                                &name,
+                                &final_base_url,
+                                &api_key,
+                            );
+                            eng.set_provider_sync(new_provider);
+                            tracing::info!("[model] Provider swapped to match new model");
+                        }
+                        // Update provider_kind to match the new model.
+                        eng.state_mut().provider_kind = agent_code_lib::llm::provider::detect_provider(
+                            &name,
+                            &final_base_url,
+                        );
                     });
                 }
                 Err(_) => {

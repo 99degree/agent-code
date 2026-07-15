@@ -818,6 +818,11 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     engine.set_provider_sync(new_provider);
                     tracing::info!("[model] Provider swapped to match new model");
                 }
+                // Update provider_kind to match the new model.
+                engine.state_mut().provider_kind = agent_code_lib::llm::provider::detect_provider(
+                    new_model,
+                    final_base_url,
+                );
 
                 if let Some(kind) = found_provider {
                     println!("Model changed to: {new_model} [{kind:?}]");
@@ -890,6 +895,24 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             engine.state_mut().config.api.base_url = url.to_string();
                         }
                         engine.state_mut().config.api.model = chosen.clone();
+
+                        // Recreate provider with new base_url and swap it in.
+                        let final_base_url = &engine.state().config.api.base_url;
+                        if let Some(api_key) = engine.state().config.api.api_key.as_ref() {
+                            let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
+                                &chosen,
+                                final_base_url,
+                                api_key,
+                            );
+                            engine.set_provider_sync(new_provider);
+                            tracing::info!("[model] Provider swapped to match new model");
+                        }
+                        // Update provider_kind to match the new model.
+                        engine.state_mut().provider_kind = agent_code_lib::llm::provider::detect_provider(
+                            &chosen,
+                            final_base_url,
+                        );
+
                         println!("Model changed to: {chosen}");
                     }
                 }
