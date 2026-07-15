@@ -99,8 +99,9 @@ struct Cli {
     cwd: Option<String>,
 
     /// Permission mode: ask, allow, deny, plan, accept_edits.
-    #[arg(long, default_value = "ask")]
-    permission_mode: String,
+    /// When omitted, the `[permissions] default_mode` from config is used.
+    #[arg(long)]
+    permission_mode: Option<String>,
 
     /// Skip all permission checks. Equivalent to --permission-mode allow.
     /// Use only in trusted environments (CI, scripting).
@@ -510,7 +511,9 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
-    // Apply permission mode from CLI.
+    // Apply permission mode from CLI. When --permission-mode is omitted, the
+    // config's `[permissions] default_mode` is preserved (so a user can set
+    // `default_mode = "allow"` in config.toml to auto-grant permissions).
     if cli.dangerously_skip_permissions {
         config.permissions.default_mode = agent_code_lib::config::PermissionMode::Allow;
         tracing::warn!("All permission checks disabled (--dangerously-skip-permissions)");
@@ -518,13 +521,17 @@ async fn async_main() -> anyhow::Result<()> {
             "All permission checks disabled (--dangerously-skip-permissions). The agent \
              can run any tool without confirmation.",
         );
-    } else {
-        config.permissions.default_mode = match cli.permission_mode.as_str() {
+    } else if let Some(ref mode) = cli.permission_mode {
+        config.permissions.default_mode = match mode.as_str() {
             "allow" => agent_code_lib::config::PermissionMode::Allow,
             "deny" => agent_code_lib::config::PermissionMode::Deny,
             "plan" => agent_code_lib::config::PermissionMode::Plan,
             "accept_edits" => agent_code_lib::config::PermissionMode::AcceptEdits,
-            _ => agent_code_lib::config::PermissionMode::Ask,
+            "ask" => agent_code_lib::config::PermissionMode::Ask,
+            _ => {
+                tracing::warn!("Unknown --permission-mode '{mode}', falling back to config default");
+                config.permissions.default_mode
+            }
         };
     }
 
