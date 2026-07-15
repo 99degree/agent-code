@@ -630,6 +630,61 @@ fn render_config_toml(result: &SetupResult) -> String {
     toml::to_string_pretty(&toml::Value::Table(root)).unwrap_or_default()
 }
 
+/// Merge setup result into existing config, preserving other settings.
+fn merge_setup_result(config: &mut toml::Value, result: &SetupResult) {
+    let base_url = result
+        .base_url
+        .as_deref()
+        .unwrap_or("https://api.openai.com/v1");
+    let model = result.model.as_deref().unwrap_or("gpt-5.4");
+
+    // Get or create api table.
+    let api = config
+        .as_table_mut()
+        .unwrap()
+        .entry("api")
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+        .as_table_mut()
+        .unwrap();
+
+    api.insert("base_url".into(), base_url.into());
+    api.insert("model".into(), model.into());
+    if result.auth_mode != "api_key" && !result.auth_mode.is_empty() {
+        api.insert("auth_mode".into(), result.auth_mode.clone().into());
+    }
+    // Include the API key only when it's a real, persistable secret.
+    if result.auth_mode == "api_key" && !result.api_key.is_empty() && result.api_key != "ollama" {
+        api.insert("api_key".into(), result.api_key.clone().into());
+        // Also store under provider_keys[provider] for per-provider resolution.
+        let provider_keys = api
+            .entry("provider_keys")
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+            .as_table_mut()
+            .unwrap();
+        provider_keys.insert(result.provider.clone(), result.api_key.clone().into());
+    }
+
+    // Get or create permissions table.
+    let permissions = config
+        .as_table_mut()
+        .unwrap()
+        .entry("permissions")
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+        .as_table_mut()
+        .unwrap();
+    permissions.insert("default_mode".into(), result.permission_mode.clone().into());
+
+    // Get or create ui table.
+    let ui = config
+        .as_table_mut()
+        .unwrap()
+        .entry("ui")
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+        .as_table_mut()
+        .unwrap();
+    ui.insert("theme".into(), result.theme.clone().into());
+}
+
 /// Write config file from setup result.
 ///
 /// Persists atomically with owner-only (`0600`) permissions — the file
@@ -651,7 +706,17 @@ pub fn write_config(result: &SetupResult) {
     };
 
     let config_path = config_dir.join("config.toml");
-    let body = render_config_toml(result);
+
+    // Read existing config to preserve custom settings.
+    let mut existing: toml::Value = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_else(|| toml::Value::Table(toml::value::Table::new()));
+
+    // Merge new settings into existing config.
+    merge_setup_result(&mut existing, result);
+
+    let body = toml::to_string_pretty(&existing).unwrap_or_default();
 
     match atomic_write_secret(&config_path, body.as_bytes()) {
         Ok(()) => {

@@ -282,10 +282,10 @@ pub fn resolve_api_key(kind: ProviderKind, config: &crate::config::Config) -> Op
         return Some(key);
     }
     // 2. Per-provider key from config.
-    if let Some(key) = config.api.provider_keys.get(kind.toml_key()) {
-        if !key.is_empty() {
-            return Some(key.clone());
-        }
+    if let Some(key) = config.api.provider_keys.get(kind.toml_key())
+        && !key.is_empty()
+    {
+        return Some(key.clone());
     }
     // 3. Fallback for providers that can use the generic key.
     if matches!(kind, ProviderKind::OpenAiCompatible | ProviderKind::AgentCode | ProviderKind::OpenAi) {
