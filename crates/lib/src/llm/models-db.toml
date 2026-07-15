@@ -483,9 +483,6 @@ name = "Codestral"
 id = "mistralai/devstral-2512"
 name = "Devstral"
 
-[[openrouter]]
-id = "hy3-free"
-name = "Hy3 Free"
 
 # ============================================================================
 # OPENCODE (Zen - paid)
