@@ -9,7 +9,7 @@ use futures::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::codex_auth::CodexChatGptAuth;
 use super::message::{ContentBlock, Message, StopReason, Usage};
@@ -349,7 +349,7 @@ impl OpenAiProvider {
             // Read Retry-After before text() consumes the response.
             let ra_ms = retry_after_ms(&response, 1000);
             let body_text = response.text().await.unwrap_or_default();
-            warn!("OpenAI chat/completions API error {status}: {body_text}");
+            debug!("OpenAI chat/completions API error {status}: {body_text}");
             return match status.as_u16() {
                 401 | 403 => Err(ProviderError::Auth(body_text)),
                 429 => Err(ProviderError::RateLimited {
@@ -402,7 +402,7 @@ impl OpenAiProvider {
             // Read Retry-After before text() consumes the response.
             let ra_ms = retry_after_ms(&response, 1000);
             let body_text = response.text().await.unwrap_or_default();
-            warn!("OpenAI responses API error {status}: {body_text}");
+            debug!("OpenAI responses API error {status}: {body_text}");
             return match status.as_u16() {
                 401 | 403 => Err(ProviderError::Auth(body_text)),
                 429 => Err(ProviderError::RateLimited {

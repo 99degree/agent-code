@@ -908,10 +908,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             .iter()
                             .find(|(n, _, _)| n == &chosen)
                             .map(|(_, _, k)| *k);
-                        if let Some(kind) = found_kind {
-                            if let Some(url) = kind.default_base_url() {
-                                engine.state_mut().config.api.base_url = url.to_string();
-                            }
+                        if let Some(kind) = found_kind
+                            && let Some(url) = kind.default_base_url()
+                        {
+                            engine.state_mut().config.api.base_url = url.to_string();
                         }
                         engine.state_mut().config.api.model = chosen.clone();
 

@@ -1085,7 +1085,10 @@ impl QueryEngine {
                                 // Log the actual cause + status, not a bare
                                 // "Retrying" — otherwise a persistent 402/429/500
                                 // is invisible even at RUST_LOG=debug.
-                                warn!("LLM call failed ({e}); retrying in {}ms", after.as_millis());
+                                debug!(
+                                    "LLM call failed ({e}); retrying in {}ms",
+                                    after.as_millis()
+                                );
                                 // Backoff can reach 60s — racing the cancel
                                 // token keeps Ctrl+C responsive during it
                                 // (previously the sleep ran to completion and
