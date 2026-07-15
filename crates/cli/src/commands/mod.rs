@@ -974,6 +974,20 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                                 );
                             }
                         }
+                        // Recreate provider with restored base_url and swap it in.
+                        {
+                            let model = engine.state().config.api.model.clone();
+                            let base_url = engine.state().config.api.base_url.clone();
+                            if let Some(api_key) = engine.state().config.api.api_key.clone() {
+                                let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
+                                    &model,
+                                    &base_url,
+                                    &api_key,
+                                );
+                                engine.set_provider_sync(new_provider);
+                                tracing::info!("[resume] Provider swapped to match restored model");
+                            }
+                        }
                         engine.set_live_plan_mode(restored_plan);
                         println!(
                             "Resumed session {} ({} messages, {} turns, ${:.4})",
