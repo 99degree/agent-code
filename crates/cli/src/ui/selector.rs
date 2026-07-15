@@ -186,7 +186,7 @@ fn update_filter(
 }
 
 /// Preview lines count (fixed height so the UI doesn't jump).
-const PREVIEW_LINES: usize = 6;
+const PREVIEW_LINES: usize = 8;
 
 fn render_all(options: &[SelectOption], selected: usize, has_preview: bool) {
     let stdout = std::io::stdout();
