@@ -416,7 +416,7 @@ impl App {
                     ..
                 }) = idx.and_then(|i| self.transcript.get_mut(i))
                 {
-                    *result = Some(content.lines().next().unwrap_or("").to_string());
+                    *result = Some(content.clone());
                     *err = is_error;
                 }
                 // Back to waiting on the model once a tool returns.
