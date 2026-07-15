@@ -287,8 +287,8 @@ pub fn resolve_api_key(kind: ProviderKind, config: &crate::config::Config) -> Op
             return Some(key.clone());
         }
     }
-    // 3. Fallback only for the unspecified provider (owns AGENT_CODE_API_KEY).
-    if matches!(kind, ProviderKind::OpenAiCompatible | ProviderKind::AgentCode) {
+    // 3. Fallback for providers that can use the generic key.
+    if matches!(kind, ProviderKind::OpenAiCompatible | ProviderKind::AgentCode | ProviderKind::OpenAi) {
         return config.api.api_key.clone();
     }
     None
