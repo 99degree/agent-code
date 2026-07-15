@@ -238,6 +238,8 @@ pub(crate) fn try_expand_skill_slash(
             | "resume"
             | "normalize"
             | "import-pi"
+            | "history"
+            | "hist"
     ) {
         return None;
     }
@@ -370,6 +372,8 @@ pub struct App {
     pub pending_normalize: bool,
     /// `/import-pi` action waiting for the run loop (needs the engine lock).
     pub pending_import_pi: Option<String>,
+    /// `/history` action waiting for the run loop (needs the engine lock).
+    pub pending_history: Option<String>,
     /// Prompts typed mid-turn, sent FIFO when the turn ends (plan §M5).
     pub queue: std::collections::VecDeque<String>,
     /// When true, runtime should cancel the active turn.
@@ -456,6 +460,7 @@ impl App {
             pending_resume: None,
             pending_normalize: false,
             pending_import_pi: None,
+            pending_history: None,
             queue: std::collections::VecDeque::new(),
             cancel_requested: false,
             quit_armed: false,
@@ -739,7 +744,7 @@ impl App {
                 "Keys: Enter send · Shift+Tab mode · Esc/Ctrl+C cancel turn (again to quit) · \
                  Ctrl+T tasks · permission prompt: y once / a session / f always / n deny · \
                  Skills: /commit /review /test /… (same as classic) · \
-                 /model [id] · /session [id] · /resume <id> · /import-pi · /normalize · /clear /terminal-setup /stats /exit"
+                 /model [id] · /session [id] · /resume <id> · /import-pi · /history · /normalize · /clear /terminal-setup /stats /exit"
                     .into(),
             ));
             self.input.clear();
@@ -807,6 +812,19 @@ impl App {
         if let Some(rest) = text.trim().strip_prefix("/import-pi") {
             let args = rest.trim().strip_prefix(' ').map(|s| s.to_string());
             self.pending_import_pi = Some(args.unwrap_or_default());
+            self.input.clear();
+            self.cursor = 0;
+            self.dirty = true;
+            return;
+        }
+        // /history needs the engine lock to read messages.
+        if let Some(rest) = text
+            .trim()
+            .strip_prefix("/history")
+            .or_else(|| text.trim().strip_prefix("/hist"))
+        {
+            let args = rest.trim().strip_prefix(' ').map(|s| s.to_string());
+            self.pending_history = Some(args.unwrap_or_default());
             self.input.clear();
             self.cursor = 0;
             self.dirty = true;
@@ -1018,6 +1036,44 @@ impl App {
             engine,
         );
         self.transcript.push(TranscriptItem::System(result));
+        self.dirty = true;
+    }
+
+    /// Apply a deferred `/history` action. Shows the result in the transcript.
+    pub fn apply_history_action(
+        &mut self,
+        engine: &agent_code_lib::query::QueryEngine,
+        args: &str,
+    ) {
+        let prompts = crate::commands::collect_user_prompts(&engine.state().messages);
+        if prompts.is_empty() {
+            self.transcript.push(TranscriptItem::System(
+                "No user prompts in this session yet.".into(),
+            ));
+        } else {
+            let limit = crate::commands::parse_history_limit(args);
+            let total = prompts.len();
+            let start = match limit {
+                None => 0,
+                Some(n) => total.saturating_sub(n),
+            };
+            let shown = total - start;
+            let header = if limit.is_none() || shown >= total {
+                format!("Showing all {total} user prompt(s):")
+            } else {
+                format!("Showing last {shown} of {total} user prompt(s):")
+            };
+            let mut lines = vec![header];
+            for (rank, (_, text)) in prompts[start..].iter().enumerate() {
+                let n = rank + start + 1;
+                lines.push(format!(
+                    "  {n:>3}. {}",
+                    crate::commands::preview_user_prompt(text, 100)
+                ));
+            }
+            self.transcript
+                .push(TranscriptItem::System(lines.join("\n")));
+        }
         self.dirty = true;
     }
 

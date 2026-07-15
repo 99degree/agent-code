@@ -5120,7 +5120,7 @@ fn execute_open(args: Option<&str>, engine: &QueryEngine) {
 /// Strips leading whitespace, collapses internal whitespace runs,
 /// and truncates to `max_chars` with a trailing ellipsis. Character-
 /// count based so multi-byte input (emoji, CJK) doesn't split mid-glyph.
-fn preview_user_prompt(text: &str, max_chars: usize) -> String {
+pub fn preview_user_prompt(text: &str, max_chars: usize) -> String {
     let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
         return "(empty)".to_string();
@@ -5139,7 +5139,7 @@ fn preview_user_prompt(text: &str, max_chars: usize) -> String {
 /// Walks the conversation and returns each user-authored text block in
 /// chronological order, paired with the overall message index (useful if
 /// we later add indexing into other commands).
-fn collect_user_prompts(
+pub fn collect_user_prompts(
     messages: &[agent_code_lib::llm::message::Message],
 ) -> Vec<(usize, String)> {
     use agent_code_lib::llm::message::{ContentBlock, Message};
@@ -5164,7 +5164,7 @@ fn collect_user_prompts(
 
 /// Parse the `/history` argument. Returns `None` for "show all";
 /// `Some(n)` caps the output to the last `n` entries. Defaults to 10.
-fn parse_history_limit(raw: &str) -> Option<usize> {
+pub fn parse_history_limit(raw: &str) -> Option<usize> {
     let t = raw.trim();
     if t.is_empty() {
         return Some(10);

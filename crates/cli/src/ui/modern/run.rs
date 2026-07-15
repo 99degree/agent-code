@@ -394,6 +394,19 @@ pub(super) async fn event_loop(
             }
         }
 
+        // Apply deferred `/history`. try_lock so it doesn't block the UI.
+        if let Some(args) = app.pending_history.take() {
+            let engine_arc = session.engine();
+            match engine_arc.try_lock() {
+                Ok(eng) => {
+                    app.apply_history_action(&eng, &args);
+                }
+                Err(_) => {
+                    app.pending_history = Some(args);
+                }
+            }
+        }
+
         // Start a pending turn if idle.
         if turn.is_none()
             && let Some(prompt) = app.pending_submit.take()
