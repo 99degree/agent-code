@@ -1,0 +1,68 @@
+name: Android Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-android:
+    name: Build Android (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            arch: arm64-v8a
+          - target: armv7-linux-androideabi
+            arch: armeabi-v7a
+          - target: x86_64-linux-android
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v7
+      
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97"
+          targets: ${{ matrix.target }}
+      
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-${{ matrix.target }}
+      
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+      
+      - name: Set environment variables
+        run: |
+          TARGET_UPPER=$(echo "${{ matrix.target }}" | tr '[:lower:]-' '[:upper:]_')
+          echo "NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
+          echo "CC_${TARGET_UPPER}=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.target }}24-clang" >> $GITHUB_ENV
+          echo "CXX_${TARGET_UPPER}=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.target }}24-clang++" >> $GITHUB_ENV
+          echo "AR_${TARGET_UPPER}=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" >> $GITHUB_ENV
+          echo "CARGO_TARGET_${TARGET_UPPER}_LINKER=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.target }}24-clang" >> $GITHUB_ENV
+      
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_PROFILE_RELEASE_LTO: false
+      
+      - name: Rename binary
+        run: |
+          mv target/${{ matrix.target }}/release/agent target/${{ matrix.target }}/release/agent-android-${{ matrix.arch }}
+      
+      - uses: actions/upload-artifact@v7
+        with:
+          name: agent-android-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/agent-android-${{ matrix.arch }}
