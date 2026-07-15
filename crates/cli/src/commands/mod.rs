@@ -14,6 +14,7 @@ mod import_pi;
 mod settings_sync;
 mod uninstall;
 
+use agent_code_lib::llm::provider::detect_provider;
 use agent_code_lib::query::QueryEngine;
 
 /// Result of executing a command.
@@ -809,14 +810,21 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 );
 
                 // Recreate provider with new base_url and swap it in.
-                if let Some(api_key) = engine.state().config.api.api_key.as_ref() {
+                let swap_kind = found_provider
+                    .unwrap_or_else(|| detect_provider(new_model, final_base_url));
+                if agent_code_lib::llm::provider::resolve_api_key(swap_kind, &engine.state().config).is_some() {
                     let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
                         new_model,
                         final_base_url,
-                        api_key,
+                        &engine.state().config,
                     );
                     engine.set_provider_sync(new_provider);
                     tracing::info!("[model] Provider swapped to match new model");
+                } else {
+                    println!(
+                        "⚠ No API key for {:?}. Set {} or add a [api.provider_keys.{}] entry in config.toml.",
+                        swap_kind, swap_kind.env_var_name(), swap_kind.toml_key()
+                    );
                 }
                 // Update provider_kind to match the new model.
                 engine.state_mut().provider_kind = agent_code_lib::llm::provider::detect_provider(
@@ -898,11 +906,14 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
 
                         // Recreate provider with new base_url and swap it in.
                         let final_base_url = &engine.state().config.api.base_url;
-                        if let Some(api_key) = engine.state().config.api.api_key.as_ref() {
+                        if agent_code_lib::llm::provider::resolve_api_key(
+                            detect_provider(&chosen, final_base_url),
+                            &engine.state().config,
+                        ).is_some() {
                             let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
                                 &chosen,
                                 final_base_url,
-                                api_key,
+                                &engine.state().config,
                             );
                             engine.set_provider_sync(new_provider);
                             tracing::info!("[model] Provider swapped to match new model");
@@ -978,11 +989,12 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         {
                             let model = engine.state().config.api.model.clone();
                             let base_url = engine.state().config.api.base_url.clone();
-                            if let Some(api_key) = engine.state().config.api.api_key.clone() {
+                            let kind = detect_provider(&model, &base_url);
+                            if agent_code_lib::llm::provider::resolve_api_key(kind, &engine.state().config).is_some() {
                                 let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
                                     &model,
                                     &base_url,
-                                    &api_key,
+                                    &engine.state().config,
                                 );
                                 engine.set_provider_sync(new_provider);
                                 tracing::info!("[resume] Provider swapped to match restored model");

@@ -267,22 +267,44 @@ pub async fn models_for_provider_filtered(
         .collect()
 }
 
-/// Create a provider from config (model, base_url, api_key).
-/// Used by `/model` to recreate the provider when switching models.
+/// Resolve the API key for a specific provider kind, scoped to that
+/// provider only — never a different provider's key:
+///
+/// 1. The provider-specific env var (e.g. `NVIDIA_API_KEY`).
+/// 2. A per-provider key from config (`config.api.provider_keys[<kind>]`).
+/// 3. The generic `config.api.api_key` *only* for the unspecified
+///    provider (`AgentCode` / `OpenAiCompatible`), which owns
+///    `AGENT_CODE_API_KEY`. A concrete provider (e.g. NVIDIA) must use
+///    its own key — we never send a different provider's key to it.
+pub fn resolve_api_key(kind: ProviderKind, config: &crate::config::Config) -> Option<String> {
+    // 1. Provider-specific env var.
+    if let Some(key) = kind.api_key_from_env() {
+        return Some(key);
+    }
+    // 2. Per-provider key from config.
+    if let Some(key) = config.api.provider_keys.get(kind.toml_key()) {
+        if !key.is_empty() {
+            return Some(key.clone());
+        }
+    }
+    // 3. Fallback only for the unspecified provider (owns AGENT_CODE_API_KEY).
+    if matches!(kind, ProviderKind::OpenAiCompatible | ProviderKind::AgentCode) {
+        return config.api.api_key.clone();
+    }
+    None
+}
+
+/// Create a provider from config (model, base_url). The API key is
+/// resolved per-provider via [`resolve_api_key`], so each provider uses
+/// its own credential (env var, then per-provider config key) instead of
+/// a different provider's key.
 pub fn create_provider_from_config(
     model: &str,
     base_url: &str,
-    api_key: &str,
+    config: &crate::config::Config,
 ) -> std::sync::Arc<dyn Provider> {
     let kind = detect_provider(model, base_url);
-    // Prefer the provider-specific env var over the passed key. This ensures
-    // that switching to a provider like NVIDIA NIM (which only needs its own
-    // API key, no login) uses the correct credentials even if `config.api
-    // .api_key` holds a different provider's key.
-    let resolved_key = kind
-        .api_key_from_env()
-        .filter(|k| !k.is_empty())
-        .unwrap_or_else(|| api_key.to_string());
+    let resolved_key = resolve_api_key(kind, config).unwrap_or_default();
     match kind {
         ProviderKind::AzureOpenAi => std::sync::Arc::new(
             crate::llm::azure_openai::AzureOpenAiProvider::new(base_url, &resolved_key),
@@ -441,6 +463,9 @@ pub enum ProviderKind {
     Perplexity,
     Nvidia,
     OpenAiCompatible,
+    /// Generic / unspecified provider. Owns `AGENT_CODE_API_KEY` — the
+    /// fallback key used when no concrete provider is assigned.
+    AgentCode,
 }
 
 impl ProviderKind {
@@ -466,6 +491,7 @@ impl ProviderKind {
             Self::Vertex,
             Self::AzureOpenAi,
             Self::OpenAiCompatible,
+            Self::AgentCode,
         ]
     }
 
@@ -476,7 +502,7 @@ impl ProviderKind {
             return false;
         }
         // OpenAiCompatible is a fallback, not a real provider.
-        if matches!(self, Self::OpenAiCompatible) {
+        if matches!(self, Self::OpenAiCompatible | Self::AgentCode) {
             return false;
         }
         self.api_key_from_env().is_some()
@@ -527,7 +553,8 @@ impl ProviderKind {
             | Self::Cohere
             | Self::Perplexity
             | Self::Nvidia
-            | Self::OpenAiCompatible => WireFormat::OpenAiCompatible,
+            | Self::OpenAiCompatible
+            | Self::AgentCode => WireFormat::OpenAiCompatible,
         }
     }
 
@@ -551,6 +578,7 @@ impl ProviderKind {
             Self::Perplexity => "perplexity",
             Self::AzureOpenAi => "openai",
             Self::OpenAiCompatible => "",
+            Self::AgentCode => "agentcode",
         }
     }
 
@@ -575,7 +603,7 @@ impl ProviderKind {
             Self::Perplexity => Some("https://api.perplexity.ai"),
             Self::Nvidia => Some("https://integrate.api.nvidia.com/v1"),
             // These require user-supplied URLs.
-            Self::Bedrock | Self::Vertex | Self::AzureOpenAi | Self::OpenAiCompatible => None,
+            Self::Bedrock | Self::Vertex | Self::AzureOpenAi | Self::OpenAiCompatible | Self::AgentCode => None,
         }
     }
 
@@ -599,6 +627,7 @@ impl ProviderKind {
             Self::Perplexity => "PERPLEXITY_API_KEY",
             Self::Nvidia => "NVIDIA_API_KEY",
             Self::OpenAiCompatible => "OPENAI_API_KEY",
+            Self::AgentCode => "AGENT_CODE_API_KEY",
         }
     }
 }

@@ -315,11 +315,12 @@ pub(super) async fn event_loop(
 
                         // Recreate provider with new base_url and swap it in.
                         let final_base_url = eng.state().config.api.base_url.clone();
-                        if let Some(api_key) = eng.state().config.api.api_key.clone() {
+                        let kind = agent_code_lib::llm::provider::detect_provider(&name, &final_base_url);
+                        if agent_code_lib::llm::provider::resolve_api_key(kind, &eng.state().config).is_some() {
                             let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
                                 &name,
                                 &final_base_url,
-                                &api_key,
+                                &eng.state().config,
                             );
                             eng.set_provider_sync(new_provider);
                             tracing::info!("[model] Provider swapped to match new model");

@@ -629,19 +629,11 @@ async fn async_main() -> anyhow::Result<()> {
     // with an empty placeholder so provider construction below still
     // type-checks; the provider is never used before the early
     // return at the `dump_system_prompt` branch.
-    let api_key = if config.api.auth_mode == ApiAuthMode::ApiKey {
-        if let Some(key) = config.api.api_key.as_deref() {
-            Some(key)
-        } else if cli.dump_system_prompt {
-            Some("")
-        } else {
-            return Err(anyhow::anyhow!(
-                "API key required. Set AGENT_CODE_API_KEY or pass --api-key."
-            ));
-        }
-    } else {
-        None
-    };
+    //
+    // Per-provider key resolution:
+    //   - Concrete provider (e.g. NVIDIA): use NVIDIA_API_KEY env, then per-provider config key.
+    //   - Generic/unspecified (OpenAiCompatible/AgentCode): use AGENT_CODE_API_KEY env, then config.api.api_key.
+    //   - Never fall back to a different provider's key.
 
     // Initialize LLM provider. If --model or --provider implies a different
     // provider than what's in the config, override the base URL to match.
@@ -667,6 +659,7 @@ async fn async_main() -> anyhow::Result<()> {
             "openrouter" | "or" => ProviderKind::OpenRouter,
             "opencode" | "oc" | "zen" => ProviderKind::OpenCode,
             "opencode-go" | "oc-go" | "zen-go" => ProviderKind::OpenCodeGo,
+            "agentcode" | "ac" => ProviderKind::AgentCode,
             _ => detect_provider(&config.api.model, &config.api.base_url),
         },
     };
@@ -683,6 +676,27 @@ async fn async_main() -> anyhow::Result<()> {
     }
     if config.api.auth_mode == ApiAuthMode::XaiOauth && cli.api_base_url.is_none() {
         config.api.base_url = "https://api.x.ai/v1".to_string();
+    }
+
+    // Resolve the API key per-provider (never substitute a different provider's key).
+    let resolved_key: Option<String> =
+        if config.api.auth_mode == ApiAuthMode::ApiKey {
+            agent_code_lib::llm::provider::resolve_api_key(provider_kind, &config)
+        } else {
+            None
+        };
+
+    // Require a key for the detected provider (unless dumping the system prompt).
+    if config.api.auth_mode == ApiAuthMode::ApiKey
+        && resolved_key.is_none()
+        && !cli.dump_system_prompt
+    {
+        return Err(anyhow::anyhow!(
+            "No API key for provider {:?}. Set {} (or add a [api.provider_keys.{}] entry in config.toml).",
+            provider_kind,
+            provider_kind.env_var_name(),
+            provider_kind.toml_key()
+        ));
     }
 
     let llm: Arc<dyn agent_code_lib::llm::provider::Provider> = match config.api.auth_mode {
@@ -709,14 +723,10 @@ async fn async_main() -> anyhow::Result<()> {
             )
         }
         ApiAuthMode::ApiKey => {
-            let api_key = api_key.expect("api_key is set for ApiAuthMode::ApiKey");
-            // Use create_provider_from_config so the provider-specific env var
-            // (e.g. NVIDIA_API_KEY, OPENCODE_API_KEY) is preferred over the
-            // generic config.api.api_key. This matches the /model swap path.
             agent_code_lib::llm::provider::create_provider_from_config(
                 &config.api.model,
                 &config.api.base_url,
-                api_key,
+                &config,
             )
         }
     };
@@ -774,9 +784,7 @@ async fn async_main() -> anyhow::Result<()> {
         && !cli.acp
     {
         let check_url = format!("{}/models", config.api.base_url);
-        let check_key = api_key
-            .expect("api_key is set for ApiAuthMode::ApiKey")
-            .to_string();
+        let check_key = resolved_key.clone().unwrap_or_default();
         Some(tokio::spawn(async move {
             tokio::process::Command::new("curl")
                 .args([

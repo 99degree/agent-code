@@ -606,6 +606,10 @@ fn render_config_toml(result: &SetupResult) -> String {
     // Subscription (codex_chatgpt) auth has no API key field.
     if result.auth_mode == "api_key" && !result.api_key.is_empty() && result.api_key != "ollama" {
         api.insert("api_key".into(), result.api_key.clone().into());
+        // Also store under provider_keys[provider] for per-provider resolution.
+        let mut provider_keys = toml::value::Table::new();
+        provider_keys.insert(result.provider.clone(), result.api_key.clone().into());
+        api.insert("provider_keys".into(), toml::Value::Table(provider_keys));
     }
 
     let mut permissions = toml::value::Table::new();

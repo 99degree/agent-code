@@ -268,6 +268,14 @@ pub struct ApiConfig {
     /// a dumped config that could be shared.
     #[serde(default, skip_serializing)]
     pub api_key_helper: Option<String>,
+    /// Per-provider API keys, keyed by provider name (e.g. `"nvidia"`,
+    /// `"openai"`). Consulted after the provider-specific env var and
+    /// before the generic `api_key`, so each provider uses its own
+    /// credential instead of a different provider's (e.g. a Google key
+    /// is never sent to NVIDIA). Populated by the setup wizard; not
+    /// dumped via `--print-config`.
+    #[serde(default, skip_serializing)]
+    pub provider_keys: std::collections::HashMap<String, String>,
     /// Optional Codex home directory for `auth_mode = "codex_chatgpt"`.
     /// When unset, `$CODEX_HOME` wins, then `~/.codex`.
     pub codex_home: Option<String>,
@@ -377,6 +385,7 @@ impl Default for ApiConfig {
             fast_model: None,
             api_key,
             api_key_helper: None,
+            provider_keys: std::collections::HashMap::new(),
             codex_home: None,
             max_output_tokens: Some(16384),
             max_context: None,
