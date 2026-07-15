@@ -826,12 +826,15 @@ fn clear_scrollback(lines: usize) {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    let char_count = s.chars().count();
+    if char_count <= max {
         s.to_string()
     } else if max > 3 {
-        format!("{}...", &s[..max - 3])
+        let end = s.char_indices().nth(max - 3).map_or(s.len(), |(i, _)| i);
+        format!("{}...", &s[..end])
     } else {
-        s[..max].to_string()
+        let end = s.char_indices().nth(max).map_or(s.len(), |(i, _)| i);
+        s[..end].to_string()
     }
 }
 
