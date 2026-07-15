@@ -1337,6 +1337,39 @@ impl QueryEngine {
             }
 
             if cancelled {
+                // Record the partial assistant message so the next turn has a
+                // consistent history (assistant + tool_result pairs).
+                if !content_blocks.is_empty() {
+                    let assistant_msg = Message::Assistant(AssistantMessage {
+                        uuid: Uuid::new_v4(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        content: content_blocks.clone(),
+                        model: Some(model.clone()),
+                        usage: Some(usage.clone()),
+                        stop_reason: Some(StopReason::EndTurn),
+                        request_id: None,
+                    });
+                    self.state.push_message(assistant_msg);
+
+                    // Add tool_result messages for any tool_use blocks in the
+                    // assistant message, so the next API call doesn't fail with
+                    // orphaned tool_calls.
+                    for block in &content_blocks {
+                        if let ContentBlock::ToolUse { id, name, .. } = block {
+                            let result_msg = crate::llm::message::tool_result_message(
+                                id,
+                                "(cancelled)",
+                                true,
+                            );
+                            self.state.push_message(result_msg);
+                            sink.on_tool_call_result(
+                                id,
+                                name,
+                                &crate::tools::ToolResult::error("(cancelled)".to_string()),
+                            );
+                        }
+                    }
+                }
                 // Deliver events fast-path tools emitted before the cancel
                 // (plan-proposed, output chunks) — the Step-8 drain below is
                 // unreachable on this exit.
