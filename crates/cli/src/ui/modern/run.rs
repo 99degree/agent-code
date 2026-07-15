@@ -381,6 +381,19 @@ pub(super) async fn event_loop(
             }
         }
 
+        // Apply deferred `/import-pi`. try_lock so it doesn't block the UI.
+        if let Some(args) = app.pending_import_pi.take() {
+            let engine_arc = session.engine();
+            match engine_arc.try_lock() {
+                Ok(mut eng) => {
+                    app.apply_import_pi_action(&mut eng, &args);
+                }
+                Err(_) => {
+                    app.pending_import_pi = Some(args);
+                }
+            }
+        }
+
         // Start a pending turn if idle.
         if turn.is_none()
             && let Some(prompt) = app.pending_submit.take()

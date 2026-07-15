@@ -243,17 +243,14 @@ fn scan_session_meta(path: &Path) -> ScanMeta {
                     }
                 }
                 PiEntry::Message(_) => message_count += 1,
-                PiEntry::Session(meta) => {
-                    if label.is_none() {
-                        label = meta.label;
-                    }
+                PiEntry::Session(meta) if label.is_none() => {
+                    label = meta.label;
                 }
-                PiEntry::SessionInfo(info) => {
-                    if label.is_none() {
-                        label = Some(info.name);
-                    }
+                PiEntry::SessionInfo(info) if label.is_none() => {
+                    label = Some(info.name);
                     break;
                 }
+                PiEntry::SessionInfo(_) => break,
                 _ => {}
             }
         }

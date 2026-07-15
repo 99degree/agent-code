@@ -10,7 +10,7 @@
 //! the conversation, change settings, or execute side effects.
 
 mod heapdump;
-mod import_pi;
+pub mod import_pi;
 mod settings_sync;
 mod uninstall;
 

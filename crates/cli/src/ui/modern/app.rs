@@ -237,6 +237,7 @@ pub(crate) fn try_expand_skill_slash(
             | "sessions"
             | "resume"
             | "normalize"
+            | "import-pi"
     ) {
         return None;
     }
@@ -367,6 +368,8 @@ pub struct App {
     pub pending_resume: Option<PendingSessionAction>,
     /// `/normalize` action waiting for the run loop (needs the engine lock).
     pub pending_normalize: bool,
+    /// `/import-pi` action waiting for the run loop (needs the engine lock).
+    pub pending_import_pi: Option<String>,
     /// Prompts typed mid-turn, sent FIFO when the turn ends (plan §M5).
     pub queue: std::collections::VecDeque<String>,
     /// When true, runtime should cancel the active turn.
@@ -452,6 +455,7 @@ impl App {
             pending_model: None,
             pending_resume: None,
             pending_normalize: false,
+            pending_import_pi: None,
             queue: std::collections::VecDeque::new(),
             cancel_requested: false,
             quit_armed: false,
@@ -735,7 +739,7 @@ impl App {
                 "Keys: Enter send · Shift+Tab mode · Esc/Ctrl+C cancel turn (again to quit) · \
                  Ctrl+T tasks · permission prompt: y once / a session / f always / n deny · \
                  Skills: /commit /review /test /… (same as classic) · \
-                 /model [id] · /session [id] · /resume <id> · /normalize · /clear /terminal-setup /stats /exit"
+                 /model [id] · /session [id] · /resume <id> · /import-pi · /normalize · /clear /terminal-setup /stats /exit"
                     .into(),
             ));
             self.input.clear();
@@ -794,6 +798,15 @@ impl App {
         // /normalize runs the full normalization suite on the engine's messages.
         if text.trim().eq_ignore_ascii_case("/normalize") {
             self.pending_normalize = true;
+            self.input.clear();
+            self.cursor = 0;
+            self.dirty = true;
+            return;
+        }
+        // /import-pi needs the engine lock to import sessions.
+        if let Some(rest) = text.trim().strip_prefix("/import-pi") {
+            let args = rest.trim().strip_prefix(' ').map(|s| s.to_string());
+            self.pending_import_pi = Some(args.unwrap_or_default());
             self.input.clear();
             self.cursor = 0;
             self.dirty = true;
@@ -991,6 +1004,20 @@ impl App {
             agent_code_lib::llm::normalize::normalize_all(&mut engine.state_mut().messages);
         self.transcript
             .push(TranscriptItem::System(report.to_string()));
+        self.dirty = true;
+    }
+
+    /// Apply a deferred `/import-pi` action. Shows the result in the transcript.
+    pub fn apply_import_pi_action(
+        &mut self,
+        engine: &mut agent_code_lib::query::QueryEngine,
+        args: &str,
+    ) {
+        let result = crate::commands::import_pi::execute(
+            if args.is_empty() { None } else { Some(args) },
+            engine,
+        );
+        self.transcript.push(TranscriptItem::System(result));
         self.dirty = true;
     }
 

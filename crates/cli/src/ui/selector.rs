@@ -110,11 +110,9 @@ fn select_index(options: &[SelectOption]) -> (usize, bool) {
                         selected = 0;
                     }
                 }
-                KeyCode::Backspace => {
-                    if !filter.is_empty() {
-                        filter.pop();
-                        update_filter(options, &filter, &mut filtered_indices, &mut selected);
-                    }
+                KeyCode::Backspace if !filter.is_empty() => {
+                    filter.pop();
+                    update_filter(options, &filter, &mut filtered_indices, &mut selected);
                 }
                 KeyCode::Char(c) => {
                     // Ctrl+C to cancel.
