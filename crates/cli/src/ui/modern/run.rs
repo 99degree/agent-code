@@ -308,6 +308,10 @@ pub(super) async fn event_loop(
                             if models.iter().any(|(n, _)| *n == name) {
                                 if let Some(url) = kind.default_base_url() {
                                     eng.state_mut().config.api.base_url = url.to_string();
+                                } else {
+                                    // Provider has no default URL — clear the stale
+                                    // one so the catalog lookup resolves correctly.
+                                    eng.state_mut().config.api.base_url.clear();
                                 }
                                 swap_kind = Some(kind);
                                 break;

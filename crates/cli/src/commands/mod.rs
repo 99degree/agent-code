@@ -792,6 +792,9 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                                 url
                             );
                             engine.state_mut().config.api.base_url = url.to_string();
+                        } else {
+                            // Provider has no default URL — clear stale base_url.
+                            engine.state_mut().config.api.base_url.clear();
                         }
                         break;
                     }
@@ -908,10 +911,13 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             .iter()
                             .find(|(n, _, _)| n == &chosen)
                             .map(|(_, _, k)| *k);
-                        if let Some(kind) = found_kind
-                            && let Some(url) = kind.default_base_url()
-                        {
-                            engine.state_mut().config.api.base_url = url.to_string();
+                        if let Some(kind) = found_kind {
+                            if let Some(url) = kind.default_base_url() {
+                                engine.state_mut().config.api.base_url = url.to_string();
+                            } else {
+                                // Provider has no default URL — clear stale base_url.
+                                engine.state_mut().config.api.base_url.clear();
+                            }
                         }
                         engine.state_mut().config.api.model = chosen.clone();
 
@@ -5888,6 +5894,10 @@ fn execute_session_picker(engine: &mut QueryEngine) {
                 if !data.base_url.is_empty() {
                     state.config.api.base_url = data.base_url.clone();
                 } else if !data.model.is_empty() {
+                    // Session didn't store a base_url — the one from
+                    // settings.toml may belong to a different provider.
+                    // Clear it so the catalog lookup resolves correctly.
+                    state.config.api.base_url.clear();
                     // Fallback: detect base_url from model name.
                     for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
                         let models =
