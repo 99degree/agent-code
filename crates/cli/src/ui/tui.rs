@@ -157,7 +157,7 @@ pub fn render_thinking_block(text: &str) {
 }
 
 /// Render a turn summary panel showing all tool executions.
-pub fn render_turn_summary(state: &TurnState, turn: usize) {
+pub fn render_turn_summary(state: &TurnState, turn: usize, hide_result_preview: bool) {
     if state.tools.is_empty() {
         return;
     }
@@ -216,7 +216,9 @@ pub fn render_turn_summary(state: &TurnState, turn: usize) {
             ("✓", success)
         };
 
-        let result_info = if let Some(ref preview) = tool.result_preview {
+        let result_info = if hide_result_preview {
+            String::new()
+        } else if let Some(ref preview) = tool.result_preview {
             let suffix = if tool.line_count > 1 {
                 format!(" (+{})", tool.line_count - 1)
             } else {

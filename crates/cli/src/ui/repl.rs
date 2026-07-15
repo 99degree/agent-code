@@ -684,6 +684,8 @@ struct TerminalSink {
     verbose: bool,
     /// Accumulated turn state for the summary panel.
     turn_state: super::tui::SharedTurnState,
+    /// Hide tool result previews in the turn summary panel.
+    hide_tool_result_preview: bool,
 }
 
 impl TerminalSink {
@@ -694,6 +696,7 @@ impl TerminalSink {
             indicator: Arc::new(Mutex::new(None)),
             verbose,
             turn_state: super::tui::new_turn_state(),
+            hide_tool_result_preview: false,
         }
     }
 
@@ -816,7 +819,7 @@ impl StreamSink for TerminalSink {
         let state = self.turn_state.lock().unwrap();
         let has_success = state.tools.iter().any(|t| !t.is_error);
         if state.tools.len() > 1 || has_success {
-            super::tui::render_turn_summary(&state, turn);
+            super::tui::render_turn_summary(&state, turn, self.hide_tool_result_preview);
         }
         drop(state);
 
@@ -1267,7 +1270,9 @@ pub async fn run_repl(engine: &mut QueryEngine) -> anyhow::Result<()> {
     let mut last_statusline_turn: u64 = 0;
 
     loop {
-        let sink = TerminalSink::new(verbose);
+        let hide_preview = engine.state().config.ui.hide_tool_result_preview;
+        let mut sink = TerminalSink::new(verbose);
+        sink.hide_tool_result_preview = hide_preview;
         let t = super::theme::current();
 
         // Surface any background tasks that finished since the last
