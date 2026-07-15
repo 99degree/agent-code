@@ -387,6 +387,7 @@ pub(super) async fn event_loop(
                         app.tokens_out = eng.state().total_usage.output_tokens;
                         app.turn_count = eng.state().turn_count;
                         app.model = eng.state().config.api.model.clone();
+                        app.provider_kind = eng.state().provider_kind;
 
                         // The model can toggle plan mode itself
                         // (EnterPlanMode/ExitPlanMode tools). Sync the badge

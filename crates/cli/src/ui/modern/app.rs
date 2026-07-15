@@ -49,10 +49,10 @@ pub(crate) fn parse_model_slash(input: &str) -> Option<PendingModelAction> {
 
 /// Format `/model` catalog lines for the transcript (no stdin selector).
 pub(crate) fn format_model_catalog(
-    _provider: agent_code_lib::llm::provider::ProviderKind,
+    provider: agent_code_lib::llm::provider::ProviderKind,
     current: &str,
 ) -> Vec<String> {
-    let mut lines = vec![format!("Model: {current}")];
+    let mut lines = vec![format!("Model: {current} [{provider:?}]")];
 
     // Collect all configured providers with models.
     let mut configured: Vec<(agent_code_lib::llm::provider::ProviderKind, String)> = Vec::new();
@@ -208,6 +208,7 @@ pub enum Phase {
 #[derive(Debug, Clone)]
 pub struct App {
     pub model: String,
+    pub provider_kind: agent_code_lib::llm::provider::ProviderKind,
     pub cwd: String,
     pub session_id: String,
     pub version: String,
@@ -299,6 +300,7 @@ impl App {
     ) -> Self {
         Self {
             model: model.into(),
+            provider_kind: agent_code_lib::llm::provider::ProviderKind::OpenAiCompatible,
             cwd: cwd.into(),
             session_id: session_id.into(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -703,6 +705,9 @@ impl App {
                 }
                 set_model(name.clone());
                 self.model = name.clone();
+                if let Some(kind) = found_provider {
+                    self.provider_kind = kind;
+                }
                 self.status_message = format!("model → {name}");
                 if let Some(kind) = found_provider {
                     self.transcript.push(TranscriptItem::System(format!(
