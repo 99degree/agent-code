@@ -34,7 +34,7 @@ impl Default for RetryConfig {
             max_backoff: Duration::from_secs(60),
             multiplier: 2.0,
             max_overload_retries: 3,
-            max_retry_after_ms: 0,
+            max_retry_after_ms: 10_000, // 10 seconds
         }
     }
 }
@@ -63,9 +63,26 @@ impl RetryState {
                 if self.rate_limit_retries > config.max_retries {
                     return RetryAction::Abort("Rate limit retries exhausted".into());
                 }
-                RetryAction::Retry {
-                    after: Duration::from_millis(*retry_after),
+                // If API specifies a retry-after longer than our threshold, abort.
+                // 0 means no limit (use API's value regardless).
+                if config.max_retry_after_ms > 0 && *retry_after > config.max_retry_after_ms {
+                    return RetryAction::Abort(format!(
+                        "Rate limit retry-after {}ms exceeds max {}ms",
+                        retry_after, config.max_retry_after_ms
+                    ));
                 }
+                // If no retry-after from API, use exponential backoff.
+                let after = if *retry_after > 0 {
+                    Duration::from_millis(*retry_after)
+                } else {
+                    calculate_backoff(
+                        self.rate_limit_retries,
+                        config.initial_backoff,
+                        config.max_backoff,
+                        config.multiplier,
+                    )
+                };
+                RetryAction::Retry { after }
             }
             RetryableError::Overloaded => {
                 self.overload_retries += 1;

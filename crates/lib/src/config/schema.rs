@@ -472,10 +472,10 @@ pub struct UiConfig {
     pub tui: String,
     /// Between-turn status line customization.
     pub statusline: StatusLineConfig,
-    /// Hide tool result previews in the turn summary panel.
-    /// When true, only shows tool name and detail (no "→ result" suffix).
+    /// Hide tool details in the turn summary panel.
+    /// When true, only shows the header line (turn N: X tools (Y ok, Z err)).
     #[serde(default)]
-    pub hide_tool_result_preview: bool,
+    pub hide_tool_summary_details: bool,
 }
 
 fn default_tui_kind() -> String {
@@ -492,7 +492,7 @@ impl Default for UiConfig {
             edit_mode: "emacs".to_string(),
             tui: default_tui_kind(),
             statusline: StatusLineConfig::default(),
-            hide_tool_result_preview: false,
+            hide_tool_summary_details: false,
         }
     }
 }

@@ -157,7 +157,7 @@ pub fn render_thinking_block(text: &str) {
 }
 
 /// Render a turn summary panel showing all tool executions.
-pub fn render_turn_summary(state: &TurnState, turn: usize, hide_result_preview: bool) {
+pub fn render_turn_summary(state: &TurnState, turn: usize, hide_details: bool) {
     if state.tools.is_empty() {
         return;
     }
@@ -209,39 +209,39 @@ pub fn render_turn_summary(state: &TurnState, turn: usize, hide_result_preview: 
     ]));
 
     // Tool list.
-    for tool in &state.tools {
-        let (icon, color) = if tool.is_error {
-            ("✗", error)
-        } else {
-            ("✓", success)
-        };
+    if !hide_details {
+        for tool in &state.tools {
+            let (icon, color) = if tool.is_error {
+                ("✗", error)
+            } else {
+                ("✓", success)
+            };
 
-        let result_info = if hide_result_preview {
-            String::new()
-        } else if let Some(ref preview) = tool.result_preview {
-            let suffix = if tool.line_count > 1 {
-                format!(" (+{})", tool.line_count - 1)
+            let result_info = if let Some(ref preview) = tool.result_preview {
+                let suffix = if tool.line_count > 1 {
+                    format!(" (+{})", tool.line_count - 1)
+                } else {
+                    String::new()
+                };
+                format!(" → {}{}", truncate(preview, 50), suffix)
             } else {
                 String::new()
             };
-            format!(" → {}{}", truncate(preview, 50), suffix)
-        } else {
-            String::new()
-        };
 
-        lines.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(muted)),
-            Span::styled(format!("{icon} "), Style::default().fg(color)),
-            Span::styled(
-                &tool.name,
-                Style::default().fg(accent).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" {}", truncate(&tool.detail, 40)),
-                Style::default().fg(muted),
-            ),
-            Span::styled(result_info, Style::default().fg(muted)),
-        ]));
+            lines.push(Line::from(vec![
+                Span::styled("  │ ", Style::default().fg(muted)),
+                Span::styled(format!("{icon} "), Style::default().fg(color)),
+                Span::styled(
+                    &tool.name,
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {}", truncate(&tool.detail, 40)),
+                    Style::default().fg(muted),
+                ),
+                Span::styled(result_info, Style::default().fg(muted)),
+            ]));
+        }
     }
 
     // Token usage.
