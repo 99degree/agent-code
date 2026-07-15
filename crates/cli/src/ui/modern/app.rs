@@ -26,6 +26,16 @@ pub enum PendingModelAction {
     Set(String),
 }
 
+/// Local `/session` / `/resume` action deferred to the run loop (needs the
+/// engine lock to restore state).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingSessionAction {
+    /// Show recent sessions in the transcript.
+    Show,
+    /// Resume a specific session by ID.
+    Resume(String),
+}
+
 /// Parse `/model` / `/model <id>` from a slash line. Returns `None` if the
 /// input is not a model command.
 pub(crate) fn parse_model_slash(input: &str) -> Option<PendingModelAction> {
@@ -87,6 +97,105 @@ pub(crate) fn format_model_catalog(
     lines
 }
 
+/// Parse `/session` / `/session <id>` / `/sessions` / `/resume <id>` from a
+/// slash line. Returns `None` if the input is not a session command.
+pub(crate) fn parse_session_slash(input: &str) -> Option<PendingSessionAction> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let rest = trimmed.trim_start_matches('/');
+    let (cmd, args) = match rest.split_once(char::is_whitespace) {
+        Some((c, a)) => (c, Some(a.trim())),
+        None => (rest, None),
+    };
+    if !cmd.eq_ignore_ascii_case("session")
+        && !cmd.eq_ignore_ascii_case("sessions")
+        && !cmd.eq_ignore_ascii_case("resume")
+    {
+        return None;
+    }
+    match args {
+        None | Some("") => Some(PendingSessionAction::Show),
+        Some(id) => Some(PendingSessionAction::Resume(id.to_string())),
+    }
+}
+
+/// Format recent sessions for the transcript.
+pub(crate) fn format_session_list(
+    sessions: &[agent_code_lib::services::session::SessionSummary],
+) -> Vec<String> {
+    if sessions.is_empty() {
+        return vec!["No sessions found.".into()];
+    }
+    let mut lines = vec!["Recent sessions (use /resume <id>):".into()];
+    for s in sessions {
+        let display_id = if s.id.len() > 12 { &s.id[..12] } else { &s.id };
+        let label = s.label.as_deref().unwrap_or("");
+        let tag_str = if s.tags.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", s.tags.join(", "))
+        };
+        let time = &s.updated_at;
+        let time_short = if time.len() >= 16 { &time[..16] } else { time };
+        lines.push(format!(
+            "  {display_id}  {label}{tag_str}  {}/{}, turn {}, {time_short}",
+            s.model, s.message_count, s.turn_count,
+        ));
+    }
+    lines.push("Use /resume <id> to continue a session.".into());
+    lines
+}
+
+/// Convert a slice of [`Message`] into transcript items, showing the last
+/// `max` messages (for display on session resume).
+fn messages_to_transcript(
+    messages: &[agent_code_lib::llm::message::Message],
+    max: usize,
+) -> Vec<TranscriptItem> {
+    use agent_code_lib::llm::message::{ContentBlock, Message};
+    let start = messages.len().saturating_sub(max);
+    messages[start..]
+        .iter()
+        .filter_map(|m| match m {
+            Message::User(u) => {
+                let text: String = u
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text: t } if !t.is_empty() => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(TranscriptItem::User(text))
+                }
+            }
+            Message::Assistant(a) => {
+                let text: String = a
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text: t } if !t.is_empty() => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(TranscriptItem::Assistant(text))
+                }
+            }
+            Message::System(_) => None,
+        })
+        .collect()
+}
+
 /// Expand a user-invocable skill slash (`/commit`, `/review foo`) to its
 /// prompt body. Returns `None` for non-slash input, modern-local commands,
 /// or unknown skill names (those pass through as normal prompts).
@@ -124,6 +233,9 @@ pub(crate) fn try_expand_skill_slash(
             | "fullscreen"
             | "stats"
             | "model"
+            | "session"
+            | "sessions"
+            | "resume"
     ) {
         return None;
     }
@@ -250,6 +362,8 @@ pub struct App {
     pub pending_submit: Option<String>,
     /// `/model` action waiting for the run loop (needs the engine lock).
     pub pending_model: Option<PendingModelAction>,
+    /// `/session` / `/resume` action waiting for the run loop (needs the engine lock).
+    pub pending_resume: Option<PendingSessionAction>,
     /// Prompts typed mid-turn, sent FIFO when the turn ends (plan §M5).
     pub queue: std::collections::VecDeque<String>,
     /// When true, runtime should cancel the active turn.
@@ -333,6 +447,7 @@ impl App {
             should_quit: false,
             pending_submit: None,
             pending_model: None,
+            pending_resume: None,
             queue: std::collections::VecDeque::new(),
             cancel_requested: false,
             quit_armed: false,
@@ -616,7 +731,7 @@ impl App {
                 "Keys: Enter send · Shift+Tab mode · Esc/Ctrl+C cancel turn (again to quit) · \
                  Ctrl+T tasks · permission prompt: y once / a session / f always / n deny · \
                  Skills: /commit /review /test /… (same as classic) · \
-                 /model [id] · /clear /terminal-setup /stats /exit"
+                 /model [id] · /session [id] · /resume <id> · /clear /terminal-setup /stats /exit"
                     .into(),
             ));
             self.input.clear();
@@ -659,6 +774,14 @@ impl App {
         // mid-turn so a switch is not sent to the LLM as a prompt.
         if let Some(action) = parse_model_slash(&text) {
             self.pending_model = Some(action);
+            self.input.clear();
+            self.cursor = 0;
+            self.dirty = true;
+            return;
+        }
+        // /session and /resume also need the engine lock (to restore state).
+        if let Some(action) = parse_session_slash(&text) {
+            self.pending_resume = Some(action);
             self.input.clear();
             self.cursor = 0;
             self.dirty = true;
@@ -720,6 +843,130 @@ impl App {
             }
         }
         self.dirty = true;
+    }
+
+    /// Apply a deferred `/session` / `/resume` action against live engine state.
+    /// For `Show`, list sessions in the transcript. For `Resume`, load and
+    /// restore the engine state (called by the run loop with the lock held).
+    pub fn apply_resume_action(
+        &mut self,
+        action: PendingSessionAction,
+        engine: Option<&mut agent_code_lib::query::QueryEngine>,
+    ) {
+        match action {
+            PendingSessionAction::Show => {
+                let sessions = agent_code_lib::services::session::list_sessions(20);
+                for line in format_session_list(&sessions) {
+                    self.transcript.push(TranscriptItem::System(line));
+                }
+            }
+            PendingSessionAction::Resume(session_id) => {
+                if let Some(engine) = engine {
+                    self.apply_resume_action_resume(engine, &session_id);
+                } else {
+                    self.transcript.push(TranscriptItem::Error(
+                        "Could not acquire engine lock for resume.".into(),
+                    ));
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Apply a deferred `/resume` action that restores engine state.
+    /// Called by the run loop after acquiring the engine lock.
+    pub fn apply_resume_action_resume(
+        &mut self,
+        engine: &mut agent_code_lib::query::QueryEngine,
+        session_id: &str,
+    ) {
+        match agent_code_lib::services::session::load_session(session_id) {
+            Ok(data) => {
+                let restored_plan = data.plan_mode;
+                {
+                    let state = engine.state_mut();
+                    state.messages = data.messages;
+                    state.turn_count = data.turn_count;
+                    state.total_cost_usd = data.total_cost_usd;
+                    state.total_usage.input_tokens = data.total_input_tokens;
+                    state.total_usage.output_tokens = data.total_output_tokens;
+                    state.plan_mode = restored_plan;
+                    state.brief_mode = data.brief_mode;
+                    if !data.response_style.is_empty()
+                        && let Some(style) =
+                            agent_code_lib::state::ResponseStyle::from_name(&data.response_style)
+                    {
+                        state.response_style = style;
+                    }
+                    if !data.model.is_empty() {
+                        state.config.api.model = data.model.clone();
+                    }
+                    if !data.base_url.is_empty() {
+                        state.config.api.base_url = data.base_url.clone();
+                    } else if !data.model.is_empty() {
+                        state.config.api.base_url.clear();
+                    }
+                    // Find provider from model catalog.
+                    for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
+                        let models =
+                            agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
+                        if models.iter().any(|(n, _)| n == &state.config.api.model) {
+                            if let Some(url) = kind.default_base_url() {
+                                state.config.api.base_url = url.to_string();
+                            }
+                            break;
+                        }
+                    }
+                    state.provider_kind = agent_code_lib::llm::provider::detect_provider(
+                        &state.config.api.model,
+                        &state.config.api.base_url,
+                    );
+                    if let Some(max_ctx) = agent_code_lib::llm::models_config::max_context_for_model(
+                        &state.config.api.model,
+                    ) {
+                        state.config.api.max_context = Some(max_ctx);
+                    }
+                }
+                // Recreate provider with restored base_url.
+                let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
+                    &engine.state().config.api.model,
+                    &engine.state().config.api.base_url,
+                    &engine.state().config,
+                );
+                engine.set_provider_sync(new_provider);
+
+                // Update App display state.
+                self.session_id = data.id.clone();
+                self.model = engine.state().config.api.model.clone();
+                self.provider_kind = engine.state().provider_kind;
+                self.turn_count = data.turn_count;
+                self.tokens_in = data.total_input_tokens;
+                self.tokens_out = data.total_output_tokens;
+                self.cost_usd = data.total_cost_usd;
+                self.mode = if restored_plan {
+                    super::mode::SessionMode::Plan
+                } else {
+                    super::mode::SessionMode::Normal
+                };
+
+                // Rebuild transcript from loaded messages.
+                self.transcript.clear();
+                self.transcript.push(TranscriptItem::System(format!(
+                    "Resumed session: {} ({} messages, {} turns)",
+                    &data.id[..data.id.len().min(12)],
+                    engine.state().messages.len(),
+                    data.turn_count
+                )));
+                let recent = messages_to_transcript(&engine.state().messages, 20);
+                self.transcript.extend(recent);
+            }
+            Err(e) => {
+                self.transcript.push(TranscriptItem::Error(format!(
+                    "Failed to resume session '{session_id}': {e}"
+                )));
+            }
+        }
+        self.scroll = ScrollState::Follow;
     }
 
     /// Resolve user text into a turn: expand `/skill` invocations the same
@@ -1667,5 +1914,103 @@ mod tests {
         let before = app.transcript.len();
         app.resolve_permission(PermissionResponse::Deny);
         assert_eq!(app.transcript.len(), before);
+    }
+
+    #[test]
+    fn parse_session_slash_show_and_set() {
+        assert_eq!(
+            parse_session_slash("/session"),
+            Some(PendingSessionAction::Show)
+        );
+        assert_eq!(
+            parse_session_slash("/session  "),
+            Some(PendingSessionAction::Show)
+        );
+        assert_eq!(
+            parse_session_slash("/sessions"),
+            Some(PendingSessionAction::Show)
+        );
+        assert_eq!(
+            parse_session_slash("/resume abc123"),
+            Some(PendingSessionAction::Resume("abc123".into()))
+        );
+        assert_eq!(
+            parse_session_slash("/session abc123"),
+            Some(PendingSessionAction::Resume("abc123".into()))
+        );
+        assert_eq!(
+            parse_session_slash("/SESSION ABC"),
+            Some(PendingSessionAction::Resume("ABC".into()))
+        );
+        assert!(parse_session_slash("/help").is_none());
+        assert!(parse_session_slash("session").is_none());
+        assert!(parse_session_slash("hello").is_none());
+    }
+
+    #[test]
+    fn submit_session_sets_pending_not_turn() {
+        let mut app = App::new("grok-4", "/tmp", "s");
+        app.input = "/session".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert_eq!(app.pending_resume, Some(PendingSessionAction::Show));
+        assert!(app.pending_submit.is_none());
+        assert!(app.input.is_empty());
+        assert_eq!(app.phase, Phase::Idle);
+    }
+
+    #[test]
+    fn submit_resume_sets_pending_even_while_streaming() {
+        let mut app = App::new("grok-4", "/tmp", "s");
+        app.phase = Phase::Streaming;
+        app.input = "/resume abc123".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert_eq!(
+            app.pending_resume,
+            Some(PendingSessionAction::Resume("abc123".into()))
+        );
+        assert!(
+            app.queue.is_empty(),
+            "/resume must not be queued as a prompt"
+        );
+        assert!(app.pending_submit.is_none());
+    }
+
+    #[test]
+    fn try_expand_skill_slash_ignores_session_commands() {
+        assert!(try_expand_skill_slash("/session", "/tmp", false).is_none());
+        assert!(try_expand_skill_slash("/sessions", "/tmp", false).is_none());
+        assert!(try_expand_skill_slash("/resume abc", "/tmp", false).is_none());
+        assert!(try_expand_skill_slash("/session abc", "/tmp", false).is_none());
+    }
+
+    #[test]
+    fn format_session_list_empty() {
+        let lines = format_session_list(&[]);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("No sessions"));
+    }
+
+    #[test]
+    fn format_session_list_with_sessions() {
+        use agent_code_lib::services::session::SessionSummary;
+        let sessions = vec![SessionSummary {
+            id: "test-session-12345".into(),
+            cwd: "/tmp".into(),
+            model: "grok-4".into(),
+            turn_count: 5,
+            message_count: 10,
+            updated_at: "2025-01-15T10:30:00Z".into(),
+            label: Some("my session".into()),
+            tags: vec!["rust".into(), "wip".into()],
+        }];
+        let lines = format_session_list(&sessions);
+        assert!(lines.len() >= 3); // header + session + footer
+        let joined = lines.join("\n");
+        assert!(joined.contains("test-session"));
+        assert!(joined.contains("my session"));
+        assert!(joined.contains("[rust, wip]"));
+        assert!(joined.contains("resume"));
     }
 }

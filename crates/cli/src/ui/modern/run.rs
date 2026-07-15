@@ -345,6 +345,28 @@ pub(super) async fn event_loop(
             }
         }
 
+        // Apply deferred `/session` / `/resume` (list or restore). try_lock
+        // so a mid-turn resume does not block the UI; retry on next iteration.
+        if let Some(action) = app.pending_resume.take() {
+            use super::app::PendingSessionAction;
+            match action {
+                PendingSessionAction::Show => {
+                    app.apply_resume_action(PendingSessionAction::Show, None);
+                }
+                PendingSessionAction::Resume(session_id) => {
+                    let engine_arc = session.engine();
+                    match engine_arc.try_lock() {
+                        Ok(mut eng) => {
+                            app.apply_resume_action_resume(&mut eng, &session_id);
+                        }
+                        Err(_) => {
+                            app.pending_resume = Some(PendingSessionAction::Resume(session_id));
+                        }
+                    }
+                }
+            }
+        }
+
         // Start a pending turn if idle.
         if turn.is_none()
             && let Some(prompt) = app.pending_submit.take()
