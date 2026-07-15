@@ -324,6 +324,7 @@ pub(super) async fn run_script(
         h.eng_rx,
         h.base_mode,
         &mut term_events,
+        &mut None,
         &mut draw,
     )
     .await

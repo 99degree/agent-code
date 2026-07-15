@@ -1,6 +1,4 @@
-use std::fs;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
     // Run `git describe --always --dirty` to get version string.

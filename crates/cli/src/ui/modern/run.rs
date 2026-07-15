@@ -84,6 +84,7 @@ pub async fn run_modern_tui(mut engine: QueryEngine) -> anyhow::Result<()> {
         eng_rx,
         base_permission_mode,
         &mut term_events,
+        &mut None,
         &mut draw,
     )
     .await;
@@ -201,7 +202,7 @@ fn spawn_blocking_event_reader() -> tokio::sync::mpsc::UnboundedReceiver<Event> 
 /// Yield the next terminal event from either the crossterm [`EventStream`]
 /// (desktop) or the Termux blocking-read channel.
 async fn next_terminal_event(
-    stream: Option<&mut EventStream>,
+    stream: Option<&mut (impl futures::Stream<Item = std::io::Result<Event>> + Unpin)>,
     rx: Option<&mut tokio::sync::mpsc::UnboundedReceiver<Event>>,
 ) -> Option<std::io::Result<Event>> {
     match (stream, rx) {
@@ -255,6 +256,7 @@ pub(super) async fn event_loop(
     mut eng_rx: mpsc::UnboundedReceiver<EngineEvent>,
     base_permission_mode: PermissionMode,
     term_events: &mut (impl futures::Stream<Item = std::io::Result<Event>> + Unpin),
+    term_rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<Event>>,
     draw: &mut dyn FnMut(&mut App) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let mut turn: Option<TurnHandle> = None;
@@ -431,7 +433,7 @@ pub(super) async fn event_loop(
 
         tokio::select! {
             // Terminal input.
-            maybe_ev = next_terminal_event(term_events.as_mut(), term_rx.as_mut()) => {
+            maybe_ev = next_terminal_event(Some(term_events), term_rx.as_mut()) => {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) => {
                         // Disarm a stale quit before routing the key so a late

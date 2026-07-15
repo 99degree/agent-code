@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use agent_code_lib::llm::message::{
-    AssistantMessage, ContentBlock, Message, StopReason, SystemMessage, SystemMessageType,
-    Usage, UserMessage,
+    AssistantMessage, ContentBlock, Message, StopReason, SystemMessage, SystemMessageType, Usage,
+    UserMessage,
 };
 use agent_code_lib::services::session::SessionData;
 
@@ -32,7 +32,11 @@ pub fn execute(args: Option<&str>, engine: &mut agent_code_lib::query::QueryEngi
     // Expand ~ to home directory.
     let expanded = if path.starts_with('~') {
         if let Some(home) = std::env::var_os("HOME") {
-            format!("{}{}", home.to_string_lossy(), path.strip_prefix('~').unwrap_or(path))
+            format!(
+                "{}{}",
+                home.to_string_lossy(),
+                path.strip_prefix('~').unwrap_or(path)
+            )
         } else {
             path.to_string()
         }
@@ -119,8 +123,11 @@ fn cwd_to_pi_dir_name(cwd: &str) -> String {
 /// Get the pi.dev sessions directory.
 fn get_pi_sessions_dir() -> Option<PathBuf> {
     agent_code_lib::config::agent_config_dir().map(|d| {
-        std::path::PathBuf::from(d.to_string_lossy().replace(".config/agent-code", ".pi/agent"))
-            .join("sessions")
+        std::path::PathBuf::from(
+            d.to_string_lossy()
+                .replace(".config/agent-code", ".pi/agent"),
+        )
+        .join("sessions")
     })
 }
 
@@ -130,12 +137,7 @@ fn get_session_files(dir: &Path) -> Vec<(String, Option<String>)> {
         .ok()
         .map(|dirs| {
             dirs.filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        == Some("jsonl")
-                })
+                .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
                 .filter_map(|e| {
                     let name = e.file_name().to_str()?.to_string();
                     let path = e.path();
@@ -216,17 +218,19 @@ fn scan_session_meta(path: &Path) -> ScanMeta {
     let mut label: Option<String> = None;
 
     // Get label from filename (format: timestamp_id.jsonl -> use id as label)
-    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-        if let Some(idx) = stem.rfind('_') {
-            label = Some(stem[idx+1..].to_string());
-        }
+    if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        && let Some(idx) = stem.rfind('_')
+    {
+        label = Some(stem[idx + 1..].to_string());
     }
 
     if let Ok(file) = std::fs::File::open(path) {
         let reader = BufReader::new(file);
         let mut lines_scanned = 0usize;
         for line in reader.lines().map_while(Result::ok) {
-            if lines_scanned >= 100 { break; }
+            if lines_scanned >= 100 {
+                break;
+            }
             lines_scanned += 1;
             let entry: PiEntry = match serde_json::from_str(&line) {
                 Ok(e) => e,
@@ -255,11 +259,18 @@ fn scan_session_meta(path: &Path) -> ScanMeta {
         }
         // Extrapolate message count from line density
         if message_count > 0 && lines_scanned > 0 {
-            let total_lines = std::fs::read_to_string(path).ok().map(|s| s.lines().count()).unwrap_or(lines_scanned);
+            let total_lines = std::fs::read_to_string(path)
+                .ok()
+                .map(|s| s.lines().count())
+                .unwrap_or(lines_scanned);
             message_count = message_count * total_lines / lines_scanned;
         }
     }
-    ScanMeta { model, message_count, label }
+    ScanMeta {
+        model,
+        message_count,
+        label,
+    }
 }
 
 /// List pi.dev sessions for the current directory (with richer metadata).
@@ -297,8 +308,16 @@ fn list_sessions_for_cwd(cwd: &str) -> String {
 
     // Sort by most recently modified (newest first).
     sessions.sort_by(|a, b| {
-        let ma = session_dir.join(&a.0).metadata().and_then(|m| m.modified()).ok();
-        let mb = session_dir.join(&b.0).metadata().and_then(|m| m.modified()).ok();
+        let ma = session_dir
+            .join(&a.0)
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok();
+        let mb = session_dir
+            .join(&b.0)
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok();
         mb.cmp(&ma)
     });
 
@@ -317,9 +336,16 @@ fn list_sessions_for_cwd(cwd: &str) -> String {
         let full = session_dir.join(name);
         let age = file_age(&full);
         let meta = scan_session_meta(&full);
-        let model_str = meta.model.as_deref().map(|m| format!(" \u{00b7} {m}")).unwrap_or_default();
+        let model_str = meta
+            .model
+            .as_deref()
+            .map(|m| format!(" \u{00b7} {m}"))
+            .unwrap_or_default();
         let msgs = meta.message_count;
-        let label_str = label.as_deref().map(|l| format!(" \"{l}\"")).unwrap_or_default();
+        let label_str = label
+            .as_deref()
+            .map(|l| format!(" \"{l}\""))
+            .unwrap_or_default();
         let display_name = name.strip_suffix(".jsonl").unwrap_or(name);
         out.push_str(&format!(
             "  {}. {}{label_str}{model_str} \u{00b7} {} msgs \u{00b7} {}\n",
@@ -333,11 +359,10 @@ fn list_sessions_for_cwd(cwd: &str) -> String {
     out
 }
 
-
 /// Import a pi.dev JSONL session file and save as agent-code session.
 fn import_pi_session(pi_path: &Path) -> Result<String, String> {
-    let content = std::fs::read_to_string(pi_path)
-        .map_err(|e| format!("Failed to read file: {e}"))?;
+    let content =
+        std::fs::read_to_string(pi_path).map_err(|e| format!("Failed to read file: {e}"))?;
 
     let mut session_meta: Option<PiSessionMeta> = None;
     let mut model_name = String::from("unknown");
@@ -393,10 +418,13 @@ fn import_pi_session(pi_path: &Path) -> Result<String, String> {
             }
             PiEntry::SessionInfo(info) => {
                 // Use session_info name as label if no label set.
-                if session_meta.as_ref().and_then(|m| m.label.is_none().then(|| &m.id)).is_some() {
-                    if let Some(ref mut meta) = session_meta {
-                        meta.label = Some(info.name);
-                    }
+                if session_meta
+                    .as_ref()
+                    .and_then(|m| m.label.is_none().then_some(&m.id))
+                    .is_some()
+                    && let Some(ref mut meta) = session_meta
+                {
+                    meta.label = Some(info.name);
                 }
             }
             PiEntry::ThinkingLevelChange(_)
@@ -583,9 +611,7 @@ struct PiInnerMessage {
 #[serde(tag = "type")]
 enum PiContentBlock {
     #[serde(rename = "text")]
-    Text {
-        text: String,
-    },
+    Text { text: String },
     #[serde(rename = "thinking")]
     Thinking {
         thinking: String,
@@ -616,10 +642,7 @@ struct PiUsage {
 // Conversion
 // ============================================================================
 
-fn convert_message(
-    msg: &PiMessage,
-    tool_calls: &mut HashMap<String, String>,
-) -> Option<Message> {
+fn convert_message(msg: &PiMessage, tool_calls: &mut HashMap<String, String>) -> Option<Message> {
     let inner = &msg.message;
     let timestamp = chrono::Utc::now().to_rfc3339();
 
@@ -656,7 +679,10 @@ fn convert_message(
                     PiContentBlock::Text { text } => {
                         content.push(ContentBlock::Text { text: text.clone() });
                     }
-                    PiContentBlock::Thinking { thinking, signature } => {
+                    PiContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    } => {
                         content.push(ContentBlock::Thinking {
                             thinking: thinking.clone(),
                             signature: signature.clone(),

@@ -132,6 +132,7 @@ pub async fn execute_tool_calls(
                         // allows apply, and denials reach the audit hooks.
                         let ctx_prompter = ctx.permission_prompter.clone();
                         let ctx_allows = ctx.session_allows.clone();
+                        let ctx_allow_all = ctx.session_allow_all.clone();
                         let ctx_denials = ctx.denial_tracker.clone();
                         let ctx_events = ctx.tool_events.clone();
                         let ctx_origin = ctx.agent_origin.clone();
@@ -150,6 +151,7 @@ pub async fn execute_tool_calls(
                                     task_manager: None,
                                     subagent_colors: None,
                                     session_allows: ctx_allows,
+                                    session_allow_all: ctx_allow_all,
                                     permission_prompter: ctx_prompter,
                                     question_asker: None,
                                     agent_origin: ctx_origin,
