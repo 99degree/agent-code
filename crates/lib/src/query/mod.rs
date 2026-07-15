@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::hooks::{HookEvent, HookRegistry};
@@ -897,7 +897,7 @@ impl QueryEngine {
                         }
                         None => {
                             compact_tracking.consecutive_failures += 1;
-                            warn!(
+                            debug!(
                                 "LLM compaction failed (attempt {})",
                                 compact_tracking.consecutive_failures
                             );
@@ -1060,7 +1060,7 @@ impl QueryEngine {
                         // abort the turn immediately. The provider returns
                         // `Network("cancelled")` when the cancel token fires.
                         if self.cancel.is_cancelled() {
-                            warn!("LLM call cancelled by user; aborting turn");
+                            debug!("LLM call cancelled by user; aborting turn");
                             return Ok(());
                         }
                         let retryable = match &e {
@@ -1096,7 +1096,7 @@ impl QueryEngine {
                                 tokio::select! {
                                     _ = tokio::time::sleep(after) => {}
                                     _ = self.cancel.cancelled() => {
-                                        warn!("Turn cancelled during retry backoff");
+                                        debug!("Turn cancelled during retry backoff");
                                         sink.on_warning("Cancelled");
                                         sink.on_turn_outcome(turn + 1, "cancelled");
                                         self.state.is_query_active = false;
@@ -1133,11 +1133,11 @@ impl QueryEngine {
                                     // Consuming a turn keeps `max_turns` as the
                                     // bound, so a persistently-down provider still
                                     // terminates instead of hanging.
-                                    warn!("Unattended retry: waiting 30s for capacity");
+                                    debug!("Unattended retry: waiting 30s for capacity");
                                     tokio::select! {
                                         _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
                                         _ = self.cancel.cancelled() => {
-                                            warn!("Turn cancelled during capacity wait");
+                                            debug!("Turn cancelled during capacity wait");
                                             sink.on_warning("Cancelled");
                                             sink.on_turn_outcome(turn + 1, "cancelled");
                                             self.state.is_query_active = false;
@@ -1338,7 +1338,7 @@ impl QueryEngine {
                         }
                     }
                     _ = self.cancel.cancelled() => {
-                        warn!("Turn cancelled by user");
+                        debug!("Turn cancelled by user");
                         cancelled = true;
                         // Abort any in-flight streaming tool handles — and
                         // resolve their UI cards. `on_tool_call_start` already
@@ -1828,7 +1828,7 @@ impl QueryEngine {
             // Continue the loop — the model will see the tool results.
         }
 
-        warn!("Max turns ({max_turns}) reached");
+        debug!("Max turns ({max_turns}) reached");
         sink.on_warning(&format!("Agent stopped after {max_turns} turns"));
         sink.on_turn_outcome(max_turns, "max_turns");
         self.state.is_query_active = false;
