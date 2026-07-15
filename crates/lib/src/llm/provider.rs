@@ -445,6 +445,17 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
         return ProviderKind::Perplexity;
     }
 
+    // Last resort: look up the model in models-db.toml.
+    // This covers providers whose model names don't have a predictable
+    // prefix (e.g. OpenCode's mimo, kimi, etc.).
+    for &kind in ProviderKind::all() {
+        for (id, _) in models_for_provider(kind) {
+            if id.eq_ignore_ascii_case(model) {
+                return kind;
+            }
+        }
+    }
+
     ProviderKind::OpenAiCompatible
 }
 
