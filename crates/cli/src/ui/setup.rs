@@ -23,6 +23,19 @@ pub fn needs_setup() -> bool {
 
 /// Run the interactive setup wizard.
 pub fn run_setup() -> Option<SetupResult> {
+    // Load existing config to check what's already set.
+    if let Ok(config) = agent_code_lib::config::Config::load() {
+        // If API key, base_url, and model are all set, skip setup entirely.
+        let has_api_key = config.api.api_key.is_some();
+        let has_base_url = !config.api.base_url.is_empty()
+            && config.api.base_url != "https://api.openai.com/v1";
+        let has_model = config.api.model != "gpt-5.4";
+
+        if has_api_key && has_base_url && has_model {
+            return None;
+        }
+    }
+
     println!();
     println!("{}", " agent-code setup ".on_dark_cyan().white().bold());
     println!();
