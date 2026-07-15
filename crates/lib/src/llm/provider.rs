@@ -175,7 +175,20 @@ pub fn models_for_provider_with_custom(kind: ProviderKind) -> Vec<(String, Strin
         }
     }
 
-    models
+    // For NVIDIA provider, filter out models with context window smaller than 128k.
+    if kind == ProviderKind::Nvidia {
+        models
+            .into_iter()
+            .filter(|(id, _)| {
+                super::models_config::model_meets_context_requirement(
+                    id,
+                    super::models_config::MIN_CONTEXT_WINDOW,
+                )
+            })
+            .collect()
+    } else {
+        models
+    }
 }
 
 /// Fetch the list of models actually available from the OpenCode Zen API.

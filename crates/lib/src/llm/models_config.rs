@@ -7,6 +7,9 @@ use serde::Deserialize;
 
 use super::provider::ProviderKind;
 
+/// Minimum context window to show in /model selector (128k tokens).
+pub const MIN_CONTEXT_WINDOW: u64 = 128 * 1024;
+
 /// Default template for models.toml.
 const DEFAULT_TEMPLATE: &str = r#"# Custom model lists per provider.
 # Models defined here are added to the built-in lists for /model.
@@ -360,6 +363,29 @@ pub fn custom_models_for_provider(
     // This is a bit awkward due to lifetime issues, so we'll return a empty slice
     // and handle the merging in the caller.
     &[]
+}
+
+/// Get context window for a model from models.toml config.
+/// Returns None if the model is not in the config or has no context_window.
+pub fn get_model_context_window(model_id: &str) -> Option<u64> {
+    let config = load_models_config();
+    for provider_models in config.provider.values() {
+        for model in &provider_models.models {
+            if model.id == model_id {
+                return model.context_window;
+            }
+        }
+    }
+    None
+}
+
+/// Check if a model meets the minimum context window requirement.
+/// Models without context_window info are included (assumed to be large enough).
+pub fn model_meets_context_requirement(model_id: &str, min_context: u64) -> bool {
+    match get_model_context_window(model_id) {
+        Some(ctx) => ctx >= min_context,
+        None => true, // Include models without context info
+    }
 }
 
 #[cfg(test)]
