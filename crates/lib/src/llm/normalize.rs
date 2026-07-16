@@ -46,6 +46,34 @@ pub fn ensure_tool_result_pairing(messages: &mut Vec<Message>) {
             ));
         }
     }
+
+    // Remove tool_results that don't have matching tool_use IDs.
+    // This handles history corruption from compaction where tool_results
+    // exist without their corresponding tool_use.
+    let all_tool_use_ids: Vec<String> = messages
+        .iter()
+        .filter_map(|msg| match msg {
+            Message::Assistant(a) => Some(a.content.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+
+    for msg in messages.iter_mut() {
+        if let Message::User(u) = msg {
+            u.content.retain(|block| {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                    all_tool_use_ids.contains(tool_use_id)
+                } else {
+                    true
+                }
+            });
+        }
+    }
 }
 
 /// Remove empty text blocks from messages.
