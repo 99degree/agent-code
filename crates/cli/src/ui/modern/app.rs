@@ -1024,9 +1024,18 @@ impl App {
         match agent_code_lib::services::session::load_session(session_id) {
             Ok(data) => {
                 let restored_plan = data.plan_mode;
+                let skipped_pre_summary;
                 {
                     let state = engine.state_mut();
                     state.messages = data.messages;
+                    // Skip everything before the last compaction summary so the
+                    // active history starts there; preserve the dropped prefix
+                    // in `full_history` so the full session is still saved.
+                    let frozen = agent_code_lib::llm::normalize::truncate_to_last_summary(
+                        &mut state.messages,
+                    );
+                    skipped_pre_summary = frozen.len();
+                    state.full_history = frozen;
                     // Normalize: fill orphaned tool_use with dummy results,
                     // strip empties, merge consecutive user messages.
                     agent_code_lib::llm::normalize::normalize_messages(&mut state.messages);
@@ -1103,6 +1112,12 @@ impl App {
                 )));
                 let recent = messages_to_transcript(&engine.state().messages, 20);
                 self.transcript.extend(recent);
+                if skipped_pre_summary > 0 {
+                    self.transcript.push(TranscriptItem::System(format!(
+                        "Skipped {} pre-summary message(s) — resumed from last compaction summary.",
+                        skipped_pre_summary
+                    )));
+                }
             }
             Err(e) => {
                 self.transcript.push(TranscriptItem::Error(format!(

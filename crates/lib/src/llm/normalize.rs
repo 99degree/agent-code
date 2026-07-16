@@ -134,6 +134,35 @@ pub fn normalize_messages(messages: &mut Vec<Message>) {
     merge_consecutive_user_messages(messages);
 }
 
+/// Drop every message before the last compaction summary, returning the
+/// dropped prefix.
+///
+/// A compaction summary (`is_compact_summary`) distills everything that
+/// preceded it, so re-loading those earlier messages on resume is pure
+/// context bloat that inflates the first turn's input tokens (and trips
+/// the high-token-usage warning). Keeping only the summary and everything
+/// after it shrinks the *active* history to the meaningful tail, which is
+/// what the LLM and token accounting see.
+///
+/// The dropped prefix is returned so the caller can preserve it for
+/// on-disk persistence of the *full* history (the active tail alone would
+/// lose the distilled precedent). Returns an empty vector when the history
+/// holds no compaction summary or the summary is already first.
+pub fn truncate_to_last_summary(messages: &mut Vec<Message>) -> Vec<Message> {
+    let last_summary = messages
+        .iter()
+        .rposition(|m| matches!(m, Message::User(u) if u.is_compact_summary));
+    match last_summary {
+        Some(idx) if idx > 0 => {
+            // split_off(idx) leaves `messages` holding [0, idx) (the dropped
+            // head) and returns [idx, end) (the active tail, summary first).
+            let active = messages.split_off(idx);
+            std::mem::replace(messages, active)
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Remove empty messages (messages with no content blocks after stripping).
 pub fn remove_empty_messages(messages: &mut Vec<Message>) {
     messages.retain(|msg| match msg {
@@ -804,5 +833,54 @@ mod tests {
             report.to_string(),
             "Session messages are already normalized."
         );
+    }
+
+    #[test]
+    fn test_truncate_to_last_summary_drops_head_keeps_summary() {
+        let summary = Message::User(UserMessage {
+            uuid: Uuid::new_v4(),
+            timestamp: String::new(),
+            content: vec![ContentBlock::Text {
+                text: "prior context summary".into(),
+            }],
+            is_meta: true,
+            is_compact_summary: true,
+        });
+        let mut messages = vec![
+            user_message("old message before summary"),
+            user_message("another old message"),
+            summary,
+            user_message("recent message after summary"),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::Text {
+                    text: "reply".into(),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+
+        let head = truncate_to_last_summary(&mut messages);
+        // Two pre-summary messages dropped and returned.
+        assert_eq!(head.len(), 2);
+        // Active tail keeps the summary as the first message.
+        assert_eq!(messages.len(), 3);
+        if let Message::User(u) = &messages[0] {
+            assert!(u.is_compact_summary);
+        } else {
+            panic!("expected summary first");
+        }
+    }
+
+    #[test]
+    fn test_truncate_to_last_summary_no_summary_is_noop() {
+        let mut messages = vec![user_message("a"), user_message("b")];
+        let head = truncate_to_last_summary(&mut messages);
+        assert!(head.is_empty());
+        assert_eq!(messages.len(), 2);
     }
 }

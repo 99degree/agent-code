@@ -984,6 +984,13 @@ async fn async_main() -> anyhow::Result<()> {
                     state.messages = data.messages;
                     // Normalize: fill orphaned tool_use with dummy results,
                     // strip empties, merge consecutive user messages.
+                    // Skip everything before the last compaction summary so
+                    // the active history starts there; preserve the dropped
+                    // prefix in `full_history` so the full session is saved.
+                    let frozen = agent_code_lib::llm::normalize::truncate_to_last_summary(
+                        &mut state.messages,
+                    );
+                    state.full_history = frozen;
                     agent_code_lib::llm::normalize::normalize_messages(&mut state.messages);
                     state.turn_count = data.turn_count;
                     state.total_cost_usd = data.total_cost_usd;
