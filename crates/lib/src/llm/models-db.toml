@@ -376,6 +376,10 @@ name = "GPT OSS 20B · Fast"
 id = "stepfun-ai/step-3.7-flash"
 name = "Step 3.7 Flash"
 
+[[nvidia]]
+id = "thinkingmachines/inkling"
+name = "Inkling"
+
 # ============================================================================
 # OPENROUTER
 # ============================================================================
@@ -482,10 +486,6 @@ name = "Codestral"
 [[openrouter]]
 id = "mistralai/devstral-2512"
 name = "Devstral"
-
- [[openrouter]]
- id = "thinkingmachines/inkling"
- name = "Inkling"
 
 # ============================================================================
 # OPENCODE (Zen - paid)
