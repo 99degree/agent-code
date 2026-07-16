@@ -483,6 +483,9 @@ name = "Codestral"
 id = "mistralai/devstral-2512"
 name = "Devstral"
 
+ [[openrouter]]
+ id = "thinkingmachines/inkling"
+ name = "Inkling"
 
 # ============================================================================
 # OPENCODE (Zen - paid)
