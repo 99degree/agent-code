@@ -633,7 +633,7 @@ pub async fn compact_with_llm(
             .to_string(),
         tools: vec![],
         model: model.to_string(),
-        max_tokens: 4096,
+        max_tokens: 16384,
         temperature: None,
         enable_caching: false,
         tool_choice: Default::default(),
