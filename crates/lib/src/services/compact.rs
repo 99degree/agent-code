@@ -396,8 +396,33 @@ const MAX_TOOL_RESULT_CHARS_FOR_SUMMARY: usize = 2000;
 /// All message text is run through [`secret_masker`] before being
 /// passed to the summarizer, so secrets that appeared in tool output
 /// never end up baked into the summary.
-pub fn build_compact_summary_prompt(messages: &[Message]) -> String {
+pub fn build_compact_summary_prompt(
+    messages: &[Message],
+    prior_summary: Option<&str>,
+    project_context: Option<&str>,
+) -> String {
     let mut context = String::new();
+
+    // Prepend prior summary if available, so the summarizer accumulates
+    // knowledge across compaction cycles rather than starting fresh.
+    if let Some(prior) = prior_summary
+        && !prior.is_empty()
+    {
+        context.push_str("## Previous Summary (from prior compaction)\n");
+        context.push_str(prior);
+        context.push_str("\n\n---\n\n");
+    }
+
+    // Prepend project context (AGENTS.md) so the summarizer understands
+    // project rules and constraints.
+    if let Some(ctx) = project_context
+        && !ctx.is_empty()
+    {
+        context.push_str("## Project Context\n");
+        context.push_str(ctx);
+        context.push_str("\n\n---\n\n");
+    }
+
     for msg in messages {
         match msg {
             Message::User(u) => {
@@ -574,7 +599,30 @@ pub async fn compact_with_llm(
 
     // --- Zone 1: LLM summary ---
     let to_summarize = &messages[..summary_end];
-    let summary_prompt = build_compact_summary_prompt(to_summarize);
+
+    // Extract prior compaction summary if one exists in zone 1.
+    let prior_summary_text = messages[..summary_end].iter().find_map(|m| {
+        if let Message::User(u) = m
+            && u.is_compact_summary
+        {
+            u.content.iter().find_map(|b| {
+                if let ContentBlock::Text { text } = b {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        }
+    });
+
+    // Load AGENTS.md for project context if present.
+    let agents_md = std::fs::read_to_string("AGENTS.md").ok();
+    let project_context = agents_md.as_deref();
+
+    let summary_prompt =
+        build_compact_summary_prompt(to_summarize, prior_summary_text, project_context);
 
     let summary_messages = vec![crate::llm::message::user_message(&summary_prompt)];
     let request = crate::llm::provider::ProviderRequest {
@@ -1031,7 +1079,7 @@ mod tests {
     fn test_build_compact_summary_prompt() {
         use crate::llm::message::*;
         let messages = vec![user_message("hello"), user_message("world")];
-        let prompt = build_compact_summary_prompt(&messages);
+        let prompt = build_compact_summary_prompt(&messages, None, None);
         assert!(prompt.contains("Summarize"));
     }
 
@@ -1039,7 +1087,7 @@ mod tests {
     fn compact_summary_prompt_uses_structured_template() {
         use crate::llm::message::*;
         let messages = vec![user_message("hi")];
-        let prompt = build_compact_summary_prompt(&messages);
+        let prompt = build_compact_summary_prompt(&messages, None, None);
         for section in [
             "## Goal",
             "## Constraints",
@@ -1126,7 +1174,7 @@ mod tests {
                 request_id: None,
             }),
         ];
-        let prompt = build_compact_summary_prompt(&messages);
+        let prompt = build_compact_summary_prompt(&messages, None, None);
         assert!(prompt.contains("user said this"));
         assert!(prompt.contains("assistant said that"));
         assert!(prompt.contains("User:"));
@@ -1140,7 +1188,7 @@ mod tests {
         let messages = vec![user_message(format!(
             "I pasted my AWS key {aws_key} into the file"
         ))];
-        let prompt = build_compact_summary_prompt(&messages);
+        let prompt = build_compact_summary_prompt(&messages, None, None);
         assert!(
             !prompt.contains(aws_key),
             "raw AWS key survived compaction prompt: {prompt}",
@@ -1163,9 +1211,51 @@ mod tests {
             stop_reason: None,
             request_id: None,
         })];
-        let prompt = build_compact_summary_prompt(&messages);
+        let prompt = build_compact_summary_prompt(&messages, None, None);
         assert!(!prompt.contains(secret));
         assert!(prompt.contains("REDACTED"));
+    }
+
+    #[test]
+    fn test_build_compact_summary_prompt_includes_prior_summary() {
+        use crate::llm::message::*;
+        let messages = vec![user_message("new work done")];
+        let prompt =
+            build_compact_summary_prompt(&messages, Some("## Goal\nBuild a web app"), None);
+        assert!(
+            prompt.contains("Previous Summary"),
+            "prior summary section missing"
+        );
+        assert!(prompt.contains("Build a web app"));
+        assert!(prompt.contains("new work done"));
+    }
+
+    #[test]
+    fn test_build_compact_summary_prompt_includes_project_context() {
+        use crate::llm::message::*;
+        let messages = vec![user_message("fix the bug")];
+        let prompt =
+            build_compact_summary_prompt(&messages, None, Some("## Rules\nNo GPL dependencies"));
+        assert!(prompt.contains("Project Context"));
+        assert!(prompt.contains("No GPL dependencies"));
+    }
+
+    #[test]
+    fn test_build_compact_summary_prompt_accumulates_prior_and_context() {
+        use crate::llm::message::*;
+        let messages = vec![user_message("step 3 done")];
+        let prompt = build_compact_summary_prompt(
+            &messages,
+            Some("Prior summary text"),
+            Some("Project rules here"),
+        );
+        // Prior summary comes before project context.
+        let prior_pos = prompt.find("Prior summary text").unwrap();
+        let ctx_pos = prompt.find("Project rules here").unwrap();
+        assert!(prior_pos < ctx_pos);
+        // Both come before conversation.
+        let conv_pos = prompt.find("User: step 3 done").unwrap();
+        assert!(ctx_pos < conv_pos);
     }
 
     #[test]

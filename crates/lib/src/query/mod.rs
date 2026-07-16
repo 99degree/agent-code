@@ -869,58 +869,49 @@ impl QueryEngine {
                 let messages_before = self.state.messages.len();
                 let tokens_before = token_count;
 
-                // Microcompact first: clear stale tool results.
-                let freed = compact::microcompact(&mut self.state.messages, 5);
-                if freed > 0 {
-                    sink.on_compact(freed);
-                    info!("Microcompact freed ~{freed} tokens");
-                }
-
-                // Check if microcompact was enough.
-                let post_mc_tokens = tokens::estimate_context_tokens(self.state.history());
-                if post_mc_tokens >= threshold {
-                    // Full LLM-based compaction: summarize older messages.
-                    info!("Microcompact insufficient, attempting LLM compaction");
-                    let llm_guard = self.llm.read().await;
-                    match compact::compact_with_llm(
-                        &mut self.state.messages,
-                        llm_guard.as_ref(),
-                        &model,
-                        self.cancel.clone(),
-                    )
-                    .await
-                    {
-                        Some(removed) => {
-                            info!("LLM compaction removed {removed} messages");
-                            compact_tracking.was_compacted = true;
-                            compact_tracking.consecutive_failures = 0;
-                        }
-                        None => {
-                            compact_tracking.consecutive_failures += 1;
-                            debug!(
-                                "LLM compaction failed (attempt {})",
-                                compact_tracking.consecutive_failures
+                // Go straight to 3-zone LLM compaction. Skipping standalone
+                // microcompact avoids a redundant KV-cache invalidation.
+                // The 3-zone approach handles all three concerns: summarize
+                // oldest 50%, microcompact middle 25%, keep newest 25% fresh.
+                let llm_guard = self.llm.read().await;
+                match compact::compact_with_llm(
+                    &mut self.state.messages,
+                    llm_guard.as_ref(),
+                    &model,
+                    self.cancel.clone(),
+                )
+                .await
+                {
+                    Some(removed) => {
+                        info!("LLM compaction removed {removed} messages");
+                        compact_tracking.was_compacted = true;
+                        compact_tracking.consecutive_failures = 0;
+                    }
+                    None => {
+                        compact_tracking.consecutive_failures += 1;
+                        debug!(
+                            "LLM compaction failed (attempt {})",
+                            compact_tracking.consecutive_failures
+                        );
+                        // Fallback: context collapse (snip middle messages).
+                        let effective = compact::effective_context_window(&model);
+                        if let Some(collapse) =
+                            crate::services::context_collapse::collapse_to_budget(
+                                self.state.history(),
+                                effective,
+                            )
+                        {
+                            info!(
+                                "Context collapse snipped {} messages, freed ~{} tokens",
+                                collapse.snipped_count, collapse.tokens_freed
                             );
-                            // Fallback: context collapse (snip middle messages).
-                            let effective = compact::effective_context_window(&model);
-                            if let Some(collapse) =
-                                crate::services::context_collapse::collapse_to_budget(
-                                    self.state.history(),
-                                    effective,
-                                )
-                            {
-                                info!(
-                                    "Context collapse snipped {} messages, freed ~{} tokens",
-                                    collapse.snipped_count, collapse.tokens_freed
-                                );
-                                self.state.messages = collapse.api_messages;
-                                sink.on_compact(collapse.tokens_freed);
-                            } else {
-                                // Last resort: aggressive microcompact.
-                                let freed2 = compact::microcompact(&mut self.state.messages, 2);
-                                if freed2 > 0 {
-                                    sink.on_compact(freed2);
-                                }
+                            self.state.messages = collapse.api_messages;
+                            sink.on_compact(collapse.tokens_freed);
+                        } else {
+                            // Last resort: aggressive microcompact.
+                            let freed2 = compact::microcompact(&mut self.state.messages, 2);
+                            if freed2 > 0 {
+                                sink.on_compact(freed2);
                             }
                         }
                     }
