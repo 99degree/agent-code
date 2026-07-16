@@ -34,6 +34,9 @@ impl QuestionAsker for ClassicQuestionAsker {
         // Set input gate so escape watcher doesn't consume our input.
         self.input_gate
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Wait past the escape watcher's 100ms poll window so any in-flight
+        // read returns before we own the terminal.
+        std::thread::sleep(std::time::Duration::from_millis(120));
         let result = self.ask_inner(questions);
         self.input_gate
             .store(false, std::sync::atomic::Ordering::SeqCst);
