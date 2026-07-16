@@ -313,8 +313,6 @@ pub fn estimate_compactable_tokens(messages: &[Message], keep_recent: usize) -> 
 /// Replaces the content of old tool_result blocks with a placeholder,
 /// keeping the most recent `keep_recent` results intact.
 pub fn microcompact(messages: &mut [Message], keep_recent: usize) -> u64 {
-    let keep_recent = keep_recent.max(1);
-
     // Collect indices of compactable tool results (in order).
     let mut compactable_indices: Vec<(usize, usize)> = Vec::new(); // (msg_idx, block_idx)
 
@@ -387,6 +385,11 @@ pub fn compact_boundary_message(summary: &str) -> Message {
     })
 }
 
+/// Maximum characters of tool result content to include in the summary
+/// prompt. Keeps the summarizer's input compact while preserving enough
+/// context to understand what happened.
+const MAX_TOOL_RESULT_CHARS_FOR_SUMMARY: usize = 2000;
+
 /// Build a compact summary request: asks the LLM to summarize
 /// the conversation up to a certain point.
 ///
@@ -398,28 +401,80 @@ pub fn build_compact_summary_prompt(messages: &[Message]) -> String {
     for msg in messages {
         match msg {
             Message::User(u) => {
-                context.push_str("User: ");
                 for block in &u.content {
-                    if let ContentBlock::Text { text } = block {
-                        context.push_str(&secret_masker::mask(text));
+                    match block {
+                        ContentBlock::Text { text } => {
+                            context.push_str("User: ");
+                            context.push_str(&secret_masker::mask(text));
+                            context.push('\n');
+                        }
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => {
+                            // Find the matching tool call name for context.
+                            let tool_name = find_tool_name(messages, tool_use_id);
+                            let truncated = truncate_for_summary(content);
+                            context.push_str(&format!(
+                                "ToolResult({tool_use_id}): [{tool_name}] {truncated}\n"
+                            ));
+                        }
+                        _ => {}
                     }
                 }
-                context.push('\n');
             }
             Message::Assistant(a) => {
-                context.push_str("Assistant: ");
                 for block in &a.content {
-                    if let ContentBlock::Text { text } = block {
-                        context.push_str(&secret_masker::mask(text));
+                    match block {
+                        ContentBlock::Text { text } => {
+                            context.push_str("Assistant: ");
+                            context.push_str(&secret_masker::mask(text));
+                            context.push('\n');
+                        }
+                        ContentBlock::ToolUse { id, name, input } => {
+                            // Include tool call with truncated input for context.
+                            let input_str = serde_json::to_string(input).unwrap_or_default();
+                            let truncated_input = truncate_for_summary(&input_str);
+                            context
+                                .push_str(&format!("ToolCall({id}): [{name}] {truncated_input}\n"));
+                        }
+                        _ => {}
                     }
                 }
-                context.push('\n');
             }
             _ => {}
         }
     }
 
     format!("{SUMMARY_TEMPLATE}\n\n---\n\n{context}")
+}
+
+/// Find the tool name for a given tool_use_id by searching assistant messages.
+fn find_tool_name<'a>(messages: &'a [Message], tool_use_id: &str) -> &'a str {
+    for msg in messages {
+        if let Message::Assistant(a) = msg {
+            for block in &a.content {
+                if let ContentBlock::ToolUse { id, name, .. } = block
+                    && id == tool_use_id
+                {
+                    return name;
+                }
+            }
+        }
+    }
+    "unknown"
+}
+
+/// Truncate a string to MAX_TOOL_RESULT_CHARS_FOR_SUMMARY characters,
+/// appending "..." if truncated.
+fn truncate_for_summary(s: &str) -> String {
+    let masked = secret_masker::mask(s);
+    if masked.len() <= MAX_TOOL_RESULT_CHARS_FOR_SUMMARY {
+        masked
+    } else {
+        format!("{}...", &masked[..MAX_TOOL_RESULT_CHARS_FOR_SUMMARY])
+    }
 }
 
 /// Fixed template for the compaction summary.
@@ -480,16 +535,20 @@ pub fn parse_prompt_too_long_gap(error_text: &str) -> Option<u64> {
     if gap > 0 { Some(gap) } else { None }
 }
 
-/// Perform full LLM-based compaction of the conversation history.
+/// Three-zone compaction strategy for long agentic sessions.
 ///
-/// Splits the message history into two parts: messages to summarize
-/// (older) and messages to keep (recent). Calls the LLM to generate
-/// a summary, then replaces the old messages with:
-/// 1. A compact boundary marker
-/// 2. A summary message (as a user message with is_compact_summary=true)
-/// 3. The kept recent messages
+/// ```text
+/// [===LLM SUMMARY===][==MICROCOMPACT==][===FRESH===]
+///   50% (oldest)       25% (middle)       25% (newest)
+///   summarized         tool results        untouched
+///                      cleared
+/// ```
 ///
-/// Returns the number of messages removed, or None if compaction failed.
+/// After compaction:
+/// - The oldest half is replaced by an LLM-generated summary.
+/// - The middle quarter has its tool results cleared (text preserved)
+///   to bridge the summary to the fresh zone.
+/// - The newest quarter remains completely untouched.
 pub async fn compact_with_llm(
     messages: &mut Vec<Message>,
     llm: &dyn crate::llm::provider::Provider,
@@ -500,19 +559,23 @@ pub async fn compact_with_llm(
         return None; // Not enough messages to compact.
     }
 
-    // Keep the most recent messages (at least 40K tokens worth, or
-    // minimum 5 messages with text content).
-    let keep_count = calculate_keep_count(messages);
-    let split_point = messages.len().saturating_sub(keep_count);
+    // --- Zone calculation ---
+    // Total messages available for the 3-zone split.
+    let total = messages.len();
 
-    if split_point < 2 {
+    // The split points: 50% summarized, 25% microcompacted, 25% fresh.
+    // We need at least 2 messages to summarize and at least 1 to keep.
+    let summary_end = total / 2; // End of zone 1 (summarized by LLM)
+    let microcompact_end = summary_end + (total - summary_end) / 2; // Zone 2 end
+
+    if summary_end < 2 {
         return None; // Not enough to summarize.
     }
 
-    let to_summarize = &messages[..split_point];
+    // --- Zone 1: LLM summary ---
+    let to_summarize = &messages[..summary_end];
     let summary_prompt = build_compact_summary_prompt(to_summarize);
 
-    // Call the LLM to generate the summary.
     let summary_messages = vec![crate::llm::message::user_message(&summary_prompt)];
     let request = crate::llm::provider::ProviderRequest {
         messages: summary_messages,
@@ -538,7 +601,6 @@ pub async fn compact_with_llm(
         }
     };
 
-    // Collect the summary text.
     let mut summary = String::new();
     while let Some(event) = rx.recv().await {
         if let crate::llm::stream::StreamEvent::TextDelta(text) = event {
@@ -550,10 +612,20 @@ pub async fn compact_with_llm(
         return None;
     }
 
-    // Replace old messages with boundary + summary + kept messages.
-    let kept = messages[split_point..].to_vec();
-    let removed = split_point;
+    // --- Zone 2: microcompact (clear tool results, preserve text) ---
+    let mut zone2 = messages[summary_end..microcompact_end].to_vec();
+    let zone2_freed = microcompact(&mut zone2, 0);
+    let zone2_len = zone2.len();
+    if zone2_freed > 0 {
+        tracing::info!("Zone 2 microcompact freed ~{zone2_freed} tokens");
+    }
 
+    // --- Zone 3: fresh (untouched) ---
+    let zone3 = messages[microcompact_end..].to_vec();
+    let zone3_len = zone3.len();
+    let removed = summary_end;
+
+    // --- Reassemble: boundary + summary + zone2 + zone3 ---
     messages.clear();
     messages.push(compact_boundary_message(&summary));
     messages.push(Message::User(UserMessage {
@@ -565,16 +637,20 @@ pub async fn compact_with_llm(
         is_meta: true,
         is_compact_summary: true,
     }));
-    messages.extend(kept);
+    messages.extend(zone2);
+    messages.extend(zone3);
 
-    tracing::info!("Compacted {removed} messages into summary");
+    tracing::info!(
+        "3-zone compact: {removed} summarized, {zone2_len} microcompacted, {zone3_len} fresh"
+    );
     Some(removed)
 }
 
 /// Calculate how many recent messages to keep during compaction.
 ///
-/// Keeps at least 5 messages with text content, or messages totaling
-/// at least 10K estimated tokens, whichever is more.
+/// This is now only used by the pre-query auto-compact path (not the
+/// 3-zone LLM compact). Keeps at least 5 messages with text content,
+/// or messages totaling at least 10K estimated tokens.
 fn calculate_keep_count(messages: &[Message]) -> usize {
     let min_text_messages = 5;
     let min_tokens = 10_000u64;
@@ -583,12 +659,21 @@ fn calculate_keep_count(messages: &[Message]) -> usize {
     let mut count = 0usize;
     let mut text_count = 0usize;
     let mut token_total = 0u64;
+    let mut last_user_msg_idx: Option<usize> = None;
 
     // Walk backwards from the end.
-    for msg in messages.iter().rev() {
+    for (i, msg) in messages.iter().enumerate().rev() {
         let tokens = crate::services::tokens::estimate_message_tokens(msg);
         token_total += tokens;
         count += 1;
+
+        // Track the last user message we've passed.
+        if matches!(msg, Message::User(_)) && last_user_msg_idx.is_none() {
+            // Count from the end, so this is the first user message we hit.
+        }
+        if matches!(msg, Message::User(_)) {
+            last_user_msg_idx = Some(i);
+        }
 
         // Count messages with text content.
         let has_text = match msg {
@@ -613,6 +698,16 @@ fn calculate_keep_count(messages: &[Message]) -> usize {
         // Hard cap.
         if token_total >= max_tokens {
             break;
+        }
+    }
+
+    // Snap to user message boundary: if we stopped just before a user
+    // message, include it so the summary prompt starts with a user turn.
+    if let Some(user_idx) = last_user_msg_idx {
+        let messages_from_end = messages.len() - user_idx;
+        if messages_from_end > count {
+            // The user message is outside our keep window — extend to include it.
+            count = messages_from_end;
         }
     }
 

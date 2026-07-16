@@ -185,7 +185,10 @@ impl std::fmt::Display for NormalizeReport {
             ));
         }
         if self.empty_blocks_removed > 0 {
-            parts.push(format!("{} empty blocks removed", self.empty_blocks_removed));
+            parts.push(format!(
+                "{} empty blocks removed",
+                self.empty_blocks_removed
+            ));
         }
         if self.empty_messages_removed > 0 {
             parts.push(format!(
@@ -663,28 +666,26 @@ mod tests {
 
     #[test]
     fn test_normalize_all_orphaned_tool_calls() {
-        let mut messages = vec![
-            Message::Assistant(AssistantMessage {
-                uuid: Uuid::new_v4(),
-                timestamp: String::new(),
-                content: vec![
-                    ContentBlock::ToolUse {
-                        id: "call_1".into(),
-                        name: "Bash".into(),
-                        input: serde_json::json!({}),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "call_2".into(),
-                        name: "FileRead".into(),
-                        input: serde_json::json!({}),
-                    },
-                ],
-                model: None,
-                usage: None,
-                stop_reason: None,
-                request_id: None,
-            }),
-        ];
+        let mut messages = vec![Message::Assistant(AssistantMessage {
+            uuid: Uuid::new_v4(),
+            timestamp: String::new(),
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "Bash".into(),
+                    input: serde_json::json!({}),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_2".into(),
+                    name: "FileRead".into(),
+                    input: serde_json::json!({}),
+                },
+            ],
+            model: None,
+            usage: None,
+            stop_reason: None,
+            request_id: None,
+        })];
 
         let report = normalize_all(&mut messages);
         assert_eq!(report.tool_results_added, 2);
@@ -698,9 +699,7 @@ mod tests {
                 uuid: Uuid::new_v4(),
                 timestamp: String::new(),
                 content: vec![
-                    ContentBlock::Text {
-                        text: "".into(),
-                    },
+                    ContentBlock::Text { text: "".into() },
                     ContentBlock::Text {
                         text: "keep".into(),
                     },
@@ -739,9 +738,7 @@ mod tests {
             Message::Assistant(AssistantMessage {
                 uuid: Uuid::new_v4(),
                 timestamp: String::new(),
-                content: vec![ContentBlock::Text {
-                    text: "hi".into(),
-                }],
+                content: vec![ContentBlock::Text { text: "hi".into() }],
                 model: None,
                 usage: None,
                 stop_reason: None,
