@@ -21,6 +21,55 @@ use crate::ui::activity::ActivityIndicator;
 use agent_code_lib::llm::message::Usage;
 use agent_code_lib::query::{QueryEngine, StreamSink};
 use agent_code_lib::tools::ToolResult;
+use agent_code_lib::tools::{QuestionAsker, UserQuestion};
+
+/// Question asker for the classic TUI (REPL).
+/// Uses the selector component to present questions to the user.
+struct ClassicQuestionAsker {
+    input_gate: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl QuestionAsker for ClassicQuestionAsker {
+    fn ask(&self, questions: &[UserQuestion]) -> Result<Vec<String>, String> {
+        // Set input gate so escape watcher doesn't consume our input.
+        self.input_gate
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = self.ask_inner(questions);
+        self.input_gate
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        result
+    }
+}
+
+impl ClassicQuestionAsker {
+    fn ask_inner(&self, questions: &[UserQuestion]) -> Result<Vec<String>, String> {
+        let mut answers = Vec::new();
+        for q in questions {
+            let options: Vec<crate::ui::selector::SelectOption> = q
+                .options
+                .iter()
+                .enumerate()
+                .map(|(i, opt)| crate::ui::selector::SelectOption {
+                    label: format!("{}) {}", (b'a' + i as u8) as char, opt.label),
+                    description: opt.description.clone(),
+                    value: opt.label.clone(),
+                    preview: None,
+                })
+                .collect();
+
+            println!();
+            println!("  {}", q.question);
+            println!();
+
+            let chosen = crate::ui::selector::select(&options);
+            if chosen.is_empty() {
+                return Err("cancelled".to_string());
+            }
+            answers.push(chosen);
+        }
+        Ok(answers)
+    }
+}
 
 /// Write to stdout with LF → CRLF translation. Needed because the escape-key
 /// watcher (`spawn_escape_watcher`) holds the terminal in raw mode for the
@@ -1103,6 +1152,11 @@ pub async fn run_repl(engine: &mut QueryEngine) -> anyhow::Result<()> {
     // watcher so the two don't both consume keypresses.
     let input_gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     engine.set_permission_prompter(std::sync::Arc::new(super::prompt::TuiPrompter {
+        input_gate: input_gate.clone(),
+    }));
+
+    // Install question asker for interactive prompts.
+    engine.set_question_asker(Arc::new(ClassicQuestionAsker {
         input_gate: input_gate.clone(),
     }));
 
