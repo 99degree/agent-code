@@ -495,8 +495,14 @@ pub fn run_setup() -> Option<SetupResult> {
             .or_else(|| std::env::var("AGENT_CODE_API_KEY").ok());
 
         if let Some(ref key) = existing_key {
-            let masked = if key.len() > 8 {
-                format!("{}...{}", &key[..4], &key[key.len() - 4..])
+            let char_count = key.chars().count();
+            let masked = if char_count > 8 {
+                let head = key.char_indices().nth(4).map_or(key.len(), |(i, _)| i);
+                let tail_start = key
+                    .char_indices()
+                    .nth(char_count - 4)
+                    .map_or(key.len(), |(i, _)| i);
+                format!("{}...{}", &key[..head], &key[tail_start..])
             } else {
                 "****".to_string()
             };

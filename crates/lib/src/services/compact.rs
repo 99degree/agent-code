@@ -495,10 +495,14 @@ fn find_tool_name<'a>(messages: &'a [Message], tool_use_id: &str) -> &'a str {
 /// appending "..." if truncated.
 fn truncate_for_summary(s: &str) -> String {
     let masked = secret_masker::mask(s);
-    if masked.len() <= MAX_TOOL_RESULT_CHARS_FOR_SUMMARY {
+    if masked.chars().count() <= MAX_TOOL_RESULT_CHARS_FOR_SUMMARY {
         masked
     } else {
-        format!("{}...", &masked[..MAX_TOOL_RESULT_CHARS_FOR_SUMMARY])
+        let end = masked
+            .char_indices()
+            .nth(MAX_TOOL_RESULT_CHARS_FOR_SUMMARY)
+            .map_or(masked.len(), |(i, _)| i);
+        format!("{}...", &masked[..end])
     }
 }
 
@@ -787,6 +791,23 @@ mod tests {
         assert!(rec.is_protected(5));
         assert!(rec.is_protected(6));
         assert!(!rec.is_protected(7));
+    }
+
+    #[test]
+    fn truncate_for_summary_is_char_boundary_safe() {
+        // A multi-byte char (─, 3 bytes) repeated past the 2000-char limit
+        // must truncate at a valid char boundary, not panic.
+        let s: String = "─".repeat(2500);
+        let out = truncate_for_summary(&s);
+        assert!(out.ends_with("..."));
+        // The slice boundary is a valid char boundary (no panic on re-slice).
+        let _ = &out[..out.len() - 3];
+        assert!(out.chars().count() <= 2000 + 3);
+    }
+
+    #[test]
+    fn truncate_for_summary_short_input_unchanged() {
+        assert_eq!(truncate_for_summary("short"), "short");
     }
 
     #[test]
