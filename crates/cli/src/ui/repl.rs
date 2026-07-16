@@ -1691,9 +1691,10 @@ pub async fn run_repl(engine: &mut QueryEngine) -> anyhow::Result<()> {
                 // Auto-save session after each turn.
                 {
                     let state = engine.state();
+                    let full = state.persistable_messages();
                     let _ = agent_code_lib::services::session::save_session_full(
                         &session_id,
-                        &state.messages,
+                        &full,
                         &state.cwd,
                         &state.config.api.model,
                         state.turn_count,
@@ -1746,9 +1747,10 @@ pub async fn run_repl(engine: &mut QueryEngine) -> anyhow::Result<()> {
     // Persist session.
     let state = engine.state();
     if !state.messages.is_empty() {
+        let full = state.persistable_messages();
         match agent_code_lib::services::session::save_session_full(
             &session_id,
-            &state.messages,
+            &full,
             &state.cwd,
             &state.config.api.model,
             state.turn_count,

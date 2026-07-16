@@ -146,9 +146,10 @@ impl ScheduleExecutor {
         };
 
         // Save session for later /resume.
+        let full = state.persistable_messages();
         let _ = crate::services::session::save_session_full(
             &session_id,
-            &state.messages,
+            &full,
             &state.cwd,
             &state.config.api.model,
             state.turn_count,

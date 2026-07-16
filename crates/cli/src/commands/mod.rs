@@ -954,9 +954,21 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     Ok(data) => {
                         let restored_plan = data.plan_mode;
                         let normalize_report;
+                        let skipped_pre_summary;
                         {
                             let state = engine.state_mut();
                             state.messages = data.messages;
+                            // Skip everything before the last compaction
+                            // summary — that history is already distilled into
+                            // the summary, so re-loading it just inflates the
+                            // first turn's input tokens. Preserve the dropped
+                            // prefix in `full_history` so the full history is
+                            // still saved to disk.
+                            let frozen = agent_code_lib::llm::normalize::truncate_to_last_summary(
+                                &mut state.messages,
+                            );
+                            skipped_pre_summary = frozen.len();
+                            state.full_history = frozen;
                             normalize_report =
                                 agent_code_lib::llm::normalize::normalize_all(&mut state.messages);
                             state.turn_count = data.turn_count;
@@ -1037,6 +1049,12 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         );
                         if !normalize_report.to_string().contains("already normalized") {
                             println!("{}", normalize_report);
+                        }
+                        if skipped_pre_summary > 0 {
+                            println!(
+                                "Skipped {} pre-summary message(s) — resumed from last compaction summary.",
+                                skipped_pre_summary
+                            );
                         }
                     }
                     Err(e) => println!("Failed to resume: {e}"),
@@ -1523,7 +1541,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             CommandResult::Handled
         }
         Some("export") => {
-            let messages = &engine.state().messages;
+            let messages = engine.state().persistable_messages();
             if messages.is_empty() {
                 println!("No conversation to export.");
             } else {
@@ -1874,10 +1892,11 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             // Fork = save current session, start fresh from this point
             let state = engine.state();
             let fork_id = agent_code_lib::services::session::new_session_id();
-            let msg_count = state.messages.len();
+            let full = state.persistable_messages();
+            let msg_count = full.len();
             match agent_code_lib::services::session::save_session_full(
                 &fork_id,
-                &state.messages,
+                &full,
                 &state.cwd,
                 &state.config.api.model,
                 state.turn_count,
@@ -5885,9 +5904,14 @@ fn execute_session_picker(engine: &mut QueryEngine) {
         Ok(data) => {
             let restored_plan = data.plan_mode;
             let normalize_report;
+            let skipped_pre_summary;
             {
                 let state = engine.state_mut();
                 state.messages = data.messages;
+                let frozen =
+                    agent_code_lib::llm::normalize::truncate_to_last_summary(&mut state.messages);
+                skipped_pre_summary = frozen.len();
+                state.full_history = frozen;
                 normalize_report =
                     agent_code_lib::llm::normalize::normalize_all(&mut state.messages);
                 state.turn_count = data.turn_count;
@@ -5949,6 +5973,12 @@ fn execute_session_picker(engine: &mut QueryEngine) {
             );
             if !normalize_report.to_string().contains("already normalized") {
                 println!("{}", normalize_report);
+            }
+            if skipped_pre_summary > 0 {
+                println!(
+                    "Skipped {} pre-summary message(s) — resumed from last compaction summary.",
+                    skipped_pre_summary
+                );
             }
         }
         Err(e) => eprintln!("Failed to resume session: {e}"),

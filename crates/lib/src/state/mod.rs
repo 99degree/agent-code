@@ -144,6 +144,13 @@ pub struct AppState {
     /// alternative. `Some` ⇔ currently in fast mode. Restored on the
     /// next `/fast` toggle. Session-local — not persisted.
     pub pre_fast_model: Option<String>,
+    /// Frozen prefix of the conversation history, preserved on resume so the
+    /// full session can be persisted to disk. On resume the active `messages`
+    /// vector is truncated to start at the last compaction summary (everything
+    /// before it is already distilled into that summary); this field holds the
+    /// dropped head. `persistable_messages` reassembles the two for saving.
+    /// Empty for a fresh session (nothing was truncated).
+    pub full_history: Vec<Message>,
 }
 
 impl AppState {
@@ -178,6 +185,7 @@ impl AppState {
             disk_output_style: None,
             pre_fast_model: None,
             provider_kind,
+            full_history: Vec::new(),
         }
     }
 
@@ -199,6 +207,20 @@ impl AppState {
     /// Get the conversation history.
     pub fn history(&self) -> &[Message] {
         &self.messages
+    }
+
+    /// The complete history to persist: the frozen prefix (if any) followed by
+    /// the active messages. On resume `messages` is truncated to start at the
+    /// last compaction summary, so the prefix must be prepended to avoid losing
+    /// the distilled precedent on disk.
+    pub fn persistable_messages(&self) -> Vec<Message> {
+        if self.full_history.is_empty() {
+            self.messages.clone()
+        } else {
+            let mut full = self.full_history.clone();
+            full.extend(self.messages.clone());
+            full
+        }
     }
 
     /// Effective prompt fragment for the active output style.
@@ -426,5 +448,61 @@ mod tests {
         state.record_usage(&u1, "model-b");
         assert!(state.model_usage.contains_key("model-a"));
         assert!(state.model_usage.contains_key("model-b"));
+    }
+
+    #[test]
+    fn test_persistable_messages_reassembles_full_history() {
+        let mut state = AppState::new(crate::config::Config::default());
+        // Active tail starts at the last summary.
+        let summary = crate::llm::message::Message::User(crate::llm::message::UserMessage {
+            uuid: uuid::Uuid::new_v4(),
+            timestamp: String::new(),
+            content: vec![crate::llm::message::ContentBlock::Text {
+                text: "summary".into(),
+            }],
+            is_meta: true,
+            is_compact_summary: true,
+        });
+        state.messages = vec![
+            summary,
+            crate::llm::message::Message::Assistant(crate::llm::message::AssistantMessage {
+                uuid: uuid::Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![crate::llm::message::ContentBlock::Text {
+                    text: "reply".into(),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+        // Frozen head must be preserved on disk.
+        state.full_history = vec![crate::llm::message::user_message("old")];
+
+        let full = state.persistable_messages();
+        assert_eq!(full.len(), 3);
+        if let crate::llm::message::Message::User(u) = &full[0] {
+            assert_eq!(u.content[0].as_text(), Some("old"));
+        } else {
+            panic!("expected frozen head first");
+        }
+        assert!(matches!(
+            full[1],
+            crate::llm::message::Message::User(ref u) if u.is_compact_summary
+        ));
+    }
+
+    #[test]
+    fn test_persistable_messages_no_head_returns_active() {
+        let mut state = AppState::new(crate::config::Config::default());
+        state.messages = vec![crate::llm::message::user_message("only")];
+        let full = state.persistable_messages();
+        assert_eq!(full.len(), 1);
+        if let crate::llm::message::Message::User(u) = &full[0] {
+            assert_eq!(u.content[0].as_text(), Some("only"));
+        } else {
+            panic!("expected active message");
+        }
     }
 }
