@@ -25,11 +25,20 @@ use serde_json::json;
 use std::path::PathBuf;
 
 use super::{Tool, ToolContext, ToolResult};
+use crate::config::{Config, PermissionMode, PermissionsConfig};
 use crate::error::ToolError;
+use crate::llm::message::{ContentBlock, Message};
+use crate::llm::provider::create_provider_from_config;
+use crate::output_styles::AgentKind;
+use crate::permissions::PermissionChecker;
+use crate::query::{NullSink, QueryEngine, QueryEngineConfig};
 use crate::services::coordinator::{
     AgentDefinition, AgentRegistry, apply_agent_definition, compose_agent_prompt,
+    effective_permissions,
 };
 use crate::services::subagent_colors::SubagentColor;
+use crate::state::AppState;
+use crate::tools::registry::{ToolRegistry, ToolVisibilityFilter};
 
 /// Pull a stable id out of the input, falling back to a fresh uuid.
 ///
@@ -44,6 +53,14 @@ fn resolve_subagent_id(input: &serde_json::Value) -> String {
         return id.to_string();
     }
     uuid::Uuid::new_v4().to_string()
+}
+
+/// True when running inside Termux (Android). On Termux the binary
+/// cannot be re-executed as a subprocess (`current_exe()` returns a
+/// path that isn't directly executable), so the Agent tool falls back
+/// to running the subagent in-process via a fresh [`QueryEngine`].
+fn is_termux() -> bool {
+    std::env::var_os("TERMUX_VERSION").is_some()
 }
 
 pub struct AgentTool;
@@ -201,6 +218,55 @@ impl Tool for AgentTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         if let Some(tm) = ctx.task_manager.as_ref().filter(|_| run_in_background) {
+            // On Termux, spawn the subagent in-process via a tracked background
+            // task instead of re-executing the binary as a subprocess.
+            if is_termux() {
+                let id = tm
+                    .register_with_color(
+                        description,
+                        crate::services::background::TaskKind::LocalAgent,
+                        crate::services::background::TaskPayload::LocalAgent {
+                            subagent_kind: Some(subagent_type.to_string()),
+                            prompt: prompt.to_string(),
+                            parent_session: None,
+                        },
+                        assigned_color,
+                    )
+                    .await;
+                let def = definition.clone();
+                let prompt = prompt.to_string();
+                let cwd = agent_cwd.clone();
+                let tm = tm.clone();
+                let model = model_override.map(|s| s.to_string());
+                let task_id = id.clone();
+                tokio::spawn(async move {
+                    let result =
+                        run_subagent_in_process(&prompt, &cwd, &def, model.as_deref()).await;
+                    match result {
+                        Ok(text) => {
+                            let _ = tm.write_output(&task_id, &text).await;
+                            let _ = tm
+                                .set_status(
+                                    &task_id,
+                                    crate::services::background::TaskStatus::Completed,
+                                )
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tm.write_output(&task_id, &format!("Error: {e}")).await;
+                            let _ = tm
+                                .set_status(
+                                    &task_id,
+                                    crate::services::background::TaskStatus::Failed(e.to_string()),
+                                )
+                                .await;
+                        }
+                    }
+                });
+                return Ok(ToolResult::success(format!(
+                    "Agent ({description}, type={subagent_type}) started in the background as task {id} (in-process). \n                 Its result surfaces automatically when it completes — do not wait on it."
+                )));
+            }
             let id = spawn_background_agent(
                 prompt,
                 description,
@@ -220,7 +286,36 @@ impl Tool for AgentTool {
             )));
         }
 
-        // Foreground: spawn the subagent subprocess and await it.
+        // Foreground: spawn the subagent and await it.
+        // On Termux, run in-process instead of spawning a subprocess.
+        if is_termux() {
+            let result = tokio::select! {
+                r = run_subagent_in_process(
+                    prompt,
+                    &agent_cwd,
+                    &definition,
+                    model_override,
+                ) => r,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
+                    Err(ToolError::Timeout(300_000))
+                }
+                _ = ctx.cancel.cancelled() => {
+                    Err(ToolError::Cancelled)
+                }
+            };
+
+            if isolation == Some("worktree") {
+                let _ = cleanup_worktree(&agent_cwd).await;
+            }
+            return match result {
+                Ok(text) => Ok(ToolResult::success(format!(
+                    "Agent ({description}, type={subagent_type}) completed.\n\n{text}"
+                ))),
+                Err(e) => Err(e),
+            };
+        }
+
+        // Non-Termux: spawn the subagent subprocess and await it.
         let mut cmd = build_subagent_command(
             prompt,
             &agent_cwd,
@@ -282,6 +377,99 @@ impl Tool for AgentTool {
 
         result
     }
+}
+
+/// Extract the concatenated text of the last assistant message.
+fn last_assistant_text(messages: &[Message]) -> String {
+    messages
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            Message::Assistant(a) => {
+                let text: String = a
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if text.is_empty() { None } else { Some(text) }
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Run a subagent in-process via a fresh [`QueryEngine`].
+///
+/// Used on Termux/Android where the binary cannot be re-executed as a
+/// subprocess. Builds a complete engine from config, applies the agent
+/// definition's model/max-turns/visibility/permission overrides, runs
+/// the prompt to completion, and returns the assistant text.
+async fn run_subagent_in_process(
+    prompt: &str,
+    cwd: &std::path::Path,
+    definition: &AgentDefinition,
+    model_override: Option<&str>,
+) -> Result<String, ToolError> {
+    let mut config = Config::load().unwrap_or_default();
+    if let Some(model) = model_override {
+        config.api.model = model.to_string();
+    }
+
+    let llm = create_provider_from_config(&config.api.model, &config.api.base_url, &config);
+
+    // Build tool registry with visibility filtering from the definition.
+    let mut tools = ToolRegistry::default_tools();
+    if !definition.include_tools.is_empty() || !definition.exclude_tools.is_empty() {
+        tools.set_visibility(ToolVisibilityFilter::new(
+            definition.include_tools.clone(),
+            definition.exclude_tools.clone(),
+        ));
+    }
+
+    // Non-interactive subagents cannot prompt; use Plan (read-only) or
+    // Allow (full access) as the default permission mode.
+    let permission_checker = if let Some(pc) = effective_permissions(definition) {
+        PermissionChecker::from_config(&pc)
+    } else {
+        let mode = if definition.read_only {
+            PermissionMode::Plan
+        } else {
+            PermissionMode::Allow
+        };
+        let perms = PermissionsConfig {
+            default_mode: mode,
+            ..Default::default()
+        };
+        PermissionChecker::from_config(&perms)
+    };
+
+    let mut state = AppState::new(config);
+    state.cwd = cwd.display().to_string();
+
+    let mut engine = QueryEngine::new(
+        llm,
+        tools,
+        permission_checker,
+        state,
+        QueryEngineConfig {
+            max_turns: definition.max_turns,
+            verbose: false,
+            unattended: true,
+            agent_kind: AgentKind::Subagent,
+        },
+    );
+
+    let composed = compose_agent_prompt(definition, prompt);
+    engine
+        .run_turn_with_sink(&composed, &NullSink)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("Subagent engine error: {e}")))?;
+
+    Ok(last_assistant_text(&engine.state().messages))
 }
 
 /// Provider/runtime environment variables passed through to a spawned
