@@ -436,7 +436,7 @@ fn format_output(stdout: &[u8], stderr: &[u8], exit_code: i32) -> String {
 
     if !stdout_str.is_empty() {
         if stdout_str.len() > MAX_OUTPUT_BYTES {
-            content.push_str(&stdout_str[..MAX_OUTPUT_BYTES]);
+            content.push_str(&stdout_str[..stdout_str.floor_char_boundary(MAX_OUTPUT_BYTES)]);
             content.push_str(&format!(
                 "\n\n(stdout truncated: {} bytes total)",
                 stdout_str.len()
@@ -453,7 +453,7 @@ fn format_output(stdout: &[u8], stderr: &[u8], exit_code: i32) -> String {
         let stderr_display = if stderr_str.len() > MAX_OUTPUT_BYTES / 4 {
             format!(
                 "{}...\n(stderr truncated: {} bytes total)",
-                &stderr_str[..MAX_OUTPUT_BYTES / 4],
+                &stderr_str[..stderr_str.floor_char_boundary(MAX_OUTPUT_BYTES / 4)],
                 stderr_str.len()
             )
         } else {
