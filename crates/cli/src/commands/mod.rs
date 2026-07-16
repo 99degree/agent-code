@@ -641,7 +641,7 @@ pub(crate) const COLOR_THEME_NAMES: &[&str] = &[
 /// "Cannot start a runtime from within a runtime" panic when command handlers
 /// (which run synchronously inside the REPL's runtime) need to call async code.
 /// Returns the future's output (callers may ignore it).
-fn run_blocking_async<F, Fut, T>(f: F) -> T
+pub(crate) fn run_blocking_async<F, Fut, T>(f: F) -> T
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = T>,
@@ -3310,7 +3310,10 @@ fn fire_cwd_changed(engine: &QueryEngine, previous_cwd: &str) {
 /// expanding a leading `~` against `$HOME` and resolving relative paths
 /// against `base`. Returns `Err` with a user-readable message when the
 /// path doesn't exist, isn't a directory, or resolution fails.
-fn resolve_cd_target(raw: &str, base: &std::path::Path) -> Result<std::path::PathBuf, String> {
+pub(crate) fn resolve_cd_target(
+    raw: &str,
+    base: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("Usage: /cd <path>".into());

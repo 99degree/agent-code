@@ -407,6 +407,89 @@ pub(super) async fn event_loop(
             }
         }
 
+        // Apply deferred `/compact`. try_lock so it doesn't block the UI.
+        if app.pending_compact {
+            let engine_arc = session.engine();
+            match engine_arc.try_lock() {
+                Ok(mut eng) => {
+                    app.apply_compact_action(&mut eng);
+                    app.pending_compact = false;
+                }
+                Err(_) => {
+                    // Retry next iteration.
+                }
+            }
+        }
+
+        // Apply deferred `/cost`. try_lock so it doesn't block the UI.
+        if app.pending_cost {
+            let engine_arc = session.engine();
+            match engine_arc.try_lock() {
+                Ok(eng) => {
+                    app.apply_cost_action(&eng);
+                    app.pending_cost = false;
+                }
+                Err(_) => {
+                    // Retry next iteration.
+                }
+            }
+        }
+
+        // Apply deferred `/config`. try_lock so it doesn't block the UI.
+        if app.pending_config {
+            let engine_arc = session.engine();
+            match engine_arc.try_lock() {
+                Ok(eng) => {
+                    app.apply_config_action(&eng);
+                    app.pending_config = false;
+                }
+                Err(_) => {
+                    // Retry next iteration.
+                }
+            }
+        }
+
+        // Apply deferred `/cd`. try_lock so it doesn't block the UI.
+        if let Some(args) = app.pending_cd.take() {
+            let engine_arc = session.engine();
+            match engine_arc.try_lock() {
+                Ok(mut eng) => {
+                    app.apply_cd_action(&mut eng, &args);
+                }
+                Err(_) => {
+                    app.pending_cd = Some(args);
+                }
+            }
+        }
+
+        // Apply deferred `/permissions`. try_lock so it doesn't block the UI.
+        if app.pending_permissions {
+            let engine_arc = session.engine();
+            match engine_arc.try_lock() {
+                Ok(eng) => {
+                    app.apply_permissions_action(&eng);
+                    app.pending_permissions = false;
+                }
+                Err(_) => {
+                    // Retry next iteration.
+                }
+            }
+        }
+
+        // Apply deferred `/cleanup`. try_lock so it doesn't block the UI.
+        if app.pending_cleanup {
+            let engine_arc = session.engine();
+            match engine_arc.try_lock() {
+                Ok(eng) => {
+                    app.apply_cleanup_action(&eng);
+                    app.pending_cleanup = false;
+                }
+                Err(_) => {
+                    // Retry next iteration.
+                }
+            }
+        }
+
         // Start a pending turn if idle.
         if turn.is_none()
             && let Some(prompt) = app.pending_submit.take()

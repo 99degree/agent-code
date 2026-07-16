@@ -247,15 +247,16 @@ fn render_tool_card(
         && !r.is_empty()
     {
         let all_lines: Vec<&str> = r.lines().collect();
-        let color = if is_error { Color::Red } else { Color::DarkGray };
+        let color = if is_error {
+            Color::Red
+        } else {
+            Color::DarkGray
+        };
         let style = Style::default().fg(color);
         if all_lines.len() <= 6 {
             // Short result — show everything.
             for line in &all_lines {
-                lines.push(Line::from(Span::styled(
-                    format!("   ↳ {line}"),
-                    style,
-                )));
+                lines.push(Line::from(Span::styled(format!("   ↳ {line}"), style)));
             }
         } else {
             // Long result — first line + last 5.
@@ -269,10 +270,7 @@ fn render_tool_card(
             )));
             let tail_start = all_lines.len() - 5;
             for line in &all_lines[tail_start..] {
-                lines.push(Line::from(Span::styled(
-                    format!("   ↳ {line}"),
-                    style,
-                )));
+                lines.push(Line::from(Span::styled(format!("   ↳ {line}"), style)));
             }
         }
     }

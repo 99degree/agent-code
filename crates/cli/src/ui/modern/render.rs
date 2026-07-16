@@ -401,7 +401,10 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Span::styled(&app.version, Style::default().fg(Color::DarkGray)),
         Span::raw("  "),
         Span::styled(&app.model, Style::default().fg(Color::White)),
-        Span::styled(format!(" [{:?}]", app.provider_kind), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!(" [{:?}]", app.provider_kind),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::raw("  "),
         Span::styled(format!(" {} ", app.mode.short_badge()), mode_style),
         Span::raw("  "),

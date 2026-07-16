@@ -374,6 +374,18 @@ pub struct App {
     pub pending_import_pi: Option<String>,
     /// `/history` action waiting for the run loop (needs the engine lock).
     pub pending_history: Option<String>,
+    /// `/compact` action waiting for the run loop (needs the engine lock).
+    pub pending_compact: bool,
+    /// `/cost` action waiting for the run loop (needs the engine lock).
+    pub pending_cost: bool,
+    /// `/config` action waiting for the run loop (needs the engine lock).
+    pub pending_config: bool,
+    /// `/cd` action waiting for the run loop (needs the engine lock).
+    pub pending_cd: Option<String>,
+    /// `/permissions` action waiting for the run loop (needs the engine lock).
+    pub pending_permissions: bool,
+    /// `/cleanup` action waiting for the run loop (needs the engine lock).
+    pub pending_cleanup: bool,
     /// Prompts typed mid-turn, sent FIFO when the turn ends (plan §M5).
     pub queue: std::collections::VecDeque<String>,
     /// When true, runtime should cancel the active turn.
@@ -461,6 +473,12 @@ impl App {
             pending_normalize: false,
             pending_import_pi: None,
             pending_history: None,
+            pending_compact: false,
+            pending_cost: false,
+            pending_config: false,
+            pending_cd: None,
+            pending_permissions: false,
+            pending_cleanup: false,
             queue: std::collections::VecDeque::new(),
             cancel_requested: false,
             quit_armed: false,
@@ -744,7 +762,9 @@ impl App {
                 "Keys: Enter send · Shift+Tab mode · Esc/Ctrl+C cancel turn (again to quit) · \
                  Ctrl+T tasks · permission prompt: y once / a session / f always / n deny · \
                  Skills: /commit /review /test /… (same as classic) · \
-                 /model [id] · /session [id] · /resume <id> · /import-pi · /history · /normalize · /clear /terminal-setup /stats /exit"
+                 /model · /session · /resume · /import-pi · /history · /normalize · \
+                 /compact · /cost · /config · /cd · /permissions · /cleanup · /diff · /status · \
+                 /version · /verbose · /clear · /stats · /exit"
                     .into(),
             ));
             self.input.clear();
@@ -825,6 +845,84 @@ impl App {
         {
             let args = rest.trim().strip_prefix(' ').map(|s| s.to_string());
             self.pending_history = Some(args.unwrap_or_default());
+            self.input.clear();
+            self.cursor = 0;
+            self.dirty = true;
+            return;
+        }
+        // /version — no engine lock needed.
+        if text.trim() == "/version" {
+            self.transcript.push(TranscriptItem::System(format!(
+                "agent {}",
+                env!("CARGO_PKG_VERSION")
+            )));
+            self.input.clear();
+            self.cursor = 0;
+            self.dirty = true;
+            return;
+        }
+        // /verbose — no-op toggle (same as classic).
+        if text.trim() == "/verbose" {
+            self.transcript
+                .push(TranscriptItem::System("Verbose mode toggled.".into()));
+            self.input.clear();
+            self.cursor = 0;
+            self.dirty = true;
+            return;
+        }
+        // /diff and /status become LLM prompts (same as classic).
+        if text.trim() == "/diff" {
+            self.enqueue_turn("Run `git diff` and show me the changes.".into());
+            return;
+        }
+        if text.trim() == "/status" {
+            self.enqueue_turn("Run `git status` and show me the result.".into());
+            return;
+        }
+        // /compact needs the engine lock to run microcompact.
+        if text.trim() == "/compact" {
+            self.pending_compact = true;
+            self.input.clear();
+            self.cursor = 0;
+            self.dirty = true;
+            return;
+        }
+        // /cost needs the engine lock to read usage stats.
+        if text.trim() == "/cost" {
+            self.pending_cost = true;
+            self.input.clear();
+            self.cursor = 0;
+            self.dirty = true;
+            return;
+        }
+        // /config needs the engine lock to read config.
+        if text.trim() == "/config" {
+            self.pending_config = true;
+            self.input.clear();
+            self.cursor = 0;
+            self.dirty = true;
+            return;
+        }
+        // /cd needs the engine lock to change cwd.
+        if let Some(rest) = text.trim().strip_prefix("/cd") {
+            let args = rest.trim().strip_prefix(' ').map(|s| s.to_string());
+            self.pending_cd = Some(args.unwrap_or_default());
+            self.input.clear();
+            self.cursor = 0;
+            self.dirty = true;
+            return;
+        }
+        // /permissions needs the engine lock to read config.
+        if text.trim() == "/permissions" || text.trim() == "/perms" {
+            self.pending_permissions = true;
+            self.input.clear();
+            self.cursor = 0;
+            self.dirty = true;
+            return;
+        }
+        // /cleanup needs the engine lock to list/delete sessions.
+        if text.trim() == "/cleanup" || text.trim() == "/clean-sessions" {
+            self.pending_cleanup = true;
             self.input.clear();
             self.cursor = 0;
             self.dirty = true;
@@ -1074,6 +1172,196 @@ impl App {
             self.transcript
                 .push(TranscriptItem::System(lines.join("\n")));
         }
+        self.dirty = true;
+    }
+
+    /// Apply a deferred `/compact` action (microcompact on engine messages).
+    pub fn apply_compact_action(&mut self, engine: &mut agent_code_lib::query::QueryEngine) {
+        let pre_len = engine.state().messages.len();
+        let estimated = agent_code_lib::services::compact::estimate_compactable_tokens(
+            engine.state().messages.as_slice(),
+            2,
+        );
+        let _ = crate::commands::run_blocking_async(|| {
+            engine.fire_pre_compact_hooks(pre_len, estimated)
+        });
+        let freed =
+            agent_code_lib::services::compact::microcompact(&mut engine.state_mut().messages, 2);
+        if freed > 0 {
+            self.transcript.push(TranscriptItem::System(format!(
+                "Freed ~{freed} estimated tokens."
+            )));
+        } else {
+            self.transcript
+                .push(TranscriptItem::System("Nothing to compact.".into()));
+        }
+        let post_len = engine.state().messages.len();
+        let _ = crate::commands::run_blocking_async(|| {
+            engine.fire_post_compact_hooks(pre_len, post_len, freed)
+        });
+        self.dirty = true;
+    }
+
+    /// Apply a deferred `/cost` action (read usage stats from engine).
+    pub fn apply_cost_action(&mut self, engine: &agent_code_lib::query::QueryEngine) {
+        let state = engine.state();
+        let usage = &state.total_usage;
+        let mut lines = vec![format!(
+            "Turns: {}\nTokens: {} (in: {}, out: {}, cache_write: {}, cache_read: {})\nCost: ${:.4}",
+            state.turn_count,
+            usage.total(),
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+            state.total_cost_usd,
+        )];
+        if state.model_usage.len() > 1 {
+            lines.push("\nPer model:".into());
+            let mut models: Vec<_> = state.model_usage.iter().collect();
+            models.sort_by(|a, b| a.0.cmp(b.0));
+            for (model, mu) in &models {
+                let cost = crate::estimate_model_cost(mu, model);
+                let cache_pct = if mu.input_tokens > 0 {
+                    (mu.cache_read_input_tokens as f64 / mu.input_tokens as f64 * 100.0).round()
+                        as u64
+                } else {
+                    0
+                };
+                lines.push(format!(
+                    "  {model}: {} tokens (in: {}, out: {}), cache hit: {cache_pct}%, ${cost:.4}",
+                    mu.total(),
+                    mu.input_tokens,
+                    mu.output_tokens,
+                ));
+            }
+        } else if state.model_usage.len() == 1 {
+            let (_, mu) = state.model_usage.iter().next().unwrap();
+            if mu.cache_read_input_tokens > 0 && mu.input_tokens > 0 {
+                let cache_pct = (mu.cache_read_input_tokens as f64 / mu.input_tokens as f64 * 100.0)
+                    .round() as u64;
+                lines.push(format!("Cache hit: {cache_pct}%"));
+            }
+        }
+        self.transcript
+            .push(TranscriptItem::System(lines.join("\n")));
+        self.dirty = true;
+    }
+
+    /// Apply a deferred `/config` action (read config from engine).
+    pub fn apply_config_action(&mut self, engine: &agent_code_lib::query::QueryEngine) {
+        let config = &engine.state().config;
+        let mut lines = vec![
+            "API:".into(),
+            format!("  base_url: {}", config.api.base_url),
+            format!("  model: {}", config.api.model),
+            format!("  max_output_tokens: {:?}", config.api.max_output_tokens),
+            format!("  timeout: {}s", config.api.timeout_secs),
+            format!("  max_retries: {}", config.api.max_retries),
+        ];
+        if let Some(max_cost) = config.api.max_cost_usd {
+            lines.push(format!("  max_cost: ${:.2}", max_cost));
+        }
+        lines.push("\nPermissions:".into());
+        lines.push(format!("  mode: {:?}", config.permissions.default_mode));
+        lines.push(format!("  rules: {}", config.permissions.rules.len()));
+        lines.push("\nUI:".into());
+        lines.push(format!("  theme: {}", config.ui.theme));
+        lines.push(format!("  edit_mode: {}", config.ui.edit_mode));
+        lines.push(format!("  markdown: {}", config.ui.markdown));
+        lines.push(format!("\nMCP servers: {}", config.mcp_servers.len()));
+        lines.push(format!("Hooks: {}", config.hooks.len()));
+        self.transcript
+            .push(TranscriptItem::System(lines.join("\n")));
+        self.dirty = true;
+    }
+
+    /// Apply a deferred `/cd` action (change session cwd).
+    pub fn apply_cd_action(&mut self, engine: &mut agent_code_lib::query::QueryEngine, args: &str) {
+        let raw = args.trim();
+        if raw.is_empty() {
+            self.transcript.push(TranscriptItem::System(format!(
+                "{}\nUsage: /cd <path>   (accepts ~, absolute, or relative paths)",
+                engine.state().cwd
+            )));
+            self.dirty = true;
+            return;
+        }
+        let current = std::path::PathBuf::from(&engine.state().cwd);
+        let canonical = match crate::commands::resolve_cd_target(raw, &current) {
+            Ok(p) => p,
+            Err(msg) => {
+                self.transcript.push(TranscriptItem::Error(msg));
+                self.dirty = true;
+                return;
+            }
+        };
+        if let Err(e) = std::env::set_current_dir(&canonical) {
+            self.transcript.push(TranscriptItem::System(format!(
+                "Warning: failed to update process cwd: {e}"
+            )));
+        }
+        let new_cwd = canonical.display().to_string();
+        let previous_cwd = engine.state().cwd.clone();
+        engine.state_mut().cwd = new_cwd.clone();
+        engine.reset_system_prompt_cache();
+        let _ = crate::commands::run_blocking_async(|| {
+            engine.fire_cwd_changed_hooks(&previous_cwd, "cd")
+        });
+        self.cwd = new_cwd.clone();
+        self.transcript
+            .push(TranscriptItem::System(format!("cwd: {new_cwd}")));
+        self.dirty = true;
+    }
+
+    /// Apply a deferred `/permissions` action (read permissions config).
+    pub fn apply_permissions_action(&mut self, engine: &agent_code_lib::query::QueryEngine) {
+        let config = &engine.state().config;
+        let mut lines = vec![format!(
+            "Permission mode: {:?}",
+            config.permissions.default_mode
+        )];
+        if config.permissions.rules.is_empty() {
+            lines.push("No custom rules configured.".into());
+        } else {
+            lines.push("Rules:".into());
+            for rule in &config.permissions.rules {
+                let pattern = rule.pattern.as_deref().unwrap_or("*");
+                lines.push(format!("  {} {} -> {:?}", rule.tool, pattern, rule.action));
+            }
+        }
+        if engine.state().plan_mode {
+            lines.push("Plan mode: ACTIVE (read-only tools only)".into());
+        }
+        self.transcript
+            .push(TranscriptItem::System(lines.join("\n")));
+        self.dirty = true;
+    }
+
+    /// Apply a deferred `/cleanup` action (delete sessions with < 20 messages).
+    pub fn apply_cleanup_action(&mut self, engine: &agent_code_lib::query::QueryEngine) {
+        let cwd = engine.state().cwd.clone();
+        let sessions = agent_code_lib::services::session::list_sessions(1000);
+        let mut deleted = 0;
+        let mut kept = 0;
+        for s in &sessions {
+            if s.cwd != cwd {
+                continue;
+            }
+            if s.message_count < 20 {
+                if let Some(config_dir) = agent_code_lib::config::agent_config_dir() {
+                    let path = config_dir.join("sessions").join(format!("{}.json", s.id));
+                    if std::fs::remove_file(&path).is_ok() {
+                        deleted += 1;
+                    }
+                }
+            } else {
+                kept += 1;
+            }
+        }
+        self.transcript.push(TranscriptItem::System(format!(
+            "Cleanup: deleted {deleted} session(s) with < 20 messages, kept {kept}"
+        )));
         self.dirty = true;
     }
 

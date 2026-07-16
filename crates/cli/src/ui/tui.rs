@@ -227,7 +227,11 @@ pub fn render_turn_summary(state: &TurnState, turn: usize, hide_details: bool) {
                 } else {
                     let tail_start = lines.len().saturating_sub(5);
                     let tail: Vec<&str> = lines[tail_start..].iter().map(|s| s.as_str()).collect();
-                    format!(" → {} | … | {}", truncate(&lines[0], 25), truncate(&tail.join(" | "), 25))
+                    format!(
+                        " → {} | … | {}",
+                        truncate(&lines[0], 25),
+                        truncate(&tail.join(" | "), 25)
+                    )
                 }
             } else {
                 String::new()
