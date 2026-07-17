@@ -1187,6 +1187,25 @@ impl QueryEngine {
                                 });
                                 self.state.push_message(err_system);
 
+                                // Also push an assistant message so the
+                                // conversation maintains user/assistant
+                                // alternation. Without this, the next user
+                                // message would follow a system message,
+                                // causing consecutive user messages and 400
+                                // errors from the API on session resume.
+                                let err_assistant = Message::Assistant(AssistantMessage {
+                                    uuid: Uuid::new_v4(),
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                    content: vec![ContentBlock::Text {
+                                        text: format!("(error: {reason})"),
+                                    }],
+                                    model: None,
+                                    usage: None,
+                                    stop_reason: None,
+                                    request_id: None,
+                                });
+                                self.state.push_message(err_assistant);
+
                                 sink.on_error(&reason);
                                 self.state.is_query_active = false;
                                 // Error hooks fire once per turn that
