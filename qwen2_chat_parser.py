@@ -14,10 +14,13 @@ for the Qwen2/MiMo model family, including:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from enum import Enum
+
+logger = logging.getLogger(__name__)
 
 
 class Role(str, Enum):
@@ -96,9 +99,15 @@ class ToolCall:
         lines = [f"<tool_call>\n<function={self.name}>"]
         args = self.arguments
         if isinstance(args, str):
+            logger.debug("qwen2 parser: arguments provided as JSON string, parsing")
             try:
                 args = json.loads(args)
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(
+                    "qwen2 parser: failed to parse JSON-string arguments (%s); "
+                    "tolerating empty tool call",
+                    e,
+                )
                 args = None
         if isinstance(args, dict):
             for arg_name, arg_value in args.items():
@@ -107,7 +116,13 @@ class ToolCall:
                 else:
                     arg_str = str(arg_value)
                 lines.append(f"<parameter={arg_name}>{arg_str}</parameter>")
-        lines.append("</function>\n</tool_call>")
+        else:
+            logger.warning(
+                "qwen2 parser: tool arguments missing or invalid type (%s); "
+                "rendering without parameters",
+                type(self.arguments).__name__,
+            )
+        lines.append("</function>\n<tool_call>")
         return "\n".join(lines)
 
 
