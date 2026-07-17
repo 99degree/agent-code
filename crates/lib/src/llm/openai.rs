@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use super::codex_auth::CodexChatGptAuth;
-use super::message::{ContentBlock, Message, StopReason, Usage};
+use super::message::{ContentBlock, Message, StopReason, SystemMessageType, Usage};
 use super::provider::{Provider, ProviderError, ProviderRequest, ToolChoice};
 use super::stream::StreamEvent;
 use super::xai_auth::XaiOauthAuth;
@@ -146,7 +146,15 @@ impl OpenAiProvider {
 
                     messages.push(msg_json);
                 }
-                Message::System(_) => {} // Already handled above.
+                Message::System(sys) => {
+                    // Don't send compact boundary messages to the LLM - they're for traceability only.
+                    if sys.subtype != SystemMessageType::CompactBoundary {
+                        messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": sys.content,
+                        }));
+                    }
+                }
             }
         }
 
@@ -838,7 +846,19 @@ fn messages_to_responses_input(messages: &[Message]) -> Vec<Value> {
                     }));
                 }
             }
-            Message::System(_) => {}
+            Message::System(sys) => {
+                // Don't send compact boundary messages to the LLM - they're for traceability only.
+                if sys.subtype != SystemMessageType::CompactBoundary {
+                    input.push(serde_json::json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_text",
+                            "text": sys.content,
+                        }],
+                    }));
+                }
+            }
         }
     }
 

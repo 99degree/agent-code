@@ -938,12 +938,13 @@ impl QueryEngine {
 
             // Inject compaction reminder if compacted and feature enabled.
             if compact_tracking.was_compacted && self.state.config.features.compaction_reminders {
-                let reminder = user_message(
-                    "<system-reminder>Context was automatically compacted. \
-                     Earlier messages were summarized. If you need details from \
-                     before compaction, ask the user or re-read the relevant files.</system-reminder>",
-                );
-                self.state.push_message(reminder);
+                self.state.push_message(Message::System(SystemMessage {
+                    uuid: Uuid::new_v4(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    subtype: SystemMessageType::CompactBoundary,
+                    content: "Context was automatically compacted. Earlier messages were summarized. If you need details from before compaction, ask the user or re-read the relevant files.".to_string(),
+                    level: MessageLevel::Info,
+                }));
                 compact_tracking.was_compacted = false; // Only remind once per compaction.
             }
 

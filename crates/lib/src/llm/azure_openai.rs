@@ -13,7 +13,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, Header
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use super::message::{ContentBlock, Message, StopReason, Usage};
+use super::message::{ContentBlock, Message, StopReason, SystemMessageType, Usage};
 use super::provider::{Provider, ProviderError, ProviderRequest};
 use super::stream::StreamEvent;
 
@@ -104,7 +104,15 @@ impl AzureOpenAiProvider {
 
                     messages.push(msg_json);
                 }
-                Message::System(_) => {} // Already handled above.
+                Message::System(sys) => {
+                    // Don't send compact boundary messages to the LLM - they're for traceability only.
+                    if sys.subtype != SystemMessageType::CompactBoundary {
+                        messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": sys.content,
+                        }));
+                    }
+                }
             }
         }
 

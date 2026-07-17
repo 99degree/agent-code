@@ -537,17 +537,15 @@ Files created or modified, with a one-line note on each.";
 
 /// Build the recovery message injected when max-output-tokens is hit.
 pub fn max_output_recovery_message() -> Message {
-    Message::User(UserMessage {
+    Message::System(SystemMessage {
         uuid: Uuid::new_v4(),
         timestamp: chrono::Utc::now().to_rfc3339(),
-        content: vec![ContentBlock::Text {
-            text: "Output token limit hit. Resume directly — no apology, no recap \
+        subtype: SystemMessageType::Informational,
+        content: "Output token limit hit. Resume directly — no apology, no recap \
                    of what you were doing. Pick up mid-thought if that is where the \
                    cut happened. Break remaining work into smaller pieces."
-                .to_string(),
-        }],
-        is_meta: true,
-        is_compact_summary: false,
+            .to_string(),
+        level: MessageLevel::Info,
     })
 }
 
@@ -1089,10 +1087,11 @@ mod tests {
     fn test_max_output_recovery_message() {
         let msg = max_output_recovery_message();
         match msg {
-            Message::User(u) => {
-                assert!(!u.content.is_empty());
+            Message::System(s) => {
+                assert!(!s.content.is_empty());
+                assert_eq!(s.subtype, SystemMessageType::Informational);
             }
-            _ => panic!("Expected user message"),
+            _ => panic!("Expected system message"),
         }
     }
 
@@ -1282,10 +1281,12 @@ mod tests {
     #[test]
     fn test_max_output_recovery_message_is_meta() {
         let msg = max_output_recovery_message();
-        if let Message::User(u) = &msg {
-            assert!(u.is_meta);
-        } else {
-            panic!("Expected User message");
+        match &msg {
+            Message::System(s) => {
+                assert_eq!(s.subtype, SystemMessageType::Informational);
+                assert_eq!(s.level, MessageLevel::Info);
+            }
+            _ => panic!("Expected System message"),
         }
     }
 

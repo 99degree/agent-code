@@ -378,8 +378,18 @@ pub fn messages_to_api_params(messages: &[Message]) -> Vec<serde_json::Value> {
                 "role": "assistant",
                 "content": content_blocks_to_api(&a.content),
             })),
-            // System messages are not sent to the API.
-            Message::System(_) => None,
+            // System messages are sent to the API as user messages (except
+            // CompactBoundary, which is for traceability only).
+            Message::System(sys) => {
+                if sys.subtype != SystemMessageType::CompactBoundary {
+                    Some(serde_json::json!({
+                        "role": "user",
+                        "content": content_blocks_to_api(&[ContentBlock::Text { text: sys.content.clone() }]),
+                    }))
+                } else {
+                    None
+                }
+            }
         })
         .collect()
 }
@@ -498,7 +508,18 @@ pub fn messages_to_api_params_cached(messages: &[Message]) -> Vec<serde_json::Va
                 "role": "assistant",
                 "content": content_blocks_to_api(&a.content),
             })),
-            Message::System(_) => None,
+            // System messages are sent to the API as user messages (except
+            // CompactBoundary, which is for traceability only).
+            Message::System(sys) => {
+                if sys.subtype != SystemMessageType::CompactBoundary {
+                    Some(serde_json::json!({
+                        "role": "user",
+                        "content": content_blocks_to_api(&[ContentBlock::Text { text: sys.content.clone() }]),
+                    }))
+                } else {
+                    None
+                }
+            }
         })
         .collect()
 }
@@ -805,7 +826,7 @@ mod tests {
             Message::System(SystemMessage {
                 uuid: Uuid::new_v4(),
                 timestamp: String::new(),
-                subtype: SystemMessageType::Informational,
+                subtype: SystemMessageType::CompactBoundary,
                 content: "should be filtered".into(),
                 level: MessageLevel::Info,
             }),
@@ -816,6 +837,32 @@ mod tests {
         assert_eq!(params.len(), 3);
         assert_eq!(params[0]["role"], "user");
         assert_eq!(params[1]["role"], "assistant");
+        assert_eq!(params[2]["role"], "user");
+    }
+
+    #[test]
+    fn test_messages_to_api_params_sends_non_boundary_system_as_user() {
+        let messages = vec![
+            user_message("hello"),
+            Message::System(SystemMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                subtype: SystemMessageType::Informational,
+                content: "retry: resume from where you left off".into(),
+                level: MessageLevel::Info,
+            }),
+            user_message("follow up"),
+        ];
+        let params = messages_to_api_params(&messages);
+        // Non-CompactBoundary system messages are forwarded to the API
+        // as user-role messages (still traceable in history).
+        assert_eq!(params.len(), 3);
+        assert_eq!(params[0]["role"], "user");
+        assert_eq!(params[1]["role"], "user");
+        assert_eq!(
+            params[1]["content"],
+            "retry: resume from where you left off"
+        );
         assert_eq!(params[2]["role"], "user");
     }
 
