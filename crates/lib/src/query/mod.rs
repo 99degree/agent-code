@@ -1045,6 +1045,20 @@ impl QueryEngine {
                     metadata: None,
                     cancel: self.cancel.clone(),
                 };
+                // Snapshot the request fields so we can dump them on a final failed
+                // attempt. Only the *current* send is captured; the dump file is
+                // overwritten by the next failure, so storage stays bounded.
+                let dump_snapshot: Option<(String, Vec<serde_json::Value>, String, u64)> =
+                    if self.state.config.features.dump_failed_requests {
+                        let msgs: Vec<serde_json::Value> = request
+                            .messages
+                            .iter()
+                            .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null))
+                            .collect();
+                        Some((request.model.clone(), msgs, request.system_prompt.clone(), request.max_tokens as u64))
+                    } else {
+                        None
+                    };
 
                 match self.llm.read().await.stream(&request).await {
                     Ok(rx) => {
@@ -1111,6 +1125,22 @@ impl QueryEngine {
                                 continue 'acquire;
                             }
                             crate::llm::retry::RetryAction::Abort(reason) => {
+                                // Final failure for this attempt - dump the request we sent
+                                // before, so the caller can inspect what tripped the server.
+                                if let Some((model, msgs, sys, max_tokens)) = dump_snapshot {
+                                    let dir = crate::config::agent_config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                                    let _ = std::fs::create_dir_all(&dir);
+                                    let dump = serde_json::json!({
+                                        "model": model,
+                                        "max_tokens": max_tokens,
+                                        "system_prompt": sys,
+                                        "messages": msgs,
+                                        "error": reason,
+                                    });
+                                    let path = dir.join("last_failed_request.json");
+                                    let _ = std::fs::write(&path, serde_json::to_string_pretty(&dump).unwrap_or_default());
+                                    debug!("Dumped failed LLM request to {}", path.display());
+                                }
                                 // Unattended retry: in non-interactive mode, retry
                                 // capacity errors with longer backoff instead of
                                 // aborting. In place, so it doesn't consume turns.
