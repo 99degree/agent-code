@@ -1207,13 +1207,30 @@ impl QueryEngine {
                                         continue 'turn;
                                     }
                                 }
-                                // Do NOT pollute the message history with placeholder
-                                // entries: openai.rs strips ApiError system messages
-                                // before serializing, so earlier attempts to pad with
-                                // "(error: ...)" assistant turns ended up stacking two
-                                // assistant turns on the wire, which the server 400s.
-                                // Surface the failure through the sink and error hooks
-                                // only - the history keeps its real alternation.
+                                // Surface the failure for both the UI and the alternation
+                                // invariant: push a system:api_error entry (kept in history
+                                // for traceability) and an inert assistant placeholder so
+                                // the next user message still follows assistant alternation.
+                                // Both messages are stripped before serialization so they
+                                // never reach the server with content; the API payload
+                                // stays clean regardless of how many errors stack up.
+                                self.state.push_message(Message::System(SystemMessage {
+                                    uuid: Uuid::new_v4(),
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                    subtype: SystemMessageType::ApiError,
+                                    content: reason.clone(),
+                                    level: MessageLevel::Error,
+                                }));
+                                self.state.push_message(Message::Assistant(AssistantMessage {
+                                    uuid: Uuid::new_v4(),
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                    content: vec![ContentBlock::Text { text: String::new() }],
+                                    model: None,
+                                    usage: None,
+                                    stop_reason: None,
+                                    request_id: None,
+                                }));
+
                                 sink.on_error(&reason);
                                 self.state.is_query_active = false;
                                 // Error hooks fire once per turn that

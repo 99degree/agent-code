@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use super::codex_auth::CodexChatGptAuth;
-use super::message::{ContentBlock, Message, StopReason, SystemMessageType, Usage};
+use super::message::{ContentBlock, Message, StopReason, Usage};
 use super::provider::{Provider, ProviderError, ProviderRequest, ToolChoice};
 use super::stream::StreamEvent;
 use super::xai_auth::XaiOauthAuth;
@@ -146,15 +146,17 @@ impl OpenAiProvider {
 
                     messages.push(msg_json);
                 }
-                Message::System(sys) => {
-                    // Don't send compact boundary messages to the LLM - they're for traceability only.
-                    if sys.subtype != SystemMessageType::CompactBoundary
-                    && sys.subtype != SystemMessageType::ApiError {
-                        messages.push(serde_json::json!({
-                            "role": "user",
-                            "content": sys.content,
-                        }));
-                    }
+                Message::System(_sys) => {
+                    // The system subtypes (CompactBoundary, ApiError,
+                    // Informational, TurnDuration, MemorySaved, ToolProgress)
+                    // are all bookkeeping; none of their content is meant to
+                    // drive inference. Forward them as empty role:"user" so
+                    // turn alternation in the wire payload is preserved
+                    // without burning tokens.
+                    messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": "",
+                    }));
                 }
             }
         }
@@ -863,19 +865,13 @@ fn messages_to_responses_input(messages: &[Message]) -> Vec<Value> {
                     }));
                 }
             }
-            Message::System(sys) => {
-                // Don't send compact boundary or api error messages to the LLM.
-                if sys.subtype != SystemMessageType::CompactBoundary
-                    && sys.subtype != SystemMessageType::ApiError {
-                    input.push(serde_json::json!({
-                        "type": "message",
-                        "role": "user",
-                        "content": [{
-                            "type": "input_text",
-                            "text": sys.content,
-                        }],
-                    }));
-                }
+            Message::System(_sys) => {
+                // Bookkeeping subtypes flush to empty role:"user".
+                input.push(serde_json::json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": "",
+                }));
             }
         }
     }
