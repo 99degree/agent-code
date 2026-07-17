@@ -1213,8 +1213,13 @@ fn handle_schedule_list() -> anyhow::Result<()> {
             .last_run_at
             .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_else(|| "never".into());
-        let prompt = if s.prompt.len() > 30 {
-            format!("{}...", &s.prompt[..27])
+        let prompt = if s.prompt.chars().count() > 30 {
+            let end = s
+                .prompt
+                .char_indices()
+                .nth(27)
+                .map_or(s.prompt.len(), |(i, _)| i);
+            format!("{}...", &s.prompt[..end])
         } else {
             s.prompt.clone()
         };

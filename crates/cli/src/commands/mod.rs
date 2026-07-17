@@ -1966,8 +1966,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                                 })
                                 .collect::<Vec<_>>()
                                 .join("");
-                            let preview = if text.len() > 120 {
-                                format!("{}...", &text[..117])
+                            let preview = if text.chars().count() > 120 {
+                                let end =
+                                    text.char_indices().nth(117).map_or(text.len(), |(i, _)| i);
+                                format!("{}...", &text[..end])
                             } else {
                                 text
                             };
@@ -1999,8 +2001,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                                     )
                                 })
                                 .count();
-                            let preview = if text.len() > 120 {
-                                format!("{}...", &text[..117])
+                            let preview = if text.chars().count() > 120 {
+                                let end =
+                                    text.char_indices().nth(117).map_or(text.len(), |(i, _)| i);
+                                format!("{}...", &text[..end])
                             } else {
                                 text
                             };
@@ -3471,8 +3475,12 @@ pub(crate) fn run_tips_command(
                 let dismissed = state.dismissed.iter().any(|d| d == &tip.id);
                 let marker = if dismissed { " [dismissed]" } else { "" };
                 let preview = tip.body.lines().next().unwrap_or("");
-                let snip = if preview.len() > 72 {
-                    format!("{}…", &preview[..72])
+                let snip = if preview.chars().count() > 72 {
+                    let end = preview
+                        .char_indices()
+                        .nth(72)
+                        .map_or(preview.len(), |(i, _)| i);
+                    format!("{}…", &preview[..end])
                 } else {
                     preview.to_string()
                 };
@@ -3768,10 +3776,14 @@ fn slugify_note(text: &str) -> String {
 /// Truncate a free-form note to approximately `max_chars` characters,
 /// ending at a word boundary when possible.
 fn truncate_to_words(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
+    if text.chars().count() <= max_chars {
         return text.to_string();
     }
-    let cutoff = text[..max_chars].rfind(' ').unwrap_or(max_chars);
+    let end = text
+        .char_indices()
+        .nth(max_chars)
+        .map_or(text.len(), |(i, _)| i);
+    let cutoff = text[..end].rfind(' ').unwrap_or(end);
     format!("{}…", text[..cutoff].trim_end())
 }
 
@@ -3955,9 +3967,10 @@ fn execute_usage(engine: &QueryEngine) {
     let mut tot_cr = 0u64;
     let mut tot_cw = 0u64;
     for r in &rows {
-        let model_display = if r.model.len() > model_w {
+        let model_display = if r.model.chars().count() > model_w {
             // Keep the tail — model family tokens live at the end.
-            let start = r.model.len() - model_w;
+            let skip = r.model.chars().count() - model_w;
+            let start = r.model.char_indices().nth(skip).map_or(0, |(i, _)| i);
             &r.model[start..]
         } else {
             r.model.as_str()
@@ -4048,15 +4061,19 @@ fn is_secret_var(name: &str) -> bool {
 /// Mask a secret value so it's useful for "is it set?" checks without
 /// leaking the secret itself. Shows length and last 4 chars.
 fn mask_secret(value: &str) -> String {
-    if value.is_empty() {
+    let char_count = value.chars().count();
+    if char_count == 0 {
         return "(empty)".to_string();
     }
-    let len = value.len();
-    if len <= 4 {
-        return format!("({len} chars, masked)");
+    if char_count <= 4 {
+        return format!("({char_count} chars, masked)");
     }
-    let tail = &value[len - 4..];
-    format!("({len} chars, ends in …{tail})")
+    let tail_start = value
+        .char_indices()
+        .nth(char_count - 4)
+        .map_or(value.len(), |(i, _)| i);
+    let tail = &value[tail_start..];
+    format!("({char_count} chars, ends in …{tail})")
 }
 
 /// Execute `/env` — print the environment vars agent-code actually reads,

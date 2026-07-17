@@ -165,8 +165,12 @@ impl ScheduleExecutor {
         );
 
         // Truncate summary.
-        let summary = if response.len() > 500 {
-            format!("{}...", &response[..497])
+        let summary = if response.chars().count() > 500 {
+            let end = response
+                .char_indices()
+                .nth(497)
+                .map_or(response.len(), |(i, _)| i);
+            format!("{}...", &response[..end])
         } else {
             response
         };

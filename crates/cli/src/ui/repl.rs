@@ -1840,8 +1840,9 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
     };
 
     // Truncate long summaries.
-    if raw.len() > 120 {
-        format!("{}...", &raw[..117])
+    if raw.chars().count() > 120 {
+        let end = raw.char_indices().nth(117).map_or(raw.len(), |(i, _)| i);
+        format!("{}...", &raw[..end])
     } else {
         raw
     }
