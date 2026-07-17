@@ -38,14 +38,27 @@ pub fn ensure_tool_result_pairing(messages: &mut Vec<Message>) {
     }
 
     // Any remaining pending IDs need synthetic error results.
+    // Combine all into a single user message so that build_body extracts
+    // them as contiguous role:"tool" messages after the assistant that
+    // made the tool calls. Separate messages would risk being split by a
+    // dummy assistant, which the OpenAI API rejects.
     if !pending_tool_ids.is_empty() {
-        for id in pending_tool_ids {
-            messages.push(tool_result_message(
-                &id,
-                "(tool execution was interrupted)",
-                true,
-            ));
-        }
+        let blocks: Vec<ContentBlock> = pending_tool_ids
+            .iter()
+            .map(|id| ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: "(tool execution was interrupted)".to_string(),
+                is_error: true,
+                extra_content: vec![],
+            })
+            .collect();
+        messages.push(Message::User(UserMessage {
+            uuid: Uuid::new_v4(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            content: blocks,
+            is_meta: true,
+            is_compact_summary: false,
+        }));
     }
 
     // Remove tool_results that don't have matching tool_use IDs.
@@ -227,8 +240,13 @@ pub fn ensure_alternation_after_tool_result(messages: &mut Vec<Message>) {
     while i + 1 < messages.len() {
         let current_has_tool_result = matches!(&messages[i], Message::User(u) if u.content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. })));
         let next_is_user = matches!(&messages[i + 1], Message::User(_));
+        // Don't insert a dummy assistant between two consecutive
+        // tool-result-only user messages — they map to contiguous
+        // role:"tool" wire messages and must not be split.
+        let next_is_tool_only = matches!(&messages[i + 1], Message::User(u)
+            if u.content.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. })));
 
-        if current_has_tool_result && next_is_user {
+        if current_has_tool_result && next_is_user && !next_is_tool_only {
             // Insert a synthetic assistant message between them.
             let synthetic = Message::Assistant(AssistantMessage {
                 uuid: Uuid::new_v4(),
@@ -822,17 +840,19 @@ mod tests {
         })];
 
         ensure_tool_result_pairing(&mut messages);
-        // Should add two synthetic error results (one per orphan).
-        assert_eq!(messages.len(), 3);
-        for msg in &messages[1..] {
-            if let Message::User(u) = msg {
+        // All orphaned tool results are combined into a single user message
+        // so build_body produces contiguous role:"tool" messages.
+        assert_eq!(messages.len(), 2);
+        if let Message::User(u) = &messages[1] {
+            assert_eq!(u.content.len(), 2, "both tool results in one message");
+            for block in &u.content {
                 assert!(matches!(
-                    &u.content[0],
+                    block,
                     ContentBlock::ToolResult { is_error: true, .. }
                 ));
-            } else {
-                panic!("Expected user message with tool result");
             }
+        } else {
+            panic!("Expected single user message with both tool results");
         }
     }
 
@@ -1007,8 +1027,14 @@ mod tests {
         })];
 
         let report = normalize_all(&mut messages);
-        assert_eq!(report.tool_results_added, 2);
-        assert_eq!(messages.len(), 3);
+        // Now combined into single user message with both tool results.
+        assert_eq!(report.tool_results_added, 1);
+        assert_eq!(messages.len(), 2);
+        if let Message::User(u) = &messages[1] {
+            assert_eq!(u.content.len(), 2);
+        } else {
+            panic!("expected user message with combined tool results");
+        }
     }
 
     #[test]
@@ -1249,5 +1275,165 @@ mod tests {
         };
         normalize_with_config(&mut messages, &config);
         assert!(!messages.iter().any(|m| matches!(m, Message::System(_))));
+    }
+
+    #[test]
+    fn test_tool_result_pairing_combines_into_single_message() {
+        // Two orphaned tool_uses in one assistant → one user message with both results.
+        let mut messages = vec![Message::Assistant(AssistantMessage {
+            uuid: Uuid::new_v4(),
+            timestamp: String::new(),
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    name: "Bash".into(),
+                    input: serde_json::json!({}),
+                },
+                ContentBlock::ToolUse {
+                    id: "c2".into(),
+                    name: "FileRead".into(),
+                    input: serde_json::json!({}),
+                },
+                ContentBlock::ToolUse {
+                    id: "c3".into(),
+                    name: "Grep".into(),
+                    input: serde_json::json!({}),
+                },
+            ],
+            model: None,
+            usage: None,
+            stop_reason: None,
+            request_id: None,
+        })];
+
+        ensure_tool_result_pairing(&mut messages);
+
+        // 1 assistant + 1 combined user message = 2 total.
+        assert_eq!(messages.len(), 2);
+        if let Message::User(u) = &messages[1] {
+            assert_eq!(u.content.len(), 3);
+            let ids: Vec<&str> = u
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(ids, vec!["c1", "c2", "c3"]);
+        } else {
+            panic!("expected user message");
+        }
+    }
+
+    #[test]
+    fn test_ensure_alternation_skips_between_tool_only_messages() {
+        // Two consecutive tool-result-only user messages should NOT get a
+        // dummy assistant between them.
+        let mut messages = vec![
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "a".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                    extra_content: vec![],
+                }],
+                is_meta: true,
+                is_compact_summary: false,
+            }),
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "b".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                    extra_content: vec![],
+                }],
+                is_meta: true,
+                is_compact_summary: false,
+            }),
+        ];
+
+        ensure_alternation_after_tool_result(&mut messages);
+        // No dummy assistant inserted — both are tool-result-only.
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(|m| matches!(m, Message::User(_))));
+    }
+
+    #[test]
+    fn test_ensure_alternation_still_inserts_for_mixed_content() {
+        // Tool-result user followed by a text user → dummy should be inserted.
+        let mut messages = vec![
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "a".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                    extra_content: vec![],
+                }],
+                is_meta: true,
+                is_compact_summary: false,
+            }),
+            user_message("follow-up question"),
+        ];
+
+        ensure_alternation_after_tool_result(&mut messages);
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(&messages[1], Message::Assistant(_)));
+    }
+
+    #[test]
+    fn test_strict_normalize_with_multiple_orphaned_tool_uses() {
+        // End-to-end: normalize_strict with 2 orphaned tool_uses produces
+        // valid alternation and contiguous tool results.
+        let mut messages = vec![
+            user_message("run tests"),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "Bash".into(),
+                        input: serde_json::json!({}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t2".into(),
+                        name: "Bash".into(),
+                        input: serde_json::json!({}),
+                    },
+                ],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+
+        normalize_strict(&mut messages);
+
+        // Must have valid alternation.
+        assert!(validate_alternation(&messages).is_ok());
+
+        // The tool-result user message must contain both results (no dummy
+        // assistant between them).
+        let tool_user = messages
+            .iter()
+            .find(|m| matches!(m, Message::User(u) if u.content.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. }))));
+        match tool_user {
+            Some(Message::User(u)) => {
+                assert_eq!(
+                    u.content.len(),
+                    2,
+                    "both tool results in one message, no dummy split"
+                );
+            }
+            _ => panic!("expected combined tool-result user message"),
+        }
     }
 }
