@@ -148,7 +148,8 @@ impl OpenAiProvider {
                 }
                 Message::System(sys) => {
                     // Don't send compact boundary messages to the LLM - they're for traceability only.
-                    if sys.subtype != SystemMessageType::CompactBoundary {
+                    if sys.subtype != SystemMessageType::CompactBoundary
+                    && sys.subtype != SystemMessageType::ApiError {
                         messages.push(serde_json::json!({
                             "role": "user",
                             "content": sys.content,
@@ -847,8 +848,9 @@ fn messages_to_responses_input(messages: &[Message]) -> Vec<Value> {
                 }
             }
             Message::System(sys) => {
-                // Don't send compact boundary messages to the LLM - they're for traceability only.
-                if sys.subtype != SystemMessageType::CompactBoundary {
+                // Don't send compact boundary or api error messages to the LLM.
+                if sys.subtype != SystemMessageType::CompactBoundary
+                    && sys.subtype != SystemMessageType::ApiError {
                     input.push(serde_json::json!({
                         "type": "message",
                         "role": "user",

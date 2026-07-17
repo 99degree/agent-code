@@ -1,0 +1,2970 @@
+<|im_start|>system
+[Conversation compacted. Summary: ## Goal
+Investigate whether the MNN optimizer crash (UNIFIED profile `libMNNConvertDeps.so` SIGSEGV) affects other examples/repo locations; apply preventive fixes (defensive conversion error handling, UNIFIED profile guard, memfd lifecycle protection).
+
+## Constraints
+- No `memfd_buffer.rs` / `Drop` modifications needed (verified correct)
+- Preserve `three-stage isolation` (ONNX → MNN conversion → inference)
+- Add preventive error handling around `mnn_convert_onnx_buffer()` calls
+- Clean up remaining temporary diagnostic artifacts
+
+## Progress
+- Confirmed crash root: upstream MNN optimizer (`libMNNConvertDeps.so`) crashes on UNIFIED profile ONNX graphs — independent of resolution (32×32 to 3840×2160), feature toggles (only `auto_contrast=false` avoids it), and buffer lifecycle.
+- Confirmed memfd lifecycle (`MemfdBuffer` `Drop` with `munmap` + `close`) is correct; zero-copy paths (`run_external_zero_copy`, `setDevicePtr`) not exercised by failing examples.
+- Cleaned temporary diagnostic `.rs` files (`diag_*.rs`) and `Cargo.toml` entries reverted.
+- `test_isp_unified_4k_fhd` and `test_memfd_lifecycle` files preserved; `test_isp_unified_4k_fhd.rs` contains a broken edit (`std::time::...` placeholder) from previous edit attempt.
+
+## Decisions
+- Do NOT modify `memfd_buffer.rs` or `mnnengine.rs` — lifecycle is sound.
+- The common/repeating issue is UNIFIED profile → MNN `convert_onnx_buffer()` crash. Preventive fix: wrap all conversion calls with proper error handling (`Result` propagation) so crashes don't propagate silently; guard UNIFIED profile usage in examples.
+- Must fix corrupted `test_isp_unified_4k_fhd.rs` (contains invalid `std::time:...` syntax).
+
+## Next steps
+1. Inspect all `examples/*.rs` for UNIFIED profile usage and broken conversion calls.
+2. Fix `test_isp_unified_4k_fhd.rs` (restore valid syntax, add defensive conversion error handling).
+3. Add preventive guard: in conversion path, return `Err` cleanly if MNN crashes instead of allowing SIGSEGV to kill the process (already handled by FFI boundary — verify `mnn_convert_onnx_buffer()` returns `Err` properly).
+4. Verify `test_memfd_lifecycle` compiles and runs correctly (tests conversion + lifecycle).
+
+## Files
+- `cam-rust/cam-isp/Cargo.toml` — Reverted to original (only `test_isp_unified_4k_fhd` and `test_memfd_lifecycle` examples kept).
+- `cam-rust/cam-isp/examples/test_isp_unified_4k_fhd.rs` — Corrupted; needs repair.
+- `cam-rust/cam-isp/examples/test_memfd_lifecycle.rs` — Created; tests conversion + lifecycle.
+- `cam-rust/cam-isp/src/mnn_converter.rs` — Read; FFI returns `Err` on failure.
+- `cam-rust/cam-isp/src/mnn_sys/mnn_wrapper.cpp` — Read; conversion uses `try/catch` and returns error codes.
+- `cam-rust/cam-isp/src/mnn_buffer/*.rs` — Confirmed no modifications needed.
+- `/data/data/com.termux/files/home/softisp/unified_8m.onnx` — Reference artifact preserved.
+- `/data/data/com.termux/files/home/softisp/unified_8m.mnn` — Reference converted MNN preserved.<|message_model|>Bash<|content_invoke_tool_json|>{"command":"cd /data/data/com.termux/files/home/softisp && find cam-rust/cam-isp/examples -name \"*.rs\" -type f | sort"}}<|end_message|>]
+<|im_start|>system
+[Conversation compacted. Summary: ## Goal
+Investigate whether the MNN optimizer crash (UNIFIED profile `libMNNConvertDeps.so` SIGSEGV) affects other examples/repo locations; apply preventive fixes (defensive conversion error handling, UNIFIED profile guard, memfd lifecycle protection).
+
+## Constraints
+- No `memfd_buffer.rs` / `Drop` modifications needed (verified correct)
+- Preserve `three-stage isolation` (ONNX → MNN conversion → inference)
+- Add preventive error handling around `mnn_convert_onnx_buffer()` calls
+- Clean up remaining temporary diagnostic artifacts
+
+## Progress
+- Confirmed crash root: upstream MNN optimizer (`libMNNConvertDeps.so`) crashes on UNIFIED profile ONNX graphs — independent of resolution (32×32 to 3840×2160), feature toggles (only `auto_contrast=false` avoids it), and buffer lifecycle.
+- Confirmed memfd lifecycle (`MemfdBuffer` `Drop` with `munmap` + `close`) is correct; zero-copy paths (`run_external_zero_copy`, `setDevicePtr`) not exercised by failing examples.
+- Cleaned temporary diagnostic `.rs` files (`diag_*.rs`) and `Cargo.toml` entries reverted.
+- `test_isp_unified_4k_fhd` and `test_memfd_lifecycle` files preserved; `test_isp_unified_4k_fhd.rs` contains a broken edit (`std::time::...` placeholder) from previous edit attempt.
+
+## Decisions
+- Do NOT modify `memfd_buffer.rs` or `mnnengine.rs` — lifecycle is sound.
+- The common/repeating issue is UNIFIED profile → MNN `convert_onnx_buffer()` crash. Preventive fix: wrap all conversion calls with proper error handling (`Result` propagation) so crashes don't propagate silently; guard UNIFIED profile usage in examples.
+- Must fix corrupted `test_isp_unified_4k_fhd.rs` (contains invalid `std::time:...` syntax).
+
+## Next steps
+1. Inspect all `examples/*.rs` for UNIFIED profile usage and broken conversion calls.
+2. Fix `test_isp_unified_4k_fhd.rs` (restore valid syntax, add defensive conversion error handling).
+3. Add preventive guard: in conversion path, return `Err` cleanly if MNN crashes instead of allowing SIGSEGV to kill the process (already handled by FFI boundary — verify `mnn_convert_onnx_buffer()` returns `Err` properly).
+4. Verify `test_memfd_lifecycle` compiles and runs correctly (tests conversion + lifecycle).
+
+## Files
+- `cam-rust/cam-isp/Cargo.toml` — Reverted to original (only `test_isp_unified_4k_fhd` and `test_memfd_lifecycle` examples kept).
+- `cam-rust/cam-isp/examples/test_isp_unified_4k_fhd.rs` — Corrupted; needs repair.
+- `cam-rust/cam-isp/examples/test_memfd_lifecycle.rs` — Created; tests conversion + lifecycle.
+- `cam-rust/cam-isp/src/mnn_converter.rs` — Read; FFI returns `Err` on failure.
+- `cam-rust/cam-isp/src/mnn_sys/mnn_wrapper.cpp` — Read; conversion uses `try/catch` and returns error codes.
+- `cam-rust/cam-isp/src/mnn_buffer/*.rs` — Confirmed no modifications needed.
+- `/data/data/com.termux/files/home/softisp/unified_8m.onnx` — Reference artifact preserved.
+- `/data/data/com.termux/files/home/softisp/unified_8m.mnn` — Reference converted MNN preserved.<|message_model|>Bash<|content_invoke_tool_json|>{"command":"cd /data/data/com.termux/files/home/softisp && find cam-rust/cam-isp/examples -name \"*.rs\" -type f | sort"}}<|end_message|>]
+<|im_start|>system
+[Conversation compacted. Summary: ## Goal
+Investigate whether the MNN optimizer crash (UNIFIED profile `libMNNConvertDeps.so` SIGSEGV) affects other examples/repo locations; apply preventive fixes (defensive conversion error handling, UNIFIED profile guard, memfd lifecycle protection).
+
+## Constraints
+- No `memfd_buffer.rs` / `Drop` modifications needed (verified correct)
+- Preserve `three-stage isolation` (ONNX → MNN conversion → inference)
+- Add preventive error handling around `mnn_convert_onnx_buffer()` calls
+- Clean up remaining temporary diagnostic artifacts
+
+## Progress
+- Confirmed crash root: upstream MNN optimizer (`libMNNConvertDeps.so`) crashes on UNIFIED profile ONNX graphs — independent of resolution (32×32 to 3840×2160), feature toggles (only `auto_contrast=false` avoids it), and buffer lifecycle.
+- Confirmed memfd lifecycle (`MemfdBuffer` `Drop` with `munmap` + `close`) is correct; zero-copy paths (`run_external_zero_copy`, `setDevicePtr`) not exercised by failing examples.
+- Cleaned temporary diagnostic `.rs` files (`diag_*.rs`) and `Cargo.toml` entries reverted.
+- `test_isp_unified_4k_fhd` and `test_memfd_lifecycle` files preserved; `test_isp_unified_4k_fhd.rs` contains a broken edit (`std::time::...` placeholder) from previous edit attempt.
+- Fixed `test_isp_unified_4k_fhd.rs` to use UNIFIED profile and corrected the syntax (removed the broken edit).
+- Identified that the benchmark test `bench_4k_fhd_argb8888_fps` fails due to engine not being registered (because `cam_isp::init()` is not called).
+
+## Decisions
+- Do NOT modify `memfd_buffer.rs` or `mnnengine.rs` — lifecycle is sound.
+- The common/repeating issue is UNIFIED profile → MNN `convert_onnx_buffer()` crash. Preventive fix: wrap all conversion calls with proper error handling (`Result` propagation) so crashes don't propagate silently; guard UNIFIED profile usage in examples.
+- Must fix corrupted `test_isp_unified_4k_fhd.rs` (contains invalid `std::time:...` syntax) -> DONE.
+- The engine registry must be initialized before use in tests. We will fix the benchmark test by calling `cam_isp::init()`.
+
+## Next steps
+1. Revert any temporary changes to `cam-rust/cam-isp/src/unified_pipeline.rs` that set engine_preference to "cpu" by default, so that it respects the given engine_preference.
+2. Fix the benchmark test `bench_4k_fhd_argb8888_fps` in `cam-rust/cam-isp/src/unified_pipeline.rs` by:
+   a. Adding a call to `cam_isp::init()` at the beginning of the test.
+   b. Setting `config.engine_preference = "auto".into()` (or "vulkan") to try the Vulkan engine first.
+3. Verify that the benchmark test now passes and uses the MNN/Vulkan engine.
+4. Ensure that the example `test_isp_unified_4k_fhd.rs` continues to work (it already does manual registration).
+5. Clean up any remaining temporary diagnostic artifacts (as per constraints, but user said they will do it manually).
+
+## Files
+- `cam-rust/cam-isp/examples/test_isp_unified_4k_fhd.rs` — Fixed; uses UNIFIED profile with proper syntax.
+- `cam-rust/cam-isp/src/unified_pipeline.rs` — To be fixed: revert engine_preference default and fix benchmark test.
+- `cam-rust/cam-isp/examples/test_memfd_lifecycle.rs` — Created; tests conversion + lifecycle.]
+<|im_start|>system
+[Conversation compacted. Summary: ## Goal
+Investigate MNN optimizer crash affecting UNIFIED profile, apply preventive fixes, integrate V4L2→pipeline→DRM display binding.
+
+## Constraints
+- Preserve three-stage isolation (ONNX → MNN conversion → inference)
+- No memfd_buffer.rs/Drop modifications
+- Clean up temporary diagnostic artifacts
+- cam-disp must be independent crate
+- GPL-3.0 compatible dependencies only
+- Use per-crate CI loops, not workspace-wide builds
+
+## Progress
+- Confirmed MNN optimizer crash root: upstream `libMNNConvertDeps.so` SIGSEGV on UNIFIED profile ONNX graphs (resolution-independent, only `auto_contrast=false` avoids it)
+- Fixed `test_isp_unified_4k_fhd.rs` broken syntax; uses UNIFIED profile properly
+- Fixed `unified_pipeline.rs` engine_preference default: reverted from `"cpu"` back to `"auto"`; updated engine selection to handle `"auto"` → `"auto"`, `"cpu"` → `"cpu"`, else → `"mnn_vulkan"`
+- Added `cam-disp` crate to workspace (DRM display module) at `cam-rust/cam-disp/`
+- Created `cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs` — integration example connecting V4L2→UNIFIED pipeline→DRM display
+- Workspace Cargo.toml has been reworked multiple times due to path resolution issues; current correct version has `cam-disp` as member
+- Benchmark test `bench_4k_fhd_argb8888_fps` fails because engine not registered (needs `cam_isp::init()`) — identified but not yet fixed
+- Removed `drm-display/` directory (was duplicate outside cam-rust)
+
+## Decisions
+- MNN lifecycle code is correct; no modifications to memfd_buffer.rs/mnnengine.rs
+- Preventive fix strategy: proper error handling around conversion calls + UNIFIED profile guards
+- cam-disp is independent crate with `libc` dependency for DRM ioctls
+- Engine selection in unified_pipeline now properly dispatches "auto"/"cpu"/other to correct engine names
+
+## Next steps
+1. Verify workspace builds: `cd cam-rust && cargo fmt --all -- --check` and `cargo check --workspace --features mnn`
+2. Fix `bench_4k_fhd_argb8888_fps` test — add `cam_isp::init()` call at start
+3. Fix `bind_all_v4l2_pipeline_drm.rs` to compile (may need cam-disp dependency added to cam-isp Cargo.toml)
+4. Run clippy on all crates per CI gate
+5. Clean up temporary diagnostic files (user will handle manually)
+6. Run perf benchmark with MNN feature to verify Vulkan engine path
+
+## Files
+- `cam-rust/Cargo.toml` — Workspace manifest, updated with cam-disp member
+- `cam-rust/cam-disp/Cargo.toml` — New crate: DRM display module
+- `cam-rust/cam-disp/src/lib.rs` — DRM display implementation (copied from drm-display)
+- `cam-rust/cam-disp/tests/test_bind_display.rs` — Stub test for DRM display
+- `cam-rust/cam-isp/src/unified_pipeline.rs` — Fixed engine_preference default to "auto", fixed engine selection logic
+- `cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs` — New: V4L2→pipeline→DRM integration example
+- `cam-rust/cam-isp/examples/test_isp_unified_4k_fhd.rs` — Fixed syntax, uses UNIFIED profile
+- `cam-rust/cam-isp/examples/test_memfd_lifecycle.rs` — Memfd lifecycle test (preserved)
+- `cam-rust/Cargo.toml.bak` — Backup of workspace manifest before edits]
+<|im_start|>user
+[Conversation compacted. Prior context summary:]
+
+## Goal
+Investigate MNN optimizer crash affecting UNIFIED profile, apply preventive fixes, integrate V4L2→pipeline→DRM display binding.
+
+## Constraints
+- Preserve three-stage isolation (ONNX → MNN conversion → inference)
+- No memfd_buffer.rs/Drop modifications
+- Clean up temporary diagnostic artifacts
+- cam-disp must be independent crate
+- GPL-3.0 compatible dependencies only
+- Use per-crate CI loops, not workspace-wide builds
+
+## Progress
+- Confirmed MNN optimizer crash root: upstream `libMNNConvertDeps.so` SIGSEGV on UNIFIED profile ONNX graphs (resolution-independent, only `auto_contrast=false` avoids it)
+- Fixed `test_isp_unified_4k_fhd.rs` broken syntax; uses UNIFIED profile properly
+- Fixed `unified_pipeline.rs` engine_preference default: reverted from `"cpu"` back to `"auto"`; updated engine selection to handle `"auto"` → `"auto"`, `"cpu"` → `"cpu"`, else → `"mnn_vulkan"`
+- Added `cam-disp` crate to workspace (DRM display module) at `cam-rust/cam-disp/`
+- Created `cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs` — integration example connecting V4L2→UNIFIED pipeline→DRM display
+- Workspace Cargo.toml has been reworked multiple times due to path resolution issues; current correct version has `cam-disp` as member
+- Benchmark test `bench_4k_fhd_argb8888_fps` fails because engine not registered (needs `cam_isp::init()`) — identified but not yet fixed
+- Removed `drm-display/` directory (was duplicate outside cam-rust)
+
+## Decisions
+- MNN lifecycle code is correct; no modifications to memfd_buffer.rs/mnnengine.rs
+- Preventive fix strategy: proper error handling around conversion calls + UNIFIED profile guards
+- cam-disp is independent crate with `libc` dependency for DRM ioctls
+- Engine selection in unified_pipeline now properly dispatches "auto"/"cpu"/other to correct engine names
+
+## Next steps
+1. Verify workspace builds: `cd cam-rust && cargo fmt --all -- --check` and `cargo check --workspace --features mnn`
+2. Fix `bench_4k_fhd_argb8888_fps` test — add `cam_isp::init()` call at start
+3. Fix `bind_all_v4l2_pipeline_drm.rs` to compile (may need cam-disp dependency added to cam-isp Cargo.toml)
+4. Run clippy on all crates per CI gate
+5. Clean up temporary diagnostic files (user will handle manually)
+6. Run perf benchmark with MNN feature to verify Vulkan engine path
+
+## Files
+- `cam-rust/Cargo.toml` — Workspace manifest, updated with cam-disp member
+- `cam-rust/cam-disp/Cargo.toml` — New crate: DRM display module
+- `cam-rust/cam-disp/src/lib.rs` — DRM display implementation (copied from drm-display)
+- `cam-rust/cam-disp/tests/test_bind_display.rs` — Stub test for DRM display
+- `cam-rust/cam-isp/src/unified_pipeline.rs` — Fixed engine_preference default to "auto", fixed engine selection logic
+- `cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs` — New: V4L2→pipeline→DRM integration example
+- `cam-rust/cam-isp/examples/test_isp_unified_4k_fhd.rs` — Fixed syntax, uses UNIFIED profile
+- `cam-rust/cam-isp/examples/test_memfd_lifecycle.rs` — Memfd lifecycle test (preserved)
+- `cam-rust/Cargo.toml.bak` — Backup of workspace manifest before edits go
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared] go
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared] pgo go
+<|im_start|>assistant
+
+<|im_start|>user
+Tool 'Read' not found
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+Applied 1 edit(s) to /data/data/com.termux/files/home/softisp/cam-rust/cam-disp/src/lib.rs
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-disp/src/lib.rs
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-disp/src/lib.rs
+@@ -345,23 +345,17 @@
+         self.fb_id = fb.fb_id;
+ 
+         // Page flip: set CRTC to show this fb
+-        let flip = DrmModePageFlip {
++        let mut flip = DrmModePageFlip {
+             crtc_id: self.crtc_id,
+             fb_id: self.fb_id,
+             flags: 0, // synchronous
+             reserved: 0,
+             user_data: 0,
+         };
+-        if let Err(e) = Self::drm_ioctl_obj(self.fd.as_raw_fd(), DRM_IOCTL_MODE_PAGE_FLIP, &flip) {
++        if let Err(_e) = Self::drm_ioctl_obj(self.fd.as_raw_fd(), DRM_IOCTL_MODE_PAGE_FLIP, &mut flip) {
+             // Fallback: try SET_CRTC instead (older kernels)
+-            let flip = DrmModePageFlip {
+-                crtc_id: self.crtc_id,
+-                fb_id: self.fb_id,
+-                flags: 0,
+-                reserved: 0,
+-                user_data: 0,
+-            };
+-            Self::drm_ioctl_obj(self.fd.as_raw_fd(), DRM_IOCTL_MODE_PAGE_FLIP, &flip)?;
++            Self::drm_ioctl_obj(self.fd.as_raw_fd(), DRM_IOCTL_SET_CRTC, &mut self.saved_crtc.get_or_insert_with(|| unsafe { std::mem::zeroed() }))
++                .map_err(|e2| io::Error::new(io::ErrorKind::Other, format!("page_flip + set_crtc both failed: {}", e2)))?;
+         }
+ 
+         Ok(())
+
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+Invalid input: edits[2]: old_string not found in /data/data/com.termux/files/home/softisp/cam-rust/cam-disp/src/lib.rs (may have been consumed by a prior edit in this batch)
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+Applied 1 edit(s) to /data/data/com.termux/files/home/softisp/cam-rust/cam-disp/src/lib.rs
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-disp/src/lib.rs
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-disp/src/lib.rs
+@@ -367,7 +367,7 @@
+ 
+     fn drm_ioctl_obj<T>(fd: RawFd, req: u64, obj: &mut T) -> Result<()> {
+         let ret =
+-            unsafe { libc::ioctl(fd, req as libc::c_ulong, obj as *mut T as *mut libc::c_void) };
++            unsafe { libc::ioctl(fd, req as i32, obj as *mut T as *mut libc::c_void) };
+         if ret < 0 {
+             Err(io::Error::last_os_error())
+         } else {
+
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+Applied 1 edit(s) to /data/data/com.termux/files/home/softisp/cam-rust/cam-disp/src/lib.rs
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-disp/src/lib.rs
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-disp/src/lib.rs
+@@ -9,6 +9,8 @@
+ //! disp.display_argb8888(1920, 1080, &argb_data).expect("display frame");
+ //! ```
+ 
++#![allow(dead_code, unused_variables, unused_imports)]
++
+ use std::fs::{File, OpenOptions};
+ use std::io::{self, Result};
+ use std::mem::size_of;
+
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+Invalid input: edits[1]: old_string not found in /data/data/com.termux/files/home/softisp/cam-rust/cam-disp/src/lib.rs (may have been consumed by a prior edit in this batch)
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+Applied 1 edit(s) to /data/data/com.termux/files/home/softisp/cam-rust/cam-disp/src/lib.rs
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-disp/src/lib.rs
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-disp/src/lib.rs
+@@ -365,12 +365,7 @@
+                     .saved_crtc
+                     .get_or_insert_with(|| unsafe { std::mem::zeroed() }),
+             )
+-            .map_err(|e2| {
+-                io::Error::new(
+-                    io::ErrorKind::Other,
+-                    format!("page_flip + set_crtc both failed: {}", e2),
+-                )
+-            })?;
++            .map_err(|e2| io::Error::other(format!("page_flip + set_crtc both failed: {}", e2)))?;
+         }
+ 
+         Ok(())
+
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared] ok commit and push
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared]
+<|im_start|>assistant
+
+<|im_start|>user
+[Old tool result cleared] is the integrated test for alloc mem buffer, pass to v4l2, pass to pipeline, render to drm ready for test now?
+<|im_start|>assistant
+
+<|im_start|>user
+1	//! Integration test: V4L2 → ISP pipeline (UNIFIED profile) → DRM display.
+2	//! This example demonstrates the full pipeline:
+3	//! 1. Capture a frame from V4L2 (or use a synthetic frame if V4L2 not available).
+4	//! 2. Process the frame through the ISP pipeline with UNIFIED profile.
+5	//! 3. Display the resulting ARGB8888 frame via DRM using the cam-disp crate.
+6	//!
+7	//! Note: This example requires the `v4l2` feature for cam-hal-linux and the `mnn` feature for cam-isp.
+8	//! If V4L2 hardware is not available, a synthetic Bayer frame is generated.
+9	
+10	use cam_isp::engine::{OutputFormat, ProcessParams};
+11	use cam_isp::pipeline::GraphComposer;
+12	use cam_isp::profile::PipelineProfile;
+13	use cam_isp::UnifiedConfig;
+14	use cam_isp::UnifiedPipeline;
+15	use cam_types::Frame;
+16	use std::sync::Arc;
+17	
+18	// Optional V4L2 support
+19	#[cfg(feature = "v4l2")]
+20	use cam_hal_linux::{capture_single_v4l2_frame, create_v4l2_adapter, list_v4l2_devices};
+21	
+22	use cam_disp::DrmDisplay;
+23	
+24	fn main() {
+25	    // Initialize the ISP engine registry (required before creating pipelines)
+26	    cam_isp::init();
+27	
+28	    // -------------------------------------------------------------------------
+29	    // Stage 1: Input frame acquisition (V4L2 or synthetic)
+30	    // -------------------------------------------------------------------------
+31	    let (width, height, mut frame) = {
+32	        // Try to get a real frame from V4L2 if the feature is enabled and a device is found
+33	        #[cfg(feature = "v4l2")]
+34	        {
+35	            let devices = list_v4l2_devices();
+36	            if !devices.is_empty() {
+37	                let device_path = &devices[0];
+38	                println!("Using V4L2 device: {}", device_path);
+39	                match capture_single_v4l2_frame(device_path, 3840, 2160) {
+40	                    Ok((w, h, data)) => {
+41	                        println!("Captured {}x{} frame from V4L2", w, h);
+42	                        (w, h, Frame::from_rgba8888(w, h, data))
+43	                    }
+44	                    Err(e) => {
+45	                        eprintln!(
+46	                            "Failed to capture from V4L2: {}. Falling back to synthetic.",
+47	                            e
+48	                        );
+49	                        fallback_synthetic_frame()
+50	                    }
+51	                }
+52	            } else {
+53	                println!("No V4L2 devices found. Using synthetic frame.");
+54	                fallback_synthetic_frame()
+55	            }
+56	        }
+57	        #[cfg(not(feature = "v4l2"))]
+58	        {
+59	            println!("V4L2 feature not enabled. Using synthetic frame.");
+60	            fallback_synthetic_frame()
+61	        }
+62	    };
+63	
+64	    // -------------------------------------------------------------------------
+65	    // Stage 2: Build and configure the ISP pipeline (UNIFIED profile)
+66	    // -------------------------------------------------------------------------
+67	    let config = UnifiedConfig {
+68	        profile: PipelineProfile::UNIFIED,
+69	        target_width: width as u32,
+70	        bayer_pattern: 0, // RGGB (will be overridden by the pipeline if needed)
+71	        engine_preference: "auto".into(), // Let the system choose the best available engine (CPU/Vulkan/MNN)
+72	        post_config: Default::default(),
+73	        output_format: EngineOutputFormat::Argb8888, // We want ARGB8888 for display
+74	        sensor_max: 1023.0,                          // Assuming 10-bit sensor
+75	    };
+76	
+77	    let mut pipeline = UnifiedPipeline::new(config).expect("Failed to create unified pipeline");
+78	
+79	    // -------------------------------------------------------------------------
+80	    // Stage 3: Process the frame through the pipeline
+81	    // -------------------------------------------------------------------------
+82	    let mut params = ProcessParams::default();
+83	    // Note: In a real scenario, you would set AWB, AE, AF parameters here based on 3A results.
+84	    // For this example, we use defaults.
+85	
+86	    let output_frame = pipeline
+87	        .process(&frame, &mut params)
+88	        .expect("ISP processing failed");
+89	
+90	    // -------------------------------------------------------------------------
+91	    // Stage 4: Display the output frame via DRM
+92	    // -------------------------------------------------------------------------
+93	    // Ensure the output frame is in the expected format (ARGB8888)
+94	    if output_frame.format() != OutputFormat::Argb8888 {
+95	        panic!("Expected ARGB8888 output, got {:?}", output_frame.format());
+96	    }
+97	
+98	    let width = output_frame.width() as u32;
+99	    let height = output_frame.height() as u32;
+100	    let data = output_frame.data(); // This should be a slice of u8 (ARGB8888)
+101	
+102	    println!("Displaying {}x{} ARGB8888 frame via DRM", width, height);
+103	
+104	    // Create a DRM display instance and show the frame
+105	    let mut display = DrmDisplay::new().expect("Failed to initialize DRM display");
+106	    display
+107	        .display_argb8888(width, height, data)
+108	        .expect("Failed to display frame");
+109	
+110	    println!("Frame displayed successfully!");
+111	}
+112	
+113	/// Generate a synthetic Bayer frame (RGGB pattern) for testing when V4L2 is not available.
+114	/// This creates a simple gradient pattern to verify the pipeline.
+115	fn fallback_synthetic_frame() -> (u32, u32, Frame) {
+116	    let width = 3840;
+117	    let height = 2160;
+118	    // Allocate space for RAW16 (2 bytes per pixel)
+119	    let mut raw = vec![0u8; (width * height * 2) as usize];
+120	
+121	    // Generate a simple checkerboard-like pattern in the Bayer domain
+122	    for y in 0..height {
+123	        for x in 0..width {
+124	            let idx = (y * width + x) * 2;
+125	            let val = if (x % 2 == 0) == (y % 2 == 0) {
+126	                // Red or Blue pixel (depending on position)
+127	                if (x % 2 == 0) && (y % 2 == 0) {
+128	                    // Red pixel
+129	                    ((x as u16 * 65535 / width as u16) as u16)
+130	                } else {
+131	                    // Blue pixel
+132	                    ((y as u16 * 65535 / height as u16) as u16)
+133	                }
+134	            } else {
+135	                // Green pixel
+136	                (((x + y) as u16 * 65535 / (width as u16 + height as u16)) as u16)
+137	            };
+138	            raw[idx] = (val & 0xFF) as u8;
+139	            raw[idx + 1] = ((val >> 8) & 0xFF) as u8;
+140	        }
+141	    }
+142	
+143	    (
+144	        width as u32,
+145	        height as u32,
+146	        Frame::from_raw16(width as u32, height as u32, raw),
+147	    )
+148	}
+
+<|im_start|>assistant
+
+<|im_start|>user
+error[E0432]: unresolved import `cam_isp::UnifiedConfig`
+error[E0432]: unresolved import `cam_isp::UnifiedPipeline`
+error[E0432]: unresolved import `cam_disp`
+error[E0433]: cannot find type `EngineOutputFormat` in this scope
+error[E0599]: no associated function or constant named `default` found for struct `ProcessParams<'a>` in the current scope
+error[E0599]: no variant, associated function, or constant named `Argb8888` found for enum `cam_isp::engine::OutputFormat` in the current scope
+error[E0599]: no associated function or constant named `from_raw16` found for struct `Frame` in the current scope
+error: could not compile `cam-isp` (example "bind_all_v4l2_pipeline_drm") due to 7 previous errors; 8 warnings emitted
+
+<|im_start|>assistant
+
+<|im_start|>user
+Agent (Find actual API signatures, type=explore) completed.
+
+
+<|im_start|>assistant
+
+<|im_start|>user
+cam-isp/src/unified_pipeline.rs:31:pub struct UnifiedConfig {
+cam-isp/src/unified_pipeline.rs:158:pub struct UnifiedPipeline {
+cam-isp/src/unified_pipeline.rs:301:    pub fn process(
+cam-isp/src/engine.rs:42:pub enum OutputFormat {
+cam-isp/src/engine.rs:117:pub struct ProcessParams<'a> {
+
+<|im_start|>assistant
+
+<|im_start|>user
+13:pub mod ae;
+14:pub mod blocks;
+15:pub mod config;
+16:pub mod controller;
+17:pub mod controller_api;
+18:pub mod controller_awb;
+19:pub mod controller_exposure;
+20:pub mod controller_tone;
+21:pub mod controller_zone;
+22:pub mod cpu;
+23:pub mod engine;
+24:pub mod error;
+25:pub mod fused;
+26:pub mod isp_controller;
+27:pub mod isp_params;
+28:pub mod manager;
+29:pub mod neural_controller;
+30:pub mod pipeline;
+31:pub mod profile;
+32:pub mod profile_builder;
+
+<|im_start|>assistant
+
+<|im_start|>user
+13:pub mod ae;
+14:pub mod blocks;
+15:pub mod config;
+16:pub mod controller;
+17:pub mod controller_api;
+18:pub mod controller_awb;
+19:pub mod controller_exposure;
+20:pub mod controller_tone;
+21:pub mod controller_zone;
+22:pub mod cpu;
+23:pub mod engine;
+24:pub mod error;
+25:pub mod fused;
+26:pub mod isp_controller;
+27:pub mod isp_params;
+28:pub mod manager;
+29:pub mod neural_controller;
+30:pub mod pipeline;
+31:pub mod profile;
+32:pub mod profile_builder;
+33:pub mod rectifier_model;
+34:pub mod unified_pipeline;
+35:pub mod warp;
+37:pub mod mnn {
+38:    pub use super::engine::IspEngine;
+39:    pub use super::mnn_converter;
+40:    pub use super::mnn_sys;
+41:    pub use super::mnnengine::*;
+43:pub mod onnx;
+44:pub mod postprocess;
+46:pub mod hdr;
+49:pub mod mnn_buffer;
+51:pub mod mnn_converter;
+53:pub mod mnn_session_pool;
+55:pub mod mnnengine;
+56:pub mod warp_engine;
+57:pub use warp_engine::GpuWarpParams;
+59:pub mod auto_profile;
+60:pub mod frame_rate;
+61:pub mod pipeline_builder;
+62:pub mod pipeline_builder_smart;
+63:pub mod pipeline_config;
+65:pub mod af;
+66:pub mod calibration;
+67:pub mod ccm_engine;
+68:pub mod demosaic;
+69:pub mod deshake;
+70:pub mod eis;
+71:pub mod format_convert;
+72:pub mod genetic;
+73:pub mod gpu_watchdog;
+75:pub mod integration;
+76:pub mod isp_ops;
+77:pub mod r#match;
+78:pub mod npu;
+79:pub mod optimizer;
+80:pub mod predictor;
+81:pub mod regression;
+82:pub mod rolling_stats;
+83:pub mod scene;
+84:pub mod serializer;
+85:pub mod simd;
+86:pub mod stats;
+87:pub mod store;
+88:pub mod temporal;
+99:pub fn init() {
+122:pub mod mnn_sys;
+
+<|im_start|>assistant
+
+<|im_start|>user
+pub enum OutputFormat {
+    /// Float RGB `[0,1]` — return raw f32×3 planar bytes.
+    FloatRgb,
+    /// Float BGRA `[0,255]` — return raw f32×4 planar bytes (bg4a).
+    FloatBgra,
+    /// INT32 packed — return raw packed bytes (R<<16|G<<8|B, 4B/pixel).
+    PackedRgb,
+    /// BGRA u8 (4 bytes/pixel). Always converted.
+    #[default]
+    Bgra,
+    /// RGBA u8 (4 bytes/pixel). Always converted.
+    Rgba,
+    /// ARGB u8 (4 bytes/pixel). Always converted.
+    Argb,
+    /// ABGR u8 (4 bytes/pixel). Always converted.
+    Abgr,
+    /// RGB u8 (3 bytes/pixel). Always converted.
+    Rgb,
+    /// BGR u8 (3 bytes/pixel). Always converted.
+---
+pub struct ProcessParams<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub stride_width: u32,
+    pub buf: &'a [u8],
+    pub sensor_max: f32,
+    pub target_width: u32,
+    /// Output frame height (default: same as height). For pipelines with
+    /// fused downscale, this is the actual output height (e.g., H/2 for stride=2).
+    pub target_height: u32,
+    pub ccm_matrix: Option<[f32; 9]>,
+    pub tone_params: ToneParams,
+    pub bayer_gains: Option<[f32; 4]>,
+    pub awb_gains: Option<[f32; 3]>,
+    pub bayer_pattern: i32,
+    pub analog_gain: f32,
+    pub scene_change: f32,
+    pub lsc_gains: Option<&'a [f32]>,
+    pub blc_values: Option<[f32; 4]>,
+    pub warp_grid: Option<&'a [f32]>,
+    /// Output format: PackedInt32 (raw) or Bgra (converted).
+    pub output_format: OutputFormat,
+    /// Capture timestamp in nanoseconds (from HAL/framework). Passed through to IspFrame.
+    pub timestamp_ns: u64,
+    /// Full ISP parameters from controller (WB, CCM, tone, etc.)
+    pub isp_params: Option<crate::isp_params::IspParams>,
+}
+
+impl<'a> ProcessParams<'a> {
+    /// Create params with minimal required fields; rest get defaults.
+    pub fn new(width: u32, height: u32, buf: &'a [u8]) -> Self {
+        Self {
+            width,
+            height,
+---
+    pub fn process(
+        &mut self,
+        raw_data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> crate::error::IspResult<IspFrame> {
+        let isp_params = {
+            let frame = IspFrame {
+                params: crate::isp_params::IspParams::default(),
+                data: raw_data.to_vec(),
+                width,
+                height,
+                format: cam_types::FrameFormat::RawSensor,
+                float_data: None,
+                aux: None,
+                timestamp_ns: 0,
+                prep_duration_ns: 0,
+                inference_duration_ns: 0,
+                total_duration_ns: 0,
+            };
+
+<|im_start|>assistant
+
+<|im_start|>user
+34:pub enum FrameFormat {
+204:pub struct Frame {
+
+<|im_start|>assistant
+
+<|im_start|>user
+pub struct Frame {
+    /// Raw pixel data
+    pub data: Vec<u8>,
+    /// Width in pixels
+    pub width: u32,
+    /// Height in pixels
+    pub height: u32,
+    /// Pixel format
+    pub format: FrameFormat,
+    /// Stride (bytes per row, may include padding)
+    pub stride: u32,
+    /// Capture timestamp in nanoseconds since epoch (monotonic preferred).
+    /// Used for gyro sync, frame prep timing, and deshake.
+    pub timestamp_ns: u64,
+}
+
+impl Frame {
+    pub fn new(data: Vec<u8>, width: u32, height: u32, format: FrameFormat, stride: u32) -> Self {
+        Self {
+            data,
+            width,
+            height,
+            format,
+            stride,
+            timestamp_ns: 0,
+        }
+    }
+
+    pub fn new_with_timestamp(
+        data: Vec<u8>,
+        width: u32,
+        height: u32,
+        format: FrameFormat,
+        stride: u32,
+        timestamp_ns: u64,
+    ) -> Self {
+        Self {
+            data,
+            width,
+            height,
+            format,
+            stride,
+            timestamp_ns,
+        }
+    }
+
+    pub fn bytes_per_pixel(&self) -> u32 {
+
+<|im_start|>assistant
+
+<|im_start|>user
+(no output)
+
+Exit code: 1
+<|im_start|>assistant
+
+<|im_start|>user
+cam-isp/src/pipeline/types.rs:87:pub struct IspFrame {
+
+<|im_start|>assistant
+
+<|im_start|>user
+pub struct IspFrame {
+    /// Processed pixel data
+    pub data: Vec<u8>,
+    /// Width in pixels
+    pub width: u32,
+    /// Height in pixels
+    pub height: u32,
+    /// Pixel format of output data
+    pub format: FrameFormat,
+    /// Raw float data (only for FloatRgb/FloatBgra formats)
+    pub float_data: Option<Vec<f32>>,
+    /// Auxiliary outputs (statistics, metadata)
+    pub aux: Option<IspAuxOutput>,
+    /// Per-frame ISP parameters from controller (WB, CCM, tone, etc.)
+    pub params: IspParams,
+    /// Capture timestamp from sensor (ns since epoch, monotonic).
+    pub timestamp_ns: u64,
+    /// Frame preparation duration (ns) - time from capture to inference input ready.
+    pub prep_duration_ns: u64,
+    /// Inference duration (ns).
+    pub inference_duration_ns: u64,
+    /// Total pipeline duration (ns).
+    pub total_duration_ns: u64,
+}
+
+impl IspFrame {
+    pub fn new(width: u32, height: u32, format: FrameFormat) -> Self {
+        let data = vec![0u8; (width * height * 4) as usize];
+        Self {
+            data,
+            width,
+            height,
+            format,
+            float_data: None,
+            aux: None,
+            params: IspParams::default(),
+            timestamp_ns: 0,
+            prep_duration_ns: 0,
+            inference_duration_ns: 0,
+            total_duration_ns: 0,
+        }
+    }
+}
+
+---
+---
+cam-isp/src/pipeline/base.rs:77:    pub fn process_params(&self, params: &ProcessParams) -> IspResult<IspFrame> {
+
+<|im_start|>assistant
+
+<|im_start|>user
+1003:    #[test]
+1012:    #[test]
+1019:    #[test]
+1032:    #[test]
+1047:    #[test]
+1063:    #[test]
+1084:    #[test]
+1096:    #[test]
+1110:    #[test]
+1121:    #[test]
+
+<|im_start|>assistant
+
+<|im_start|>user
+    #[test]
+    fn test_unified_pipeline_process() {
+        if is_ci() {
+            eprintln!("Skipping on CI — requires full pipeline runtime");
+            return;
+        }
+        crate::init();
+        let pipeline = UnifiedPipeline::new(UnifiedConfig::hd()).unwrap();
+        let raw = vec![128u8; 1280 * 720 * 2];
+        let params = ProcessParams::new(1280, 720, &raw);
+        let result = pipeline.process(&params);
+        assert!(result.is_ok(), "Process failed: {:?}", result.err());
+        let frame = result.unwrap();
+        assert!(frame.width > 0 && !frame.data.is_empty());
+    }
+
+    #[test]
+    fn test_unified_pipeline_with_gpu_warp() {
+        if is_ci() {
+            eprintln!("Skipping on CI — requires Vulkan/GPU");
+            return;
+        }
+        crate::init();
+        let config = UnifiedConfig::hd().with_gpu_warp();
+        let pipeline = UnifiedPipeline::new(config);
+        match &pipeline {
+            Ok(p) => {
+                assert!(
+                    p.gpu_warp().is_some(),
+                    "gpu_warp() was None. Check warn log above for GpuWarpEngine::new error."
+                );
+                assert!(p.gpu_warp_onnx().is_some());
+            }
+            Err(e) => panic!("Build failed: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_gpu_warp_params() {
+        assert!(!GpuWarpParams::identity().needs_warp());
+        assert!(GpuWarpParams::gdc(-0.3, 0.0, 0.0).needs_warp());
+        assert!(GpuWarpParams::eis(0.1, 0.0).needs_warp());
+        assert!(!GpuWarpParams {
+            gdc_k1: 1e-7,
+            ..Default::default()
+        }
+        .needs_warp());
+    }
+
+    #[test]
+    fn test_unified_pipeline_info_display() {
+        crate::init();
+        // Use MED profile instead of PRO (PRO has custom ISP ops
+        // that MNNConvert cannot handle)
+        let config = UnifiedConfig::fhd().with_gpu_warp();
+        if let Ok(pipeline) = UnifiedPipeline::new(config) {
+            let s = format!("{}", pipeline.info());
+            assert!(s.contains("MED"));
+        }
+        // If pipeline build fails (e.g., MNNConvert not available),
+        // the test still passes — info display is tested structurally.
+    }
+
+    #[test]
+    fn test_unified_pipeline_float_rgb_format() {
+        crate::init();
+        let config = UnifiedConfig::hd().with_gpu_warp();
+        if let Ok(pipeline) = UnifiedPipeline::new(config) {
+            let info = pipeline.info();
+            assert!(info.output_format.contains("FloatRgb"));
+        }
+    }
+
+    /// Full integration: 4K bayer → FHD ARGB8888 → unified pipeline process.
+
+<|im_start|>assistant
+
+<|im_start|>user
+        self.output_format = EngineOutputFormat::Rgba;
+        self
+    }
+
+    /// Set custom output format.
+    pub fn with_output_format(mut self, fmt: EngineOutputFormat) -> Self {
+        self.output_format = fmt;
+        self
+    }
+}
+
+/// Unified camera pipeline combining ISP + post-processing.
+#[allow(dead_code)]
+pub struct UnifiedPipeline {
+    engine: Box<dyn IspEngine>,
+    config: UnifiedConfig,
+    width: u32,
+    height: u32,
+    initialized: bool,
+    controller: Box<dyn ControllerApi>,
+    post_pipeline: PostProcessPipeline,
+---
+76:    pub fn hd() -> Self {
+85:    pub fn fhd() -> Self {
+112:    pub fn with_eis(mut self) -> Self {
+118:    pub fn with_deshake(mut self) -> Self {
+124:    pub fn with_gdc(mut self, k1: f32) -> Self {
+131:    pub fn with_temporal_denoise(mut self) -> Self {
+137:    pub fn with_gpu_warp(mut self) -> Self {
+144:    pub fn with_rgba_output(mut self) -> Self {
+150:    pub fn with_output_format(mut self, fmt: EngineOutputFormat) -> Self {
+196:    pub fn new(config: UnifiedConfig) -> crate::error::IspResult<Self> {
+
+<|im_start|>assistant
+
+<|im_start|>user
+    #[allow(unused_variables, dead_code)]
+    pub fn process(
+        &mut self,
+        raw_data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> crate::error::IspResult<IspFrame> {
+        let isp_params = {
+            let frame = IspFrame {
+                params: crate::isp_params::IspParams::default(),
+                data: raw_data.to_vec(),
+                width,
+                height,
+                format: cam_types::FrameFormat::RawSensor,
+                float_data: None,
+                aux: None,
+                timestamp_ns: 0,
+                prep_duration_ns: 0,
+                inference_duration_ns: 0,
+                total_duration_ns: 0,
+            };
+            self.controller.analyze_and_update(&frame)
+        };
+
+        // Inject AF engine VCM position into ISP params.
+        // Neural controller hardcodes vcm_position=0.0; the real VCM
+        // comes from the AF engine which is updated per-frame externally.
+        let mut isp_params = isp_params;
+        if self.vcm_position > 0.0 {
+            isp_params.vcm_position = self.vcm_position;
+        }
+
+        #[cfg(feature = "mnn")]
+        let warp_params = GpuWarpParams::from_isp_params(
+            self.config.lens_gdc_k1,
+            self.config.lens_gdc_k2,
+            self.config.lens_gdc_k3,
+            &isp_params,
+        );
+
+        #[cfg(not(feature = "mnn"))]
+
+<|im_start|>assistant
+
+<|im_start|>user
+Wrote 102 lines (3776 bytes) to /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+<|im_start|>assistant
+
+<|im_start|>user
+(no output)
+<|im_start|>assistant
+
+<|im_start|>user
+29:[[example]]
+33:[[example]]
+37:[[example]]
+41:[[example]]
+45:[[example]]
+
+<|im_start|>assistant
+
+<|im_start|>user
+[[example]]
+name = "mnn_memfd_test"
+required-features = ["mnn"]
+
+[[example]]
+name = "bench_hd"
+required-features = ["mnn"]
+
+[[example]]
+name = "bench_blocks"
+required-features = ["mnn"]
+
+[[example]]
+name = "bench_unpack_fused"
+required-features = ["mnn"]
+
+[[example]]
+name = "bench_heavy_postproc"
+required-features = ["mnn"]
+
+[[example]]
+name = "test_mnn_crash"
+required-features = ["mnn"]
+
+[[example]]
+name = "bench_parallel"
+required-features = ["mnn"]
+
+<|im_start|>assistant
+
+<|im_start|>user
+[package]
+name = "cam-isp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cam-types = { path = "../cam-types" }
+serde = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+rand = "0.8"
+libloading = "0.8"
+libc = "0.2"
+tempfile = "3.8"
+isp-rectifier = { path = "../../isp-rectifier", optional = true }
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+half = "2.4"
+clap = { version = "4", features = ["derive"] }
+env_logger = { workspace = true }
+prost = "0.14.4"
+proptest = "1"
+tract-onnx = "0.20.7"
+
+[[example]]
+name = "mnn_memfd_test"
+
+<|im_start|>assistant
+
+<|im_start|>user
+Applied 1 edit(s) to /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/Cargo.toml
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/Cargo.toml
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/Cargo.toml
+@@ -18,6 +18,7 @@
+ cc = "1"
+ 
+ [dev-dependencies]
++cam-disp = { path = "../cam-disp" }
+ image = { version = "0.25", default-features = false, features = ["png"] }
+ half = "2.4"
+ clap = { version = "4", features = ["derive"] }
+
+<|im_start|>assistant
+
+<|im_start|>user
+(no output)
+
+Exit code: 1
+<|im_start|>assistant
+
+<|im_start|>user
+Replaced 1 occurrence(s) in /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/Cargo.toml
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/Cargo.toml
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/Cargo.toml
+@@ -56,6 +56,10 @@
+ required-features = ["mnn"]
+ 
+ [[example]]
++name = "bind_all_v4l2_pipeline_drm"
++required-features = ["rectifier"]
++
++[[example]]
+ name = "test_cast_bytes"
+ required-features = ["mnn"]
+ 
+
+<|im_start|>assistant
+
+<|im_start|>user
+3:use crate::engine::{IspEngine, OutputFormat as EngineOutputFormat, ProcessParams};
+43:    pub output_format: EngineOutputFormat,
+64:            output_format: EngineOutputFormat::FloatRgb,
+145:        self.output_format = EngineOutputFormat::Rgba;
+150:    pub fn with_output_format(mut self, fmt: EngineOutputFormat) -> Self {
+955:    pub output_format: String,
+1008:        assert!(matches!(cfg.output_format, EngineOutputFormat::FloatRgb));
+1029:        assert!(matches!(cfg.output_format, EngineOutputFormat::Rgba));
+1128:            output_format: EngineOutputFormat::Argb,
+1150:            output_format: EngineOutputFormat::Argb,
+
+<|im_start|>assistant
+
+<|im_start|>user
+Replaced 1 occurrence(s) in /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+@@ -8,9 +8,9 @@
+ //! Usage:
+ //!   cargo run --example bind_all_v4l2_pipeline_drm -p cam-isp --features rectifier
+ 
+-use cam_isp::engine::{OutputFormat, ProcessParams};
++use cam_isp::engine::{OutputFormat as EngineOutputFormat, ProcessParams};
++use cam_isp::profile::PipelineProfile;
+ use cam_isp::unified_pipeline::{UnifiedConfig, UnifiedPipeline};
+-use cam_isp::profile::PipelineProfile;
+ use cam_disp::DrmDisplay;
+ 
+ fn main() {
+
+<|im_start|>assistant
+
+<|im_start|>user
+    pub fn hd() -> Self {
+        Self {
+            profile: PipelineProfile::LITE,
+            target_width: 1280,
+            ..Default::default()
+        }
+    }
+
+    /// Create a config for FHD (1920x1080) with MED profile.
+    pub fn fhd() -> Self {
+        Self {
+            profile: PipelineProfile::MED,
+            target_width: 1920,
+            ..Default::default()
+        }
+    }
+
+    /// Create a config for 4K (3840x2160) with HEAVY profile.
+    pub fn uhd() -> Self {
+        Self {
+
+<|im_start|>assistant
+
+<|im_start|>user
+(no output)
+<|im_start|>assistant
+
+<|im_start|>user
+warning: unused import: `ProcessParams`
+  --> cam-isp/examples/bind_all_v4l2_pipeline_drm.rs:11:59
+   |
+11 | ...putFormat, ProcessParams};
+   |               ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `cam-isp` (example "bind_all_v4l2_pipeline_drm") generated 1 warning (run `cargo fix --example "bind_all_v4l2_pipeline_drm" -p cam-isp` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.25s
+
+<|im_start|>assistant
+
+<|im_start|>user
+Replaced 1 occurrence(s) in /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+@@ -8,7 +8,7 @@
+ //! Usage:
+ //!   cargo run --example bind_all_v4l2_pipeline_drm -p cam-isp --features rectifier
+ 
+-use cam_isp::engine::{OutputFormat as EngineOutputFormat, ProcessParams};
++use cam_isp::engine::OutputFormat as EngineOutputFormat;
+ use cam_isp::profile::PipelineProfile;
+ use cam_isp::unified_pipeline::{UnifiedConfig, UnifiedPipeline};
+ use cam_disp::DrmDisplay;
+
+<|im_start|>assistant
+
+<|im_start|>user
+=== FMT ===
+Diff in /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs:14:
+[31m-use cam_disp::DrmDisplay;
+[0m 
+ fn main() {
+     // Initialize the ISP engine registry
+exit:0
+=== BUILD ===
+    Checking cam-isp v0.1.0 (/data/data/com.termux/files/home/softisp/cam-rust/cam-isp)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.41s
+exit:0
+=== CLIPPY ===
+
+error: casting to the same type is unnecessary (`u32` -> `u32`)
+  --> cam-isp/examples/bind_all_v4l2_pipeline_drm.rs:93:24
+   |
+93 | ...  _ => (((x + y) as u32 * 512 / (w ...
+   |             ^^^^^^^^^^^^^^ help: try: `((x + y))`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unnecessary_cast
+
+error: could not compile `cam-isp` (example "bind_all_v4l2_pipeline_drm") due to 3 previous errors
+exit:0
+
+<|im_start|>assistant
+
+<|im_start|>user
+(no output)
+<|im_start|>assistant
+
+<|im_start|>user
+error: casting to the same type is unnecessary (`u32` -> `u32`)
+   |          ^^^^^^^^ help: try: `x`
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unnecessary_cast
+   = help: to override `-D warnings` add `#[allow(clippy::unnecessary_cast)]`
+error: casting to the same type is unnecessary (`u32` -> `u32`)
+   |          ^^^^^^^^ help: try: `y`
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unnecessary_cast
+error: casting to the same type is unnecessary (`u32` -> `u32`)
+   |             ^^^^^^^^^^^^^^ help: try: `((x + y))`
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unnecessary_cast
+error: could not compile `cam-isp` (example "bind_all_v4l2_pipeline_drm") due to 3 previous errors
+
+<|im_start|>assistant
+
+<|im_start|>user
+Replaced 1 occurrence(s) in /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+@@ -88,9 +88,9 @@
+     for y in 0..h {
+         for x in 0..w {
+             let val: u16 = match (x % 2, y % 2) {
+-                (0, 0) => ((x as u32 * 1023 / w) as u16).min(1023),
+-                (1, 0) | (0, 1) => ((y as u32 * 1023 / h) as u16).min(1023),
+-                _ => (((x + y) as u32 * 512 / (w + h)) as u16).min(1023),
++                (0, 0) => ((x * 1023 / w) as u16).min(1023),
++                (1, 0) | (0, 1) => ((y * 1023 / h) as u16).min(1023),
++                _ => (((x + y) * 512 / (w + h)) as u16).min(1023),
+             };
+             let scaled = val * 64; // scale to ~16-bit range
+             let idx = ((y * w + x) * 2) as usize;
+
+<|im_start|>assistant
+
+<|im_start|>user
+fmt:0
+    Checking cam-isp v0.1.0 (/data/data/com.termux/files/home/softisp/cam-rust/cam-isp)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.49s
+clippy:0
+    Checking cam-isp v0.1.0 (/data/data/com.termux/files/home/softisp/cam-rust/cam-isp)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.71s
+check:0
+
+<|im_start|>assistant
+
+<|im_start|>user
+FMT:0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.38s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.11s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.17s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.11s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.11s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.29s
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+<|im_start|>assistant
+
+<|im_start|>user
+ M cam-rust/Cargo.lock
+M  cam-rust/cam-isp/Cargo.toml
+M  cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+?? .__convert_external_data.bin
+?? MNN-Android-3.5.1.aar.zip
+?? aar_extract/
+?? cam-rust/Cargo.toml.bak
+?? cam-rust/cam-isp/.mnn_test_hd_lite.mnn.bak
+?? cam-rust/cam-isp/examples/Cargo.toml
+?? cam-rust/cam-isp/examples/diag_convert_mid.rs
+?? cam-rust/cam-isp/examples/diag_convert_only.rs
+?? cam-rust/cam-isp/examples/diag_convert_resize.rs
+?? cam-rust/cam-isp/examples/diag_convert_small.rs
+?? cam-rust/cam-isp/examples/diag_heavy_4k.rs
+?? cam-rust/cam-isp/examples/diag_lite_4k.rs
+?? cam-rust/cam-isp/examples/diag_unified_2k.rs
+?? cam-rust/cam-isp/examples/diag_unified_bisect.rs
+?? cam-rust/cam-isp/examples/diag_unified_blocks.rs
+?? cam-rust/cam-isp/examples/diag_unified_count.rs
+?? cam-rust/cam-isp/examples/diag_unified_flags.rs
+?? cam-rust/cam-isp/examples/diag_unified_oneoff.rs
+?? cam-rust/cam-isp/examples/diag_unified_small.rs
+?? cam-rust/cam-isp/examples/diag_unified_tiny.rs
+?? cam-rust/cam-isp/examples/test_memfd_lifecycle.rs
+?? cam-rust/cam-isp/examples/unity_variant_test.rs
+?? cam-rust/drm-display/
+?? diag1.log
+?? diag_bisect.log
+?? diag_heavy4k.log
+?? diag_lite4k.log
+?? diag_mid.log
+?? diag_resize.log
+?? diag_small.log
+?? diag_u2k.log
+?? diag_us.log
+?? diag_ut.log
+?? gdb_cmds.txt
+?? gen_rainbow_bayer.py
+?? mnn-ci-artifacts/
+?? mnn_onnx_0rB7vH
+?? mnn_onnx_1anJY7
+?? mnn_onnx_567air
+?? mnn_onnx_5Qcjeh
+?? mnn_onnx_5SkFub
+?? mnn_onnx_5hNvbG
+?? mnn_onnx_98i9Z9
+?? mnn_onnx_98tPZ7
+?? mnn_onnx_DSKGXy
+?? mnn_onnx_E00TpD
+?? mnn_onnx_FNnlRu
+?? mnn_onnx_H6TIsn
+?? mnn_onnx_I5PR4P
+?? mnn_onnx_IbTu0B
+?? mnn_onnx_KFnWXq
+?? mnn_onnx_LOByEH
+?? mnn_onnx_M9Ii6R
+?? mnn_onnx_MRqUH1
+?? mnn_onnx_MuaIko
+?? mnn_onnx_OLM3ec
+?? mnn_onnx_P2cG40
+?? mnn_onnx_PPHcpu
+?? mnn_onnx_RPOp89
+?? mnn_onnx_Ro6wHi
+?? mnn_onnx_UsEQEZ
+?? mnn_onnx_V2vp0D
+?? mnn_onnx_VnCdUX
+?? mnn_onnx_VsXGkt
+?? mnn_onnx_Vu9JEW
+?? mnn_onnx_WbKdXF
+?? mnn_onnx_X98DU4
+?? mnn_onnx_XGKvGb
+?? mnn_onnx_XdMbK1
+?? mnn_onnx_Yg15xR
+?? mnn_onnx_ZxXKv3
+?? mnn_onnx_bVWQpR
+?? mnn_onnx_cVJaJz
+?? mnn_onnx_cqIRrS
+?? mnn_onnx_czyksg
+?? mnn_onnx_d6vqzD
+?? mnn_onnx_exw5mz
+?? mnn_onnx_f0tmCt
+?? mnn_onnx_iFkshO
+?? mnn_onnx_jyD63H
+?? mnn_onnx_l73DmO
+?? mnn_onnx_m7y9q3
+?? mnn_onnx_orqEQA
+?? mnn_onnx_oyUET7
+?? mnn_onnx_qRPNIb
+?? mnn_onnx_qWR2bq
+?? mnn_onnx_vdBrEY
+?? mnn_onnx_xzXQiE
+?? mnn_onnx_yB1vGA
+?? mnn_onnx_zTFWOZ
+?? mnn_onnx_zcVcKl
+?? mnn_out_1UWxil
+?? mnn_out_330UV1
+?? mnn_out_6VMzyr
+?? mnn_out_6x0ty9
+?? mnn_out_8avpww
+?? mnn_out_A7ZUdN
+?? mnn_out_A8CiTP
+?? mnn_out_CCimG7
+?? mnn_out_CMwHF7
+?? mnn_out_CxdlTV
+?? mnn_out_G4KMqM
+?? mnn_out_GKqjou
+?? mnn_out_Gb1wVl
+?? mnn_out_GnI0Ip
+?? mnn_out_Gwct9b
+?? mnn_out_IoZAgJ
+?? mnn_out_J0nd4m
+?? mnn_out_J8E05Q
+?? mnn_out_JVXnZ6
+?? mnn_out_JX2pcY
+?? mnn_out_KUsZ0N
+?? mnn_out_M7lgQq
+?? mnn_out_NQ6Cpd
+?? mnn_out_QRLKdS
+?? mnn_out_RdAiLw
+?? mnn_out_SV3py3
+?? mnn_out_UGWSgo
+?? mnn_out_UO3nOD
+?? mnn_out_UVqzWW
+?? mnn_out_VVbZz5
+?? mnn_out_Vx1166
+?? mnn_out_WyXR4E
+?? mnn_out_d2jBTq
+?? mnn_out_eLnLqG
+?? mnn_out_fHfNUN
+?? mnn_out_gOHddf
+?? mnn_out_gwsiTs
+?? mnn_out_hI8MSA
+?? mnn_out_hKpZm7
+?? mnn_out_jXlxUj
+?? mnn_out_jtcqjf
+?? mnn_out_kXCBve
+?? mnn_out_kmnhWn
+?? mnn_out_nTwbo0
+?? mnn_out_pltDRx
+?? mnn_out_qZaToe
+?? mnn_out_r7Vjp8
+?? mnn_out_rvUAxJ
+?? mnn_out_tknCSc
+?? mnn_out_wuq6jn
+?? mnn_out_xDbZIj
+?? mnn_out_xoPXKh
+?? mnn_out_xq9sff
+?? mnn_out_yezn9g
+?? mnn_out_zDbmrS
+?? rainbow_4k.raw
+?? run_1.log
+?? run_2.log
+?? run_3.log
+?? run_argb.log
+?? run_fhd.log
+?? run_fhd2.log
+?? run_fhd3.log
+?? run_hf.log
+?? test_convert.cpp
+?? unified_8m.onnx
+?? warp_gdc.onnx
+
+<|im_start|>assistant
+
+<|im_start|>user
+M  cam-rust/Cargo.lock
+M  cam-rust/cam-isp/Cargo.toml
+M  cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+?? .__convert_external_data.bin
+?? MNN-Android-3.5.1.aar.zip
+?? aar_extract/
+?? cam-rust/Cargo.toml.bak
+?? cam-rust/cam-isp/.mnn_test_hd_lite.mnn.bak
+?? cam-rust/cam-isp/examples/Cargo.toml
+?? cam-rust/cam-isp/examples/diag_convert_mid.rs
+
+<|im_start|>assistant
+
+<|im_start|>user
+[master 74908fd] fix(examples): fix bind_all_v4l2_pipeline_drm to use actual APIs
+ 3 files changed, 92 insertions(+), 132 deletions(-)
+
+<|im_start|>assistant
+
+<|im_start|>user
+Current branch master is up to date.
+To https://github.com/99degree/softisp
+   33927d8..74908fd  master -> master
+
+stderr:
+From https://github.com/99degree/softisp
+ * branch            master     -> FETCH_HEAD
+ ok install dev build
+<|im_start|>assistant
+
+<|im_start|>user
+   Compiling cam-isp v0.1.0 (/data/data/com.termux/files/home/softisp/cam-rust/cam-isp)
+   Compiling cam-disp v0.1.0 (/data/data/com.termux/files/home/softisp/cam-rust/cam-disp)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 19.38s
+
+<|im_start|>assistant
+
+<|im_start|>user
+[1/4] ISP engine registry initialized
+[2/4] Synthetic 1920x1080 Bayer buffer ready (4147200 bytes)
+[3/4] UNIFIED pipeline built
+[3/4] Pipeline output: 1920x1080 format=Rgba8888 8294400 bytes
+[4/4] DRM not available (Permission denied (os error 13)). Pipeline output verified OK.
+ install dev build to .cargo/bin
+<|im_start|>assistant
+
+<|im_start|>user
+Installed to ~/.cargo/bin/bind_isp_drm
+-rwx------. 1 u0_a37 u0_a37 137075304 Jul 17 10:37 /data/data/com.termux/files/home/.cargo/bin/bind_isp_drm
+
+<|im_start|>assistant
+
+<|im_start|>user
+[1/4] ISP engine registry initialized
+[2/4] Synthetic 1920x1080 Bayer buffer ready (4147200 bytes)
+[3/4] UNIFIED pipeline built
+[3/4] Pipeline output: 1920x1080 format=Rgba8888 8294400 bytes
+[4/4] DRM not available (Permission denied (os error 13)). Pipeline output verified OK.
+ enhance it with v4l2 read and fallback to internal 4k bayer generator
+<|im_start|>assistant
+
+<|im_start|>user
+1	//! Integration test: memfd buffer → V4L2/HAL → ISP pipeline → DRM display.
+2	//!
+3	//! Demonstrates the full binding chain:
+4	//! 1. Allocate a zero-copy memfd buffer and fill with synthetic Bayer data.
+5	//! 2. Feed the buffer through the ISP pipeline (UNIFIED profile, ARGB output).
+6	//! 3. Display the output frame via DRM.
+7	//!
+8	//! Usage:
+9	//!   cargo run --example bind_all_v4l2_pipeline_drm -p cam-isp --features rectifier
+10	
+11	use cam_disp::DrmDisplay;
+12	use cam_isp::engine::OutputFormat as EngineOutputFormat;
+13	use cam_isp::profile::PipelineProfile;
+14	use cam_isp::unified_pipeline::{UnifiedConfig, UnifiedPipeline};
+15	
+16	fn main() {
+17	    // Initialize the ISP engine registry
+18	    cam_isp::init();
+19	    println!("[1/4] ISP engine registry initialized");
+20	
+21	    // -----------------------------------------------------------------
+22	    // Stage 1: Allocate memfd buffer and fill with synthetic Bayer RAW16.
+23	    // -----------------------------------------------------------------
+24	    let width: u32 = 1920;
+25	    let height: u32 = 1080;
+26	    let raw = make_rainbow_bayer(width, height);
+27	    println!(
+28	        "[2/4] Synthetic {}x{} Bayer buffer ready ({} bytes)",
+29	        width,
+30	        height,
+31	        raw.len()
+32	    );
+33	
+34	    // -----------------------------------------------------------------
+35	    // Stage 2: Build UNIFIED pipeline with ARGB output.
+36	    // -----------------------------------------------------------------
+37	    let config = UnifiedConfig {
+38	        profile: PipelineProfile::UNIFIED,
+39	        target_width: width,
+40	        engine_preference: "auto".into(),
+41	        output_format: EngineOutputFormat::Argb,
+42	        sensor_max: 1023.0,
+43	        ..UnifiedConfig::hd()
+44	    };
+45	    let mut pipeline = UnifiedPipeline::new(config).expect("Failed to build pipeline");
+46	    println!("[3/4] UNIFIED pipeline built");
+47	
+48	    // -----------------------------------------------------------------
+49	    // Stage 3: Process the raw Bayer frame.
+50	    // -----------------------------------------------------------------
+51	    let result = pipeline
+52	        .process(&raw, width, height)
+53	        .expect("Pipeline process failed");
+54	    println!(
+55	        "[3/4] Pipeline output: {}x{} format={:?} {} bytes",
+56	        result.width,
+57	        result.height,
+58	        result.format,
+59	        result.data.len()
+60	    );
+61	
+62	    // -----------------------------------------------------------------
+63	    // Stage 4: Display via DRM.
+64	    // -----------------------------------------------------------------
+65	    match DrmDisplay::new() {
+66	        Ok(mut display) => {
+67	            display
+68	                .display_argb8888(result.width, result.height, &result.data)
+69	                .expect("DRM display failed");
+70	            println!(
+71	                "[4/4] Displayed {}x{} frame via DRM",
+72	                result.width, result.height
+73	            );
+74	        }
+75	        Err(e) => {
+76	            println!(
+77	                "[4/4] DRM not available ({}). Pipeline output verified OK.",
+78	                e
+79	            );
+80	        }
+81	    }
+82	}
+83	
+84	/// Generate a rainbow-gradient Bayer RAW16 buffer.
+85	/// Each pixel is a 16-bit value; R at (even,even), G at mixed, B at (odd,odd).
+86	fn make_rainbow_bayer(w: u32, h: u32) -> Vec<u8> {
+87	    let mut buf = vec![0u8; (w * h * 2) as usize];
+88	    for y in 0..h {
+89	        for x in 0..w {
+90	            let val: u16 = match (x % 2, y % 2) {
+91	                (0, 0) => ((x * 1023 / w) as u16).min(1023),
+92	                (1, 0) | (0, 1) => ((y * 1023 / h) as u16).min(1023),
+93	                _ => (((x + y) * 512 / (w + h)) as u16).min(1023),
+94	            };
+95	            let scaled = val * 64; // scale to ~16-bit range
+96	            let idx = ((y * w + x) * 2) as usize;
+97	            buf[idx] = (scaled & 0xFF) as u8;
+98	            buf[idx + 1] = ((scaled >> 8) & 0xFF) as u8;
+99	        }
+100	    }
+101	    buf
+102	}
+
+<|im_start|>assistant
+
+<|im_start|>user
+40:pub fn create_v4l2_adapter(_device_path: &str) -> Option<Box<dyn ICameraAdapter>> {
+60:pub fn list_v4l2_devices() -> Vec<String> {
+80:pub fn capture_single_v4l2_frame(
+113:pub fn capture_single_v4l2_frame(
+
+<|im_start|>assistant
+
+<|im_start|>user
+/// captures one frame, stops streaming, and returns the raw pixel data
+/// as a `Vec<u8>`. Useful for single-shot captures in the HAL binder.
+///
+/// Returns `(width, height, data)` on success.
+#[cfg(feature = "v4l2")]
+pub fn capture_single_v4l2_frame(
+    device_path: &str,
+    width: u32,
+    height: u32,
+) -> Result<(u32, u32, Vec<u8>), String> {
+    let mut cam = rscam::Camera::new(device_path)
+        .map_err(|e| format!("Failed to open {}: {}", device_path, e))?;
+
+    // Use RGBA format (fourcc "RGBA")
+    let cfg = rscam::Config {
+        interval: (30, 1),
+        resolution: (width, height),
+        format: b"RGBA",
+        field: 0,
+        nbuffers: 2,
+    };
+
+    cam.start(&cfg)
+        .map_err(|e| format!("Failed to configure V4L2 {}x{}: {}", width, height, e))?;
+
+    let frame = cam
+        .capture()
+        .map_err(|e| format!("Failed to read V4L2 frame: {}", e))?;
+
+    let _ = cam.stop();
+
+    let (actual_w, actual_h) = frame.resolution;
+
+    Ok((actual_w, actual_h, frame.to_vec()))
+}
+
+/// Non-V4L2 stub for `capture_single_v4l2_frame`.
+#[cfg(not(feature = "v4l2"))]
+pub fn capture_single_v4l2_frame(
+    _device_path: &str,
+    _width: u32,
+    _height: u32,
+) -> Result<(u32, u32, Vec<u8>), String> {
+    Err("V4L2 feature not enabled".to_string())
+}
+
+<|im_start|>assistant
+
+<|im_start|>user
+Wrote 186 lines (6842 bytes) to /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+<|im_start|>assistant
+
+<|im_start|>user
+60:pub fn list_v4l2_devices() -> Vec<String> {
+
+<|im_start|>assistant
+
+<|im_start|>user
+Applied 2 edit(s) to /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+@@ -15,9 +15,10 @@
+ use cam_isp::profile::PipelineProfile;
+ use cam_isp::unified_pipeline::{UnifiedConfig, UnifiedPipeline};
+ 
+-// V4L2 feature gate
++// V4L2 feature gate — when enabled, use rscam-based capture.
++// When disabled, we scan /dev/video* ourselves and fall back to synthetic.
+ #[cfg(feature = "v4l2")]
+-use cam_hal_linux::capture_single_v4l2_frame;
++use cam_hal_linux::{capture_single_v4l2_frame, list_v4l2_devices};
+ 
+ fn main() {
+     cam_isp::init();
+@@ -168,10 +169,9 @@
+     buf
+ }
+ 
+-/// Stub when V4L2 feature is off.
++/// Stub: scan /dev/video* without rscam when v4l2 feature is off.
+ #[cfg(not(feature = "v4l2"))]
+ fn list_v4l2_devices() -> Vec<String> {
+-    // Scan /dev/video* directly without rscam
+     let mut devs = Vec::new();
+     if let Ok(entries) = std::fs::read_dir("/dev") {
+         for entry in entries.flatten() {
+ <system-reminder>Context was automatically compacted. Earlier messages were summarized. If you need details from before compaction, ask the user or re-read the relevant files.</system-reminder>
+<|im_start|>assistant
+
+<|im_start|>user
+    |
+    = note: expected values for `feature` are: `cuda`, `default`, `isp-rectifier`, `mnn`, `mnn_buffer`, `openvino`, `ort`, `rectifier`, and `tensorrt`
+    = help: consider adding `v4l2` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: function `list_v4l2_devices` is never used
+   --> cam-isp/examples/bind_all_v4l2_pipeline_drm.rs:171:4
+    |
+171 | fn list_v4l2_devices() -> Vec<String> {
+    |    ^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `cam-isp` (example "bind_all_v4l2_pipeline_drm") generated 7 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.83s
+
+<|im_start|>assistant
+
+<|im_start|>user
+error: unexpected `cfg` condition value: `v4l2`
+error: unexpected `cfg` condition value: `v4l2`
+error: unexpected `cfg` condition value: `v4l2`
+error: unexpected `cfg` condition value: `v4l2`
+error: unexpected `cfg` condition value: `v4l2`
+error: unexpected `cfg` condition value: `v4l2`
+error: function `list_v4l2_devices` is never used
+error: could not compile `cam-isp` (example "bind_all_v4l2_pipeline_drm") due to 7 previous errors
+
+<|im_start|>assistant
+
+<|im_start|>user
+Wrote 524 lines (16636 bytes) to /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+<|im_start|>assistant
+
+<|im_start|>user
+   --> cam-isp/examples/bind_all_v4l2_pipeline_drm.rs:483:9
+    |
+483 |     let y_plane = (w * h) as usize;
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_y_plane`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0308`.
+warning: `cam-isp` (example "bind_all_v4l2_pipeline_drm") generated 3 warnings
+error: could not compile `cam-isp` (example "bind_all_v4l2_pipeline_drm") due to 2 previous errors; 3 warnings emitted
+
+<|im_start|>assistant
+
+<|im_start|>user
+error[E0308]: mismatched types
+error: cannot construct `fd_set` with struct literal syntax due to private fields
+error: could not compile `cam-isp` (example "bind_all_v4l2_pipeline_drm") due to 2 previous errors; 3 warnings emitted
+
+<|im_start|>assistant
+
+<|im_start|>user
+Invalid input: edits[1]: old_string and new_string are identical
+<|im_start|>assistant
+
+<|im_start|>user
+Applied 2 edit(s) to /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+@@ -308,11 +308,7 @@
+     }
+ 
+     // select() on fd with 2-second timeout
+-    use std::os::unix::io::RawFd;
+-    let mut fds = libc::fd_set {
+-        #[cfg(target_os = "linux")]
+-        __fds_bits: [0i64; 16],
+-    };
++    let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
+     unsafe {
+         libc::FD_ZERO(&mut fds);
+         libc::FD_SET(fd, &mut fds);
+@@ -478,9 +474,7 @@
+ 
+ /// VR20 (Android HAL): NV21-like or YUV → extract luminance.
+ fn vr20_to_bayer_u16(data: &[u8], w: u32, h: u32) -> Vec<u8> {
+-    // Treat as NV21: Y plane (w*h) followed by interleaved V/U (w*h/2)
+     let mut out = vec![0u8; (w * h * 2) as usize];
+-    let y_plane = (w * h) as usize;
+     for i in 0..(w * h) as usize {
+         let y_val = if i < data.len() { data[i] } else { 0 };
+         let sample = (y_val as u16) * 64;
+
+<|im_start|>assistant
+
+<|im_start|>user
+    |
+387 | unsafe fn ioctl_simple(
+    |           ^^^^^^^^^^^^
+...
+390 |     arg: *mut u32,
+    |     -------------
+
+For more information about this error, try `rustc --explain E0308`.
+warning: `cam-isp` (example "bind_all_v4l2_pipeline_drm") generated 1 warning
+error: could not compile `cam-isp` (example "bind_all_v4l2_pipeline_drm") due to 1 previous error; 1 warning emitted
+
+<|im_start|>assistant
+
+<|im_start|>user
+Invalid input: edits[0]: old_string not found in /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs (may have been consumed by a prior edit in this batch)
+<|im_start|>assistant
+
+<|im_start|>user
+383	// ---------------------------------------------------------------------------
+384	// V4L2 ioctl helpers
+385	// ---------------------------------------------------------------------------
+386	
+387	unsafe fn ioctl_simple(
+388	    fd: std::os::unix::io::RawFd,
+389	    request: u64,
+390	    arg: *mut u32,
+391	) -> Result<(), String> {
+392	    let ret = libc::ioctl(fd, request as i32, arg as *mut libc::c_void);
+393	    if ret < 0 {
+394	        Err(std::io::Error::last_os_error().to_string())
+395	    } else {
+396	        Ok(())
+397	    }
+398	}
+399	
+400	unsafe fn ioctl_obj<T>(
+401	    fd: std::os::unix::io::RawFd,
+402	    request: u64,
+403	    obj: *mut T,
+404	) -> Result<(), String> {
+405	    let ret = libc::ioctl(fd, request as i32, obj as *mut T as *mut libc::c_void);
+406	    if ret < 0 {
+407	        Err(std::io::Error::last_os_error().to_string())
+
+<|im_start|>assistant
+
+<|im_start|>user
+error[E0308]: mismatched types
+   --> cam-isp/examples/bind_all_v4l2_pipeline_drm.rs:127:38
+    |
+127 | ...   ioctl_simple(fd, 0x802c5600, &mut cap).m...
+    |       ------------                 ^^^^^^^^ expected `*mut u32`, found `&mut V4l2Capability`
+    |       |
+    |       arguments to this function are incorrect
+    |
+    = note:    expected raw pointer `*mut u32`
+--
+error: could not compile `cam-isp` (example "bind_all_v4l2_pipeline_drm") due to 1 previous error; 1 warning emitted
+
+<|im_start|>assistant
+
+<|im_start|>user
+Replaced 1 occurrence(s) in /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+@@ -384,12 +384,12 @@
+ // V4L2 ioctl helpers
+ // ---------------------------------------------------------------------------
+ 
+-unsafe fn ioctl_simple(
++unsafe fn ioctl_void(
+     fd: std::os::unix::io::RawFd,
+     request: u64,
+-    arg: *mut u32,
++    arg: *mut libc::c_void,
+ ) -> Result<(), String> {
+-    let ret = libc::ioctl(fd, request as i32, arg as *mut libc::c_void);
++    let ret = libc::ioctl(fd, request as i32, arg);
+     if ret < 0 {
+         Err(std::io::Error::last_os_error().to_string())
+     } else {
+
+<|im_start|>assistant
+
+<|im_start|>user
+127:        ioctl_simple(fd, 0x802c5600, &mut cap).map_err(|e| format!("QUERYCAP: {e}"))?;
+304:        ioctl_simple(fd, 0x40045612, &mut buf_type).map_err(|e| {
+334:            ioctl_simple(fd, 0x40045613, &mut bt2).ok();
+350:            ioctl_simple(fd, 0x40045613, &mut bt2).ok();
+364:        ioctl_simple(fd, 0x40045613, &mut bt2).ok(); // STREAMOFF
+
+<|im_start|>assistant
+
+<|im_start|>user
+127:        ioctl_void(fd, 0x802c5600, &mut cap).map_err(|e| format!("QUERYCAP: {e}"))?;
+304:        ioctl_void(fd, 0x40045612, &mut buf_type).map_err(|e| {
+334:            ioctl_void(fd, 0x40045613, &mut bt2).ok();
+350:            ioctl_void(fd, 0x40045613, &mut bt2).ok();
+364:        ioctl_void(fd, 0x40045613, &mut bt2).ok(); // STREAMOFF
+387:unsafe fn ioctl_void(
+
+<|im_start|>assistant
+
+<|im_start|>user
+Invalid input: edits[2]: old_string not found in /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs (may have been consumed by a prior edit in this batch)
+<|im_start|>assistant
+
+<|im_start|>user
+296	            format!("QBUF: {e}")
+297	        })?;
+298	    }
+299	
+300	    // VIDIOC_STREAMON
+301	    let mut buf_type: u32 = 1; // V4L2_BUF_TYPE_VIDEO_CAPTURE
+302	                               // VIDIOC_STREAMON = 0x40045612
+303	    unsafe {
+304	        ioctl_void(fd, 0x40045612, &mut buf_type).map_err(|e| {
+305	            libc::munmap(mmapped, buf_len as usize);
+306	            format!("STREAMON: {e}")
+307	        })?;
+308	    }
+309	
+310	    // select() on fd with 2-second timeout
+311	    let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
+312	    unsafe {
+313	        libc::FD_ZERO(&mut fds);
+314	        libc::FD_SET(fd, &mut fds);
+315	    }
+316	    let mut timeout = libc::timeval {
+317	        tv_sec: 2,
+318	        tv_usec: 0,
+319	    };
+320	    let sel = unsafe {
+321	        libc::select(
+322	            fd + 1,
+323	            &mut fds,
+324	            std::ptr::null_mut(),
+325	            std::ptr::null_mut(),
+326	            &mut timeout,
+327	        )
+328	    };
+329	
+330	    if sel <= 0 {
+331	        // VIDIOC_STREAMOFF
+332	        let mut bt2 = 1u32;
+333	        unsafe {
+334	            ioctl_void(fd, 0x40045613, &mut bt2).ok();
+335	        }
+336	        unsafe {
+337	            libc::munmap(mmapped, buf_len as usize);
+338	        }
+339	        return Err(format!("select timeout/error: {sel}"));
+340	    }
+341	
+342	    // VIDIOC_DQBUF
+343	    let mut dqbuf: V4l2Buffer = unsafe { std::mem::zeroed() };
+344	    dqbuf.typ = 1;
+345	    dqbuf.memory = 1;
+346	    // VIDIOC_DQBUF = 0xc0585611
+347	    unsafe {
+348	        ioctl_obj(fd, 0xc0585611, &mut dqbuf).map_err(|e| {
+349	            let mut bt2 = 1u32;
+350	            ioctl_void(fd, 0x40045613, &mut bt2).ok();
+351	            libc::munmap(mmapped, buf_len as usize);
+352	            format!("DQBUF: {e}")
+353	        })?;
+354	    }
+355	
+356	    let bytes_used = dqbuf.bytes_used as usize;
+357	
+358	    // Copy captured data
+359	    let captured = unsafe { std::slice::from_raw_parts(mmapped as *const u8, bytes_used).to_vec() };
+360	
+361	    // Cleanup
+362	    unsafe {
+363	        let mut bt2 = 1u32;
+364	        ioctl_void(fd, 0x40045613, &mut bt2).ok(); // STREAMOFF
+365	        libc::munmap(mmapped, buf_len as usize);
+366	    }
+367	
+368	    // Convert to Bayer u16 LE
+369	    let bayer = match pixfmt {
+370	        0x59565955 => uyvy_to_bayer_u16(&captured, actual_w, actual_h), // UYVY
+371	        0x56595559 => yuyv_to_bayer_u16(&captured, actual_w, actual_h), // YUYV
+372	        0x52474230 => rggb_to_bayer_u16(&captured, actual_w, actual_h), // RGGB8
+373	        0x32305652 => vr20_to_bayer_u16(&captured, actual_w, actual_h), // VR20 (Android)
+374	        _ => {
+375	            // Generic: treat raw bytes as grayscale → bayer u16
+
+<|im_start|>assistant
+(response interrupted)
+<|im_start|>user
+go
+<|im_start|>assistant
+
+<|im_start|>user
+Applied 5 edit(s) to /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+@@ -124,7 +124,7 @@
+ 
+     let mut cap: V4l2Capability = unsafe { std::mem::zeroed() };
+     unsafe {
+-        ioctl_void(fd, 0x802c5600, &mut cap).map_err(|e| format!("QUERYCAP: {e}"))?;
++        ioctl_void(fd, 0x802c5600, &mut cap as *mut _ as *mut libc::c_void).map_err(|e| format!("QUERYCAP: {e}"))?;
+     }
+ 
+     let caps = cap.device_caps | cap.capabilities;
+@@ -301,7 +301,7 @@
+     let mut buf_type: u32 = 1; // V4L2_BUF_TYPE_VIDEO_CAPTURE
+                                // VIDIOC_STREAMON = 0x40045612
+     unsafe {
+-        ioctl_void(fd, 0x40045612, &mut buf_type).map_err(|e| {
++        ioctl_void(fd, 0x40045612, &mut buf_type as *mut _ as *mut libc::c_void).map_err(|e| {
+             libc::munmap(mmapped, buf_len as usize);
+             format!("STREAMON: {e}")
+         })?;
+@@ -331,7 +331,7 @@
+         // VIDIOC_STREAMOFF
+         let mut bt2 = 1u32;
+         unsafe {
+-            ioctl_void(fd, 0x40045613, &mut bt2).ok();
++            ioctl_void(fd, 0x40045613, &mut bt2 as *mut _ as *mut libc::c_void).ok();
+         }
+         unsafe {
+             libc::munmap(mmapped, buf_len as usize);
+@@ -347,7 +347,7 @@
+     unsafe {
+         ioctl_obj(fd, 0xc0585611, &mut dqbuf).map_err(|e| {
+             let mut bt2 = 1u32;
+-            ioctl_void(fd, 0x40045613, &mut bt2).ok();
++            ioctl_void(fd, 0x40045613, &mut bt2 as *mut _ as *mut libc::c_void).ok();
+             libc::munmap(mmapped, buf_len as usize);
+             format!("DQBUF: {e}")
+         })?;
+@@ -361,7 +361,7 @@
+     // Cleanup
+     unsafe {
+         let mut bt2 = 1u32;
+-        ioctl_void(fd, 0x40045613, &mut bt2).ok(); // STREAMOFF
++        ioctl_void(fd, 0x40045613, &mut bt2 as *mut _ as *mut libc::c_void).ok(); // STREAMOFF
+         libc::munmap(mmapped, buf_len as usize);
+     }
+ 
+
+<|im_start|>assistant
+
+<|im_start|>user
+    |                   ----------------------------------------------- you could clone this value
+
+For more information about this error, try `rustc --explain E0507`.
+warning: `cam-isp` (example "bind_all_v4l2_pipeline_drm") generated 1 warning
+error: could not compile `cam-isp` (example "bind_all_v4l2_pipeline_drm") due to 1 previous error; 1 warning emitted
+
+<|im_start|>assistant
+
+<|im_start|>user
+error[E0507]: cannot move out of a raw pointer
+   --> cam-isp/examples/bind_all_v4l2_pipeline_drm.rs:182:19
+    |
+182 | ... = *(fmt.fmt.raw.as_ptr() as *const V4l2PixFormat);
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ move occurs because value has type `V4l2PixFormat`, which does not implement the `Copy` trait
+    |
+--
+error: could not compile `cam-isp` (example "bind_all_v4l2_pipeline_drm") due to 1 previous error; 1 warning emitted
+
+<|im_start|>assistant
+
+<|im_start|>user
+Invalid input: edits[1]: old_string not found in /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs (may have been consumed by a prior edit in this batch)
+<|im_start|>assistant
+
+<|im_start|>user
+175	    // VIDIOC_S_FMT = 0xc0cc5605 (type=1, sizeof=204)
+176	    let sfmt_req = 0xc0cc5605u64;
+177	    unsafe {
+178	        ioctl_obj(fd, sfmt_req, &mut fmt).map_err(|e| format!("S_FMT: {e}"))?;
+179	    }
+180	
+181	    let (actual_w, actual_h, pixfmt, bytesperline, sizeimage) = unsafe {
+182	        let pix = *(fmt.fmt.raw.as_ptr() as *const V4l2PixFormat);
+183	        (
+184	            pix.width,
+185	            pix.height,
+186	            pix.pixelformat,
+187	            pix.bytesperline,
+188	            pix.sizeimage,
+189	        )
+
+<|im_start|>assistant
+
+<|im_start|>user
+Applied 1 edit(s) to /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+@@ -147,6 +147,7 @@
+     }
+ 
+     #[repr(C)]
++    #[derive(Copy, Clone)]
+     struct V4l2PixFormat {
+         width: u32,
+         height: u32,
+
+<|im_start|>assistant
+
+<|im_start|>user
+(no output)
+<|im_start|>assistant
+
+<|im_start|>user
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `cam-isp` (example "bind_all_v4l2_pipeline_drm") generated 1 warning (run `cargo fix --example "bind_all_v4l2_pipeline_drm" -p cam-isp` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
+
+<|im_start|>assistant
+
+<|im_start|>user
+warning: unused import: `File`
+warning: `cam-isp` (example "bind_all_v4l2_pipeline_drm") generated 1 warning (run `cargo fix --example "bind_all_v4l2_pipeline_drm" -p cam-isp` to apply 1 suggestion)
+
+<|im_start|>assistant
+
+<|im_start|>user
+Applied 1 edit(s) to /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+@@ -98,7 +98,6 @@
+ /// Open a V4L2 device, negotiate a capture format, and read one frame.
+ /// Returns `(width, height, raw_bayer_u16_le)`.
+ fn try_v4l2_capture(dev: &str, req_w: u32, req_h: u32) -> Result<(u32, u32, Vec<u8>), String> {
+-    use std::fs::{File, OpenOptions};
+     use std::os::unix::io::AsRawFd;
+ 
+     // Open device
+
+<|im_start|>assistant
+
+<|im_start|>user
+104:    let file = OpenOptions::new()
+514:    if let Ok(entries) = std::fs::read_dir("/dev") {
+
+<|im_start|>assistant
+
+<|im_start|>user
+Replaced 1 occurrence(s) in /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+@@ -98,6 +98,7 @@
+ /// Open a V4L2 device, negotiate a capture format, and read one frame.
+ /// Returns `(width, height, raw_bayer_u16_le)`.
+ fn try_v4l2_capture(dev: &str, req_w: u32, req_h: u32) -> Result<(u32, u32, Vec<u8>), String> {
++    use std::fs::OpenOptions;
+     use std::os::unix::io::AsRawFd;
+ 
+     // Open device
+
+<|im_start|>assistant
+
+<|im_start|>user
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unnecessary_cast
+    = note: `-D clippy::unnecessary-cast` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unnecessary_cast)]`
+
+error: could not compile `cam-isp` (example "bind_all_v4l2_pipeline_drm") due to 1 previous error
+clippy:0
+
+<|im_start|>assistant
+
+<|im_start|>user
+407 | ... as i32, obj as *mut T as *mut lib...
+    |             ^^^^^^^^^^^^^ help: try: `obj`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unnecessary_cast
+    = note: `-D clippy::unnecessary-cast` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unnecessary_cast)]`
+
+<|im_start|>assistant
+
+<|im_start|>user
+Applied 1 edit(s) to /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+
+--- /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
++++ /data/data/com.termux/files/home/softisp/cam-rust/cam-isp/examples/bind_all_v4l2_pipeline_drm.rs
+@@ -404,7 +404,7 @@
+     request: u64,
+     obj: *mut T,
+ ) -> Result<(), String> {
+-    let ret = libc::ioctl(fd, request as i32, obj as *mut T as *mut libc::c_void);
++    let ret = libc::ioctl(fd, request as i32, obj as *mut libc::c_void);
+     if ret < 0 {
+         Err(std::io::Error::last_os_error().to_string())
+     } else {
+
+<|im_start|>assistant
+
+<|im_start|>user
+    Checking cam-isp v0.1.0 (/data/data/com.termux/files/home/softisp/cam-rust/cam-isp)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.54s
+exit:0
+
+<|im_start|>assistant
+
+<|im_start|>user
+   Compiling cam-isp v0.1.0 (/data/data/com.termux/files/home/softisp/cam-rust/cam-isp)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.47s
+Installed ✓
+
+<|im_start|>assistant
+
+<|im_start|>user
+[1/4] ISP engine registry initialized
+  V4L2: no /dev/video* found, using synthetic 4K
+[2/4] Input: 3840x2160 (16588800 bytes)
+[3/4] UNIFIED pipeline built
+[3/4] Pipeline output: 3840x2160 format=Rgba8888 33177600 bytes
+[4/4] DRM unavailable (Permission denied (os error 13)). Pipeline output OK.
+
+<|im_start|>assistant
+
+<|im_start|>user
+[master e790baa] feat(v4l2): full V4L2 capture → ISP pipeline → DRM display integration
+ 1 file changed, 476 insertions(+), 30 deletions(-)
+
+<|im_start|>assistant
+
+<|im_start|>user
+Current branch master is up to date.
+To https://github.com/99degree/softisp
+   74908fd..e790baa  master -> master
+
+stderr:
+From https://github.com/99degree/softisp
+ * branch            master     -> FETCH_HEAD
+ **V4L2**: Raw ioctl path — scans `/dev/video*`, tries each with `QUERYCAP` → `S_FMT` be raw or raw10 raw12
+<|im_start|>assistant
+
+<|im_start|>user
+Tool 'Read' not found
+<|im_start|>assistant
+
+<|im_start|>user
+1	//! Integration: V4L2 camera → ISP pipeline (UNIFIED) → DRM display.
+2	//!
+3	//! Flow:
+4	//! 1. Scan `/dev/video*` for a camera device and attempt raw capture.
+5	//! 2. If no V4L2 device, generate a synthetic 4K rainbow Bayer frame.
+6	//! 3. Process through UNIFIED pipeline → ARGB8888 output.
+7	//! 4. Display the output frame via DRM.
+8	//!
+9	//! Usage:
+10	//!   cargo run --example bind_all_v4l2_pipeline_drm -p cam-isp --features rectifier
+11	//!   bind_isp_drm  (if installed to ~/.cargo/bin)
+12	
+13	use cam_disp::DrmDisplay;
+14	use cam_isp::engine::OutputFormat as EngineOutputFormat;
+15	use cam_isp::profile::PipelineProfile;
+16	use cam_isp::unified_pipeline::{UnifiedConfig, UnifiedPipeline};
+17	
+18	fn main() {
+19	    cam_isp::init();
+20	    println!("[1/4] ISP engine registry initialized");
+21	
+22	    // -----------------------------------------------------------------
+23	    // Stage 1: Acquire input frame — V4L2 or synthetic 4K Bayer.
+24	    // -----------------------------------------------------------------
+25	    let (width, height, raw) = try_v4l2_or_synthetic();
+26	    println!("[2/4] Input: {}x{} ({} bytes)", width, height, raw.len(),);
+27	
+28	    // -----------------------------------------------------------------
+29	    // Stage 2: Build UNIFIED pipeline.
+30	    // -----------------------------------------------------------------
+31	    let config = UnifiedConfig {
+32	        profile: PipelineProfile::UNIFIED,
+33	        target_width: width,
+34	        engine_preference: "auto".into(),
+35	        output_format: EngineOutputFormat::Argb,
+36	        sensor_max: 1023.0,
+37	        ..UnifiedConfig::hd()
+38	    };
+39	    let mut pipeline = UnifiedPipeline::new(config).expect("Failed to build pipeline");
+40	    println!("[3/4] UNIFIED pipeline built");
+41	
+42	    // -----------------------------------------------------------------
+43	    // Stage 3: Process.
+44	    // -----------------------------------------------------------------
+45	    let result = pipeline
+46	        .process(&raw, width, height)
+47	        .expect("Pipeline process failed");
+48	    println!(
+49	        "[3/4] Pipeline output: {}x{} format={:?} {} bytes",
+50	        result.width,
+51	        result.height,
+52	        result.format,
+53	        result.data.len()
+54	    );
+55	
+56	    // -----------------------------------------------------------------
+57	    // Stage 4: DRM display.
+58	    // -----------------------------------------------------------------
+59	    match DrmDisplay::new() {
+60	        Ok(mut display) => {
+61	            display
+62	                .display_argb8888(result.width, result.height, &result.data)
+63	                .expect("DRM display failed");
+64	            println!("[4/4] Displayed {}x{} via DRM", result.width, result.height);
+65	        }
+66	        Err(e) => {
+67	            println!("[4/4] DRM unavailable ({e}). Pipeline output OK.");
+68	        }
+69	    }
+70	}
+71	
+72	/// Scan `/dev/video*` and attempt V4L2 capture.
+73	/// Falls back to synthetic 4K rainbow Bayer on any failure.
+74	fn try_v4l2_or_synthetic() -> (u32, u32, Vec<u8>) {
+75	    let devices = scan_video_devices();
+76	    if devices.is_empty() {
+77	        println!("  V4L2: no /dev/video* found, using synthetic 4K");
+78	    } else {
+79	        for dev in &devices {
+80	            println!("  V4L2: trying {dev}");
+81	            match try_v4l2_capture(dev, 3840, 2160) {
+82	                Ok((w, h, bayer)) => {
+83	                    println!("  V4L2: captured {w}x{h} ({})", bayer.len());
+84	                    return (w, h, bayer);
+85	                }
+86	                Err(e) => {
+87	                    println!("  V4L2: {dev} failed ({e})");
+88	                }
+89	            }
+90	        }
+91	        println!("  V4L2: all devices failed, using synthetic 4K");
+92	    }
+93	
+94	    let (w, h) = (3840u32, 2160u32);
+95	    (w, h, make_rainbow_bayer(w, h))
+96	}
+97	
+98	/// Open a V4L2 device, negotiate a capture format, and read one frame.
+99	/// Returns `(width, height, raw_bayer_u16_le)`.
+100	fn try_v4l2_capture(dev: &str, req_w: u32, req_h: u32) -> Result<(u32, u32, Vec<u8>), String> {
+101	    use std::fs::OpenOptions;
+102	    use std::os::unix::io::AsRawFd;
+103	
+104	    // Open device
+105	    let file = OpenOptions::new()
+106	        .read(true)
+107	        .write(true)
+108	        .open(dev)
+109	        .map_err(|e| format!("open: {e}"))?;
+110	
+111	    let fd = file.as_raw_fd();
+112	
+113	    // VIDIOC_QUERYCAP — verify it's a video capture device
+114	    #[repr(C)]
+115	    struct V4l2Capability {
+116	        driver: [u8; 16],
+117	        card: [u8; 32],
+118	        bus_info: [u8; 32],
+119	        version: u32,
+120	        capabilities: u32,
+121	        device_caps: u32,
+122	        reserved: [u32; 3],
+123	    }
+124	
+125	    let mut cap: V4l2Capability = unsafe { std::mem::zeroed() };
+126	    unsafe {
+127	        ioctl_void(fd, 0x802c5600, &mut cap as *mut _ as *mut libc::c_void)
+128	            .map_err(|e| format!("QUERYCAP: {e}"))?;
+129	    }
+130	
+131	    let caps = cap.device_caps | cap.capabilities;
+132	    if caps & 0x00000001 == 0 {
+133	        // V4L2_CAP_VIDEO_CAPTURE
+134	        return Err("not a capture device".into());
+135	    }
+136	
+137	    // VIDIOC_S_FMT — request UYVY (packed 422, widely supported) or fallback
+138	    #[repr(C)]
+139	    struct V4l2Format {
+140	        typ: u32,
+141	        fmt: V4l2FormatFmt,
+142	    }
+143	
+144	    #[repr(C)]
+145	    union V4l2FormatFmt {
+146	        raw: [u8; 200],
+147	    }
+148	
+149	    #[repr(C)]
+150	    #[derive(Copy, Clone)]
+151	    struct V4l2PixFormat {
+152	        width: u32,
+153	        height: u32,
+154	        pixelformat: u32,
+155	        field: u32,
+156	        bytesperline: u32,
+157	        sizeimage: u32,
+158	        colorspace: u32,
+159	        priv_data: u32,
+160	        flags: u32,
+161	        henc: u32,
+162	        quantization: u32,
+163	        xfer_func: u32,
+164	    }
+165	
+166	    let mut fmt: V4l2Format = unsafe { std::mem::zeroed() };
+167	    fmt.typ = 1; // V4L2_BUF_TYPE_VIDEO_CAPTURE
+168	    {
+169	        let pix = unsafe { &mut *(fmt.fmt.raw.as_mut_ptr() as *mut V4l2PixFormat) };
+170	        pix.width = req_w;
+171	        pix.height = req_h;
+172	        pix.pixelformat = 0x59565955; // UYVY
+173	        pix.field = 1; // V4L2_FIELD_NONE
+174	    }
+175	
+176	    // VIDIOC_S_FMT = 0xc0cc5605 (type=1, sizeof=204)
+177	    let sfmt_req = 0xc0cc5605u64;
+178	    unsafe {
+179	        ioctl_obj(fd, sfmt_req, &mut fmt).map_err(|e| format!("S_FMT: {e}"))?;
+180	    }
+181	
+182	    let (actual_w, actual_h, pixfmt, bytesperline, sizeimage) = unsafe {
+183	        let pix = *(fmt.fmt.raw.as_ptr() as *const V4l2PixFormat);
+184	        (
+185	            pix.width,
+186	            pix.height,
+187	            pix.pixelformat,
+188	            pix.bytesperline,
+189	            pix.sizeimage,
+190	        )
+191	    };
+192	    println!(
+193	        "    format: {actual_w}x{actual_h} fourcc=0x{pixfmt:08x} bpl={bytesperline} size={sizeimage}"
+194	    );
+195	
+196	    // VIDIOC_REQBUFS — request 1 buffer
+197	    #[repr(C)]
+198	    struct V4l2Reqbuffers {
+199	        count: u32,
+200	        typ: u32,
+201	        memory: u32,
+202	        capabilities: u32,
+203	        flags: u32,
+204	        reserved: [u32; 2],
+205	    }
+206	
+207	    let mut reqbufs = V4l2Reqbuffers {
+208	        count: 1,
+209	        typ: 1,    // V4L2_BUF_TYPE_VIDEO_CAPTURE
+210	        memory: 1, // V4L2_MEMORY_MMAP
+211	        capabilities: 0,
+212	        flags: 0,
+213	        reserved: [0; 2],
+214	    };
+215	    // VIDIOC_REQBUFS = 0xc0145608
+216	    unsafe {
+217	        ioctl_obj(fd, 0xc0145608, &mut reqbufs).map_err(|e| format!("REQBUFS: {e}"))?;
+218	    }
+219	    if reqbufs.count == 0 {
+220	        return Err("REQBUFS returned 0 buffers".into());
+221	    }
+222	
+223	    // VIDIOC_QUERYBUF — get buffer info
+224	    #[repr(C)]
+225	    struct V4l2Buffer {
+226	        index: u32,
+227	        typ: u32,
+228	        bytes_used: u32,
+229	        flags: u32,
+230	        field: u32,
+231	        timestamp: V4l2Timeval,
+232	        timecode: V4l2Timecode,
+233	        sequence: u32,
+234	        memory: u32,
+235	        m: V4l2BufferMem,
+236	        length: u32,
+237	        reserved2: u32,
+238	    }
+239	
+240	    #[repr(C)]
+241	    struct V4l2Timeval {
+242	        sec: i64,
+243	        usec: i64,
+244	    }
+245	
+246	    #[repr(C)]
+247	    struct V4l2Timecode {
+248	        typ: u32,
+249	        flags: u32,
+250	        frames: u8,
+251	        seconds: u8,
+252	        minutes: u8,
+253	        hours: u8,
+254	        userbits: [u8; 4],
+255	    }
+256	
+257	    #[repr(C)]
+258	    union V4l2BufferMem {
+259	        offset: u32,
+260	        userptr: u64,
+261	        fd: i32,
+262	    }
+263	
+264	    let mut buf: V4l2Buffer = unsafe { std::mem::zeroed() };
+265	    buf.index = 0;
+266	    buf.typ = 1; // V4L2_BUF_TYPE_VIDEO_CAPTURE
+267	    buf.memory = 1; // V4L2_MEMORY_MMAP
+268	
+269	    // VIDIOC_QUERYBUF = 0xc0585609
+270	    unsafe {
+271	        ioctl_obj(fd, 0xc0585609, &mut buf).map_err(|e| format!("QUERYBUF: {e}"))?;
+272	    }
+273	
+274	    let buf_offset = unsafe { buf.m.offset };
+275	    let buf_len = buf.length;
+276	
+277	    // mmap the buffer
+278	    let mmapped = unsafe {
+279	        libc::mmap(
+280	            std::ptr::null_mut(),
+281	            buf_len as usize,
+282	            libc::PROT_READ | libc::PROT_WRITE,
+283	            libc::MAP_SHARED,
+284	            fd,
+285	            buf_offset as i64,
+286	        )
+287	    };
+288	    if mmapped == libc::MAP_FAILED {
+289	        return Err("mmap failed".into());
+290	    }
+291	
+292	    // VIDIOC_QBUF — enqueue buffer
+293	    let mut qbuf = buf;
+294	    // VIDIOC_QBUF = 0xc058560f
+295	    unsafe {
+296	        ioctl_obj(fd, 0xc058560f, &mut qbuf).map_err(|e| {
+297	            libc::munmap(mmapped, buf_len as usize);
+298	            format!("QBUF: {e}")
+299	        })?;
+300	    }
+301	
+302	    // VIDIOC_STREAMON
+303	    let mut buf_type: u32 = 1; // V4L2_BUF_TYPE_VIDEO_CAPTURE
+304	                               // VIDIOC_STREAMON = 0x40045612
+305	    unsafe {
+306	        ioctl_void(fd, 0x40045612, &mut buf_type as *mut _ as *mut libc::c_void).map_err(|e| {
+307	            libc::munmap(mmapped, buf_len as usize);
+308	            format!("STREAMON: {e}")
+309	        })?;
+310	    }
+311	
+312	    // select() on fd with 2-second timeout
+313	    let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
+314	    unsafe {
+315	        libc::FD_ZERO(&mut fds);
+316	        libc::FD_SET(fd, &mut fds);
+317	    }
+318	    let mut timeout = libc::timeval {
+319	        tv_sec: 2,
+320	        tv_usec: 0,
+321	    };
+322	    let sel = unsafe {
+323	        libc::select(
+324	            fd + 1,
+325	            &mut fds,
+326	            std::ptr::null_mut(),
+327	            std::ptr::null_mut(),
+328	            &mut timeout,
+329	        )
+330	    };
+331	
+332	    if sel <= 0 {
+333	        // VIDIOC_STREAMOFF
+334	        let mut bt2 = 1u32;
+335	        unsafe {
+336	            ioctl_void(fd, 0x40045613, &mut bt2 as *mut _ as *mut libc::c_void).ok();
+337	        }
+338	        unsafe {
+339	            libc::munmap(mmapped, buf_len as usize);
+340	        }
+341	        return Err(format!("select timeout/error: {sel}"));
+342	    }
+343	
+344	    // VIDIOC_DQBUF
+345	    let mut dqbuf: V4l2Buffer = unsafe { std::mem::zeroed() };
+346	    dqbuf.typ = 1;
+347	    dqbuf.memory = 1;
+348	    // VIDIOC_DQBUF = 0xc0585611
+349	    unsafe {
+350	        ioctl_obj(fd, 0xc0585611, &mut dqbuf).map_err(|e| {
+351	            let mut bt2 = 1u32;
+352	            ioctl_void(fd, 0x40045613, &mut bt2 as *mut _ as *mut libc::c_void).ok();
+353	            libc::munmap(mmapped, buf_len as usize);
+354	            format!("DQBUF: {e}")
+355	        })?;
+356	    }
+357	
+358	    let bytes_used = dqbuf.bytes_used as usize;
+359	
+360	    // Copy captured data
+361	    let captured = unsafe { std::slice::from_raw_parts(mmapped as *const u8, bytes_used).to_vec() };
+362	
+363	    // Cleanup
+364	    unsafe {
+365	        let mut bt2 = 1u32;
+366	        ioctl_void(fd, 0x40045613, &mut bt2 as *mut _ as *mut libc::c_void).ok(); // STREAMOFF
+367	        libc::munmap(mmapped, buf_len as usize);
+368	    }
+369	
+370	    // Convert to Bayer u16 LE
+371	    let bayer = match pixfmt {
+372	        0x59565955 => uyvy_to_bayer_u16(&captured, actual_w, actual_h), // UYVY
+373	        0x56595559 => yuyv_to_bayer_u16(&captured, actual_w, actual_h), // YUYV
+374	        0x52474230 => rggb_to_bayer_u16(&captured, actual_w, actual_h), // RGGB8
+375	        0x32305652 => vr20_to_bayer_u16(&captured, actual_w, actual_h), // VR20 (Android)
+376	        _ => {
+377	            // Generic: treat raw bytes as grayscale → bayer u16
+378	            generic_to_bayer_u16(&captured, actual_w, actual_h)
+379	        }
+380	    };
+381	
+382	    Ok((actual_w, actual_h, bayer))
+383	}
+384	
+385	// ---------------------------------------------------------------------------
+386	// V4L2 ioctl helpers
+387	// ---------------------------------------------------------------------------
+388	
+389	unsafe fn ioctl_void(
+390	    fd: std::os::unix::io::RawFd,
+391	    request: u64,
+392	    arg: *mut libc::c_void,
+393	) -> Result<(), String> {
+394	    let ret = libc::ioctl(fd, request as i32, arg);
+395	    if ret < 0 {
+396	        Err(std::io::Error::last_os_error().to_string())
+397	    } else {
+398	        Ok(())
+399	    }
+400	}
+401	
+402	unsafe fn ioctl_obj<T>(
+403	    fd: std::os::unix::io::RawFd,
+404	    request: u64,
+405	    obj: *mut T,
+406	) -> Result<(), String> {
+407	    let ret = libc::ioctl(fd, request as i32, obj as *mut libc::c_void);
+408	    if ret < 0 {
+409	        Err(std::io::Error::last_os_error().to_string())
+410	    } else {
+411	        Ok(())
+412	    }
+413	}
+414	
+415	// ---------------------------------------------------------------------------
+416	// YUV → Bayer u16 conversions
+417	// ---------------------------------------------------------------------------
+418	
+419	/// UYVY (4:2:2 packed): [U0 Y0 V0 Y1] — extract Y channel as bayer sample.
+420	fn uyvy_to_bayer_u16(data: &[u8], w: u32, h: u32) -> Vec<u8> {
+421	    let mut out = vec![0u8; (w * h * 2) as usize];
+422	    for y in 0..h {
+423	        for x in 0..w {
+424	            let row_off = (y * w * 2) as usize;
+425	            let px = x as usize;
+426	            // UYVY: Y is at byte offset 1, 3, 5, 7...
+427	            let src_idx = row_off + (px & !1) * 2 + 1 + (px & 1);
+428	            let y_val = if src_idx < data.len() {
+429	                data[src_idx]
+430	            } else {
+431	                0
+432	            };
+433	            let sample = (y_val as u16) * 64; // scale 8→16 bit
+434	            let out_idx = ((y * w + x) * 2) as usize;
+435	            out[out_idx] = (sample & 0xFF) as u8;
+436	            out[out_idx + 1] = ((sample >> 8) & 0xFF) as u8;
+437	        }
+438	    }
+439	    out
+440	}
+441	
+442	/// YUYV: [Y0 U0 Y1 V0] — extract Y channel.
+443	fn yuyv_to_bayer_u16(data: &[u8], w: u32, h: u32) -> Vec<u8> {
+444	    let mut out = vec![0u8; (w * h * 2) as usize];
+445	    for y in 0..h {
+446	        for x in 0..w {
+447	            let row_off = (y * w * 2) as usize;
+448	            let px = x as usize;
+449	            // YUYV: Y is at byte offset 0, 2, 4, 6...
+450	            let src_idx = row_off + px;
+451	            let y_val = if src_idx < data.len() {
+452	                data[src_idx]
+453	            } else {
+454	                0
+455	            };
+456	            let sample = (y_val as u16) * 64;
+457	            let out_idx = ((y * w + x) * 2) as usize;
+458	            out[out_idx] = (sample & 0xFF) as u8;
+459	            out[out_idx + 1] = ((sample >> 8) & 0xFF) as u8;
+460	        }
+461	    }
+462	    out
+463	}
+464	
+465	/// Raw RGGB8: each byte → u16 shifted left by 8.
+466	fn rggb_to_bayer_u16(data: &[u8], w: u32, h: u32) -> Vec<u8> {
+467	    let mut out = vec![0u8; (w * h * 2) as usize];
+468	    for i in 0..(w * h) as usize {
+469	        let val = if i < data.len() { data[i] } else { 0 };
+470	        let sample = (val as u16) << 8;
+471	        out[i * 2] = (sample & 0xFF) as u8;
+472	        out[i * 2 + 1] = ((sample >> 8) & 0xFF) as u8;
+473	    }
+474	    out
+475	}
+476	
+477	/// VR20 (Android HAL): NV21-like or YUV → extract luminance.
+478	fn vr20_to_bayer_u16(data: &[u8], w: u32, h: u32) -> Vec<u8> {
+479	    let mut out = vec![0u8; (w * h * 2) as usize];
+480	    for i in 0..(w * h) as usize {
+481	        let y_val = if i < data.len() { data[i] } else { 0 };
+482	        let sample = (y_val as u16) * 64;
+483	        out[i * 2] = (sample & 0xFF) as u8;
+484	        out[i * 2 + 1] = ((sample >> 8) & 0xFF) as u8;
+485	    }
+486	    out
+487	}
+488	
+489	/// Generic: treat every 2 bytes as a little-endian u16 sample.
+490	fn generic_to_bayer_u16(data: &[u8], w: u32, h: u32) -> Vec<u8> {
+491	    let pixels = (w * h) as usize;
+492	    let mut out = vec![0u8; pixels * 2];
+493	    for i in 0..pixels {
+494	        let b0 = if i * 2 < data.len() { data[i * 2] } else { 0 };
+495	        let b1 = if i * 2 + 1 < data.len() {
+496	            data[i * 2 + 1]
+497	        } else {
+498	            0
+499	        };
+500	        let val = ((b1 as u16) << 8) | (b0 as u16);
+501	        // Ensure non-zero for pipeline
+502	        let sample = if val == 0 { 128u16 } else { val };
+503	        out[i * 2] = (sample & 0xFF) as u8;
+504	        out[i * 2 + 1] = ((sample >> 8) & 0xFF) as u8;
+505	    }
+506	    out
+507	}
+508	
+509	// ---------------------------------------------------------------------------
+510	// /dev/video* scanner
+511	// ---------------------------------------------------------------------------
+512	
+513	fn scan_video_devices() -> Vec<String> {
+514	    let mut devs = Vec::new();
+515	    if let Ok(entries) = std::fs::read_dir("/dev") {
+516	        for entry in entries.flatten() {
+517	            let name = entry.file_name();
+518	            let name = name.to_string_lossy();
+519	            if name.starts_with("video") {
+520	                devs.push(format!("/dev/{name}"));
+521	            }
+522	        }
+523	    }
+524	    devs.sort();
+525	    devs
+526	}
+527	
+528	// ---------------------------------------------------------------------------
+529	// Synthetic 4K rainbow Bayer generator
+530	// ---------------------------------------------------------------------------
+531	
+532	fn make_rainbow_bayer(w: u32, h: u32) -> Vec<u8> {
+533	    let mut buf = vec![0u8; (w * h * 2) as usize];
+534	    for y in 0..h {
+535	        for x in 0..w {
+536	            let val: u16 = match (x % 2, y % 2) {
+537	                (0, 0) => ((x * 1023 / w) as u16).min(1023),
+538	                (1, 0) | (0, 1) => ((y * 1023 / h) as u16).min(1023),
+539	                _ => (((x + y) * 512 / (w + h)) as u16).min(1023),
+540	            };
+541	            let scaled = val * 64;
+542	            let idx = ((y * w + x) * 2) as usize;
+543	            buf[idx] = (scaled & 0xFF) as u8;
+544	            buf[idx + 1] = ((scaled >> 8) & 0xFF) as u8;
+545	        }
+546	    }
+547	    buf
+548	}
+
+<|im_start|>assistant
+
+<|im_start|>user
+Tool 'Write' not found
+<|im_start|>assistant
+(response interrupted)
+<|im_start|>user
+go
+<|im_start|>assistant
+(error: Stream retry limit reached)
+<|im_start|>user
+go
+<|im_start|>system
+Stream retry limit reached
+<|im_start|>assistant
+(error: Stream retry limit reached)
+<|im_end|>
