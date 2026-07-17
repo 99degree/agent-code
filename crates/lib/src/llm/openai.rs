@@ -379,6 +379,15 @@ impl OpenAiProvider {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
         debug!("OpenAI request to {url}");
+        // Stash the wire payload so it can be replayed with curl after a failure.
+        // Overwrites the previous snapshot so disk usage stays bounded.
+        if let Ok(s) = serde_json::to_string_pretty(&body) {
+            if let Some(dir) = crate::config::agent_config_dir() {
+                let _ = std::fs::create_dir_all(&dir);
+                let path = dir.join("last_request_body.json");
+                let _ = std::fs::write(path, s);
+            }
+        }
 
         // Make the request cancellable during the send phase.
         let cancel = request.cancel.clone();
@@ -432,6 +441,13 @@ impl OpenAiProvider {
         headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
 
         debug!("OpenAI Responses request to {url}");
+        if let Ok(s) = serde_json::to_string_pretty(&body) {
+            if let Some(dir) = crate::config::agent_config_dir() {
+                let _ = std::fs::create_dir_all(&dir);
+                let path = dir.join("last_request_body.json");
+                let _ = std::fs::write(path, s);
+            }
+        }
 
         // Make the request cancellable during the send phase.
         let cancel = request.cancel.clone();
