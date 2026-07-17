@@ -18,7 +18,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::llm::message::{ContentBlock, Message};
 use crate::llm::provider::{Provider, ProviderRequest};
