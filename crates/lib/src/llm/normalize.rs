@@ -496,20 +496,33 @@ pub fn normalize_all(messages: &mut Vec<Message>) -> NormalizeReport {
 }
 
 /// Run the normalization pipeline with the given config.
-pub fn normalize_with_config(messages: &mut Vec<Message>, config: &NormalizationConfig) {
+pub fn normalize_with_config(
+    messages: &mut Vec<Message>,
+    config: &NormalizationConfig,
+) -> NormalizeReport {
+    let mut report = NormalizeReport::default();
+
     // 1. Tool-result pairing.
     if config.ensure_tool_result_pairing {
+        let before = messages.len();
         ensure_tool_result_pairing(messages);
+        report.tool_results_added = messages.len().saturating_sub(before);
     }
 
     // 2. Strip empty text blocks.
+    let before = count_text_blocks(messages);
     strip_empty_blocks(messages);
+    report.empty_blocks_removed = before.saturating_sub(count_text_blocks(messages));
 
     // 3. Remove empty messages.
+    let before = messages.len();
     remove_empty_messages(messages);
+    report.empty_messages_removed = before.saturating_sub(messages.len());
 
     // 4. Cap oversized documents.
+    let before = count_document_blocks(messages);
     cap_document_blocks(messages, config.max_document_bytes);
+    report.documents_capped = before.saturating_sub(count_document_blocks(messages));
 
     // 5. System message strategy.
     match config.system_message_strategy {
@@ -526,7 +539,9 @@ pub fn normalize_with_config(messages: &mut Vec<Message>, config: &Normalization
     // 6. Consecutive user message strategy.
     match config.consecutive_user_strategy {
         ConsecutiveUserStrategy::Merge => {
+            let before = messages.len();
             merge_consecutive_user_messages(messages);
+            report.consecutive_user_merged = before.saturating_sub(messages.len());
         }
         ConsecutiveUserStrategy::InsertDummyAssistant => {
             ensure_alternation_after_tool_result(messages);
@@ -539,17 +554,19 @@ pub fn normalize_with_config(messages: &mut Vec<Message>, config: &Normalization
     if config.validate_alternation {
         let _ = validate_alternation(messages);
     }
+
+    report
 }
 
 /// Normalize messages using the strict config (for templates requiring
 /// strict alternation and a leading system message).
-pub fn normalize_strict(messages: &mut Vec<Message>) {
-    normalize_with_config(messages, &strict_config());
+pub fn normalize_strict(messages: &mut Vec<Message>) -> NormalizeReport {
+    normalize_with_config(messages, &strict_config())
 }
 
 /// Normalize messages using the lenient config (for flexible templates).
-pub fn normalize_lenient(messages: &mut Vec<Message>) {
-    normalize_with_config(messages, &lenient_config());
+pub fn normalize_lenient(messages: &mut Vec<Message>) -> NormalizeReport {
+    normalize_with_config(messages, &lenient_config())
 }
 
 fn count_text_blocks(messages: &[Message]) -> usize {
