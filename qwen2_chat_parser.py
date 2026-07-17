@@ -94,12 +94,19 @@ class ToolCall:
     def render(self) -> str:
         """Render tool call in the expected format."""
         lines = [f"<tool_call>\n<function={self.name}>"]
-        for arg_name, arg_value in self.arguments.items():
-            if isinstance(arg_value, (dict, list)):
-                arg_str = json.dumps(arg_value, ensure_ascii=False)
-            else:
-                arg_str = str(arg_value)
-            lines.append(f"<parameter={arg_name}>{arg_str}</parameter>")
+        args = self.arguments
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (json.JSONDecodeError, TypeError):
+                args = None
+        if isinstance(args, dict):
+            for arg_name, arg_value in args.items():
+                if isinstance(arg_value, (dict, list)):
+                    arg_str = json.dumps(arg_value, ensure_ascii=False)
+                else:
+                    arg_str = str(arg_value)
+                lines.append(f"<parameter={arg_name}>{arg_str}</parameter>")
         lines.append("</function>\n</tool_call>")
         return "\n".join(lines)
 
