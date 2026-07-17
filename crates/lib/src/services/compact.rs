@@ -562,6 +562,68 @@ pub fn parse_prompt_too_long_gap(error_text: &str) -> Option<u64> {
     if gap > 0 { Some(gap) } else { None }
 }
 
+/// Slide a compaction cut point forward (toward newer messages) until it no
+/// longer splits a `tool_use`/`tool_result` pair.
+///
+/// A cut at `cut` splits a pair when a `tool_result` in the kept tail
+/// (`messages[cut..]`) references a `tool_use` in the dropped head
+/// (`messages[..cut]`). We only ever slide forward — extending the summarized
+/// head, never shrinking it — so the amount summarized never decreases. If the
+/// cut would run past the end of the conversation (the entire tail is one
+/// unterminated tool exchange), `None` is returned so the caller can skip
+/// compaction and fall back to another strategy.
+fn snap_cut_to_paired_boundary(messages: &[Message], mut cut: usize) -> Option<usize> {
+    if cut >= messages.len() {
+        return None;
+    }
+
+    // Tool uses living in the dropped head.
+    let mut dropped_uses: Vec<String> = Vec::new();
+    for m in &messages[..cut] {
+        if let Message::Assistant(a) = m {
+            for b in &a.content {
+                if let ContentBlock::ToolUse { id, .. } = b {
+                    dropped_uses.push(id.clone());
+                }
+            }
+        }
+    }
+
+    while cut < messages.len() {
+        // Does any tool_result in the kept tail anchor to a dropped use?
+        let mut split = false;
+        for m in &messages[cut..] {
+            if let Message::User(u) = m {
+                for b in &u.content {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = b
+                        && dropped_uses.iter().any(|id| id == tool_use_id)
+                    {
+                        split = true;
+                        break;
+                    }
+                }
+            }
+            if split {
+                break;
+            }
+        }
+        if !split {
+            return Some(cut);
+        }
+        // Slide forward one message; its tool uses (if any) now belong to the
+        // dropped head.
+        if let Message::Assistant(a) = &messages[cut] {
+            for b in &a.content {
+                if let ContentBlock::ToolUse { id, .. } = b {
+                    dropped_uses.push(id.clone());
+                }
+            }
+        }
+        cut += 1;
+    }
+    None
+}
+
 /// Three-zone compaction strategy for long agentic sessions.
 ///
 /// ```text
@@ -593,10 +655,28 @@ pub async fn compact_with_llm(
     // The split points: 50% summarized, 25% microcompacted, 25% fresh.
     // We need at least 2 messages to summarize and at least 1 to keep.
     let summary_end = total / 2; // End of zone 1 (summarized by LLM)
-    let microcompact_end = summary_end + (total - summary_end) / 2; // Zone 2 end
 
     if summary_end < 2 {
         return None; // Not enough to summarize.
+    }
+
+    // Slide each seam forward so we never split a tool_use/tool_result pair
+    // across the compaction boundary. We only ever extend the summarized head.
+    let summary_end = match snap_cut_to_paired_boundary(messages, summary_end) {
+        Some(c) => c,
+        None => return None,
+    };
+    if summary_end >= total - 1 {
+        return None; // Nothing meaningful left to keep.
+    }
+
+    let microcompact_end = summary_end + (total - summary_end) / 2; // Zone 2 end
+    let microcompact_end = match snap_cut_to_paired_boundary(messages, microcompact_end) {
+        Some(c) => c,
+        None => return None,
+    };
+    if microcompact_end >= total {
+        return None; // No fresh zone left.
     }
 
     // --- Zone 1: LLM summary ---
@@ -1175,6 +1255,54 @@ mod tests {
         } else {
             panic!("Expected System message");
         }
+    }
+
+    #[test]
+    fn test_snap_cut_to_paired_boundary_skips_unpaired_tool_result() {
+        use crate::llm::message::*;
+        // a = assistant tool_use (t1)
+        // b = user text
+        // c = user tool_result for t1
+        // d, e = user text
+        // A cut at b (idx 1) must slide forward to d (idx 3): at any cut <= 2
+        // a's tool_use is dropped while c's result is kept, splitting the pair.
+        let messages = vec![
+            Message::Assistant(AssistantMessage {
+                uuid: uuid::Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "Bash".into(),
+                    input: serde_json::json!({}),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+            user_message("b"),
+            Message::User(UserMessage {
+                uuid: uuid::Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                    extra_content: vec![],
+                }],
+                is_meta: true,
+                is_compact_summary: false,
+            }),
+            user_message("d"),
+            user_message("e"),
+        ];
+        assert_eq!(
+            snap_cut_to_paired_boundary(&messages, 1),
+            Some(3),
+            "should slide from b(idx1) past c to d(idx3)"
+        );
+        // A cut already clear of any pair is returned unchanged.
+        assert_eq!(snap_cut_to_paired_boundary(&messages, 4), Some(4));
     }
 
     #[test]
