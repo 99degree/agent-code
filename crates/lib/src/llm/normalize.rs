@@ -128,13 +128,7 @@ pub fn validate_alternation(messages: &[Message]) -> Result<(), String> {
 /// vector. Call this after loading messages from disk (session resume,
 /// history import) to guarantee API-compatible alternation.
 pub fn normalize_messages(messages: &mut Vec<Message>) {
-    ensure_tool_result_pairing(messages);
-    strip_empty_blocks(messages);
-    remove_empty_messages(messages);
-    cap_document_blocks(messages, 500_000);
-    remove_mid_conversation_system_messages(messages);
-    ensure_alternation_after_tool_result(messages);
-    merge_consecutive_user_messages(messages);
+    normalize_strict(messages);
 }
 
 /// Drop every message before the last compaction summary, returning the
@@ -293,6 +287,57 @@ pub fn merge_consecutive_user_messages(messages: &mut Vec<Message>) {
     }
 }
 
+/// Insert a synthetic assistant text message between any two consecutive
+/// user messages to maintain strict alternation.  Unlike
+/// [`ensure_alternation_after_tool_result`], which only handles the
+/// tool-result case, this covers *all* consecutive-user gaps.
+pub fn insert_dummy_assistant_for_consecutive_users(messages: &mut Vec<Message>) {
+    let mut i = 0;
+    while i + 1 < messages.len() {
+        let both_user = matches!(&messages[i], Message::User(_))
+            && matches!(&messages[i + 1], Message::User(_));
+
+        if both_user {
+            let synthetic = Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                content: vec![ContentBlock::Text {
+                    text: "(response interrupted)".into(),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            });
+            messages.insert(i + 1, synthetic);
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Prepend a default system message if the first message is not already
+/// a system message.  Required by chat templates that mandate a leading
+/// system prompt (e.g. MiMo-V2.5 / Qwen2-style).
+pub fn ensure_system_message(messages: &mut Vec<Message>) {
+    let has_leading_system = messages
+        .first()
+        .is_some_and(|m| matches!(m, Message::System(_)));
+    if !has_leading_system {
+        messages.insert(
+            0,
+            Message::System(SystemMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                subtype: SystemMessageType::Informational,
+                content: String::new(),
+                level: MessageLevel::Info,
+            }),
+        );
+    }
+}
+
 /// Report of changes made during a normalization pass.
 #[derive(Debug, Default, Clone)]
 pub struct NormalizeReport {
@@ -349,6 +394,73 @@ impl std::fmt::Display for NormalizeReport {
     }
 }
 
+/// Strategy for handling consecutive user messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsecutiveUserStrategy {
+    /// Merge consecutive user messages into one (lenient).
+    Merge,
+    /// Insert a synthetic assistant message between them (strict).
+    InsertDummyAssistant,
+    /// Leave them as-is (for templates that tolerate it).
+    Keep,
+}
+
+/// Strategy for handling system messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemMessageStrategy {
+    /// Prepend a default empty system message if missing (strict).
+    EnsureDefault,
+    /// Don't touch existing system messages (lenient).
+    KeepExisting,
+    /// Remove all system messages.
+    RemoveAll,
+}
+
+/// Configuration for the normalization pipeline.
+#[derive(Debug, Clone)]
+pub struct NormalizationConfig {
+    /// How to handle consecutive user messages.
+    pub consecutive_user_strategy: ConsecutiveUserStrategy,
+    /// How to handle system messages.
+    pub system_message_strategy: SystemMessageStrategy,
+    /// Whether to validate strict alternation after normalization.
+    pub validate_alternation: bool,
+    /// Whether to pair orphaned tool_use blocks with synthetic results.
+    pub ensure_tool_result_pairing: bool,
+    /// Maximum byte size for document blocks before capping.
+    pub max_document_bytes: usize,
+}
+
+impl Default for NormalizationConfig {
+    fn default() -> Self {
+        strict_config()
+    }
+}
+
+/// Strict normalization config for templates requiring strict alternation
+/// and a leading system message (e.g. MiMo-V2.5, Qwen2, Llama3 with tools).
+pub fn strict_config() -> NormalizationConfig {
+    NormalizationConfig {
+        consecutive_user_strategy: ConsecutiveUserStrategy::InsertDummyAssistant,
+        system_message_strategy: SystemMessageStrategy::EnsureDefault,
+        validate_alternation: true,
+        ensure_tool_result_pairing: true,
+        max_document_bytes: 500_000,
+    }
+}
+
+/// Lenient normalization config for flexible templates that don't require
+/// strict alternation or a leading system message.
+pub fn lenient_config() -> NormalizationConfig {
+    NormalizationConfig {
+        consecutive_user_strategy: ConsecutiveUserStrategy::Merge,
+        system_message_strategy: SystemMessageStrategy::KeepExisting,
+        validate_alternation: false,
+        ensure_tool_result_pairing: true,
+        max_document_bytes: 500_000,
+    }
+}
+
 /// Run the full normalization suite and return a report of what changed.
 /// This is the diagnostic version of [`normalize_messages`] — it counts
 /// every mutation so callers can display a summary.
@@ -381,6 +493,63 @@ pub fn normalize_all(messages: &mut Vec<Message>) -> NormalizeReport {
     report.consecutive_user_merged = before.saturating_sub(messages.len());
 
     report
+}
+
+/// Run the normalization pipeline with the given config.
+pub fn normalize_with_config(messages: &mut Vec<Message>, config: &NormalizationConfig) {
+    // 1. Tool-result pairing.
+    if config.ensure_tool_result_pairing {
+        ensure_tool_result_pairing(messages);
+    }
+
+    // 2. Strip empty text blocks.
+    strip_empty_blocks(messages);
+
+    // 3. Remove empty messages.
+    remove_empty_messages(messages);
+
+    // 4. Cap oversized documents.
+    cap_document_blocks(messages, config.max_document_bytes);
+
+    // 5. System message strategy.
+    match config.system_message_strategy {
+        SystemMessageStrategy::RemoveAll => {
+            messages.retain(|m| !matches!(m, Message::System(_)));
+        }
+        SystemMessageStrategy::EnsureDefault => {
+            remove_mid_conversation_system_messages(messages);
+            ensure_system_message(messages);
+        }
+        SystemMessageStrategy::KeepExisting => {}
+    }
+
+    // 6. Consecutive user message strategy.
+    match config.consecutive_user_strategy {
+        ConsecutiveUserStrategy::Merge => {
+            merge_consecutive_user_messages(messages);
+        }
+        ConsecutiveUserStrategy::InsertDummyAssistant => {
+            ensure_alternation_after_tool_result(messages);
+            insert_dummy_assistant_for_consecutive_users(messages);
+        }
+        ConsecutiveUserStrategy::Keep => {}
+    }
+
+    // 7. Validate alternation.
+    if config.validate_alternation {
+        let _ = validate_alternation(messages);
+    }
+}
+
+/// Normalize messages using the strict config (for templates requiring
+/// strict alternation and a leading system message).
+pub fn normalize_strict(messages: &mut Vec<Message>) {
+    normalize_with_config(messages, &strict_config());
+}
+
+/// Normalize messages using the lenient config (for flexible templates).
+pub fn normalize_lenient(messages: &mut Vec<Message>) {
+    normalize_with_config(messages, &lenient_config());
 }
 
 fn count_text_blocks(messages: &[Message]) -> usize {
@@ -958,5 +1127,110 @@ mod tests {
         let head = truncate_to_last_summary(&mut messages);
         assert!(head.is_empty());
         assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn test_normalize_strict_inserts_dummy_assistant() {
+        let mut messages = vec![user_message("one"), user_message("two")];
+        normalize_strict(&mut messages);
+        assert!(validate_alternation(&messages).is_ok());
+    }
+
+    #[test]
+    fn test_normalize_lenient_merges_consecutive_users() {
+        let mut messages = vec![user_message("one"), user_message("two")];
+        normalize_lenient(&mut messages);
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn test_ensure_system_message_adds_when_missing() {
+        let mut messages = vec![user_message("hello")];
+        ensure_system_message(&mut messages);
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(&messages[0], Message::System(_)));
+    }
+
+    #[test]
+    fn test_ensure_system_message_no_op_when_present() {
+        let mut messages = vec![
+            Message::System(SystemMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                subtype: SystemMessageType::Informational,
+                content: "existing".into(),
+                level: MessageLevel::Info,
+            }),
+            user_message("hello"),
+        ];
+        ensure_system_message(&mut messages);
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn test_insert_dummy_assistant_for_consecutive_users() {
+        let mut messages = vec![user_message("a"), user_message("b"), user_message("c")];
+        insert_dummy_assistant_for_consecutive_users(&mut messages);
+        assert_eq!(messages.len(), 5);
+        assert!(validate_alternation(&messages).is_ok());
+    }
+
+    #[test]
+    fn test_strict_config_fields() {
+        let config = strict_config();
+        assert_eq!(
+            config.consecutive_user_strategy,
+            ConsecutiveUserStrategy::InsertDummyAssistant
+        );
+        assert_eq!(
+            config.system_message_strategy,
+            SystemMessageStrategy::EnsureDefault
+        );
+        assert!(config.validate_alternation);
+        assert!(config.ensure_tool_result_pairing);
+        assert_eq!(config.max_document_bytes, 500_000);
+    }
+
+    #[test]
+    fn test_lenient_config_fields() {
+        let config = lenient_config();
+        assert_eq!(
+            config.consecutive_user_strategy,
+            ConsecutiveUserStrategy::Merge
+        );
+        assert_eq!(
+            config.system_message_strategy,
+            SystemMessageStrategy::KeepExisting
+        );
+        assert!(!config.validate_alternation);
+        assert!(config.ensure_tool_result_pairing);
+        assert_eq!(config.max_document_bytes, 500_000);
+    }
+
+    #[test]
+    fn test_normalize_with_config_remove_all_system() {
+        let mut messages = vec![
+            Message::System(SystemMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                subtype: SystemMessageType::Informational,
+                content: "remove me".into(),
+                level: MessageLevel::Info,
+            }),
+            user_message("hello"),
+            Message::System(SystemMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                subtype: SystemMessageType::Informational,
+                content: "also remove".into(),
+                level: MessageLevel::Info,
+            }),
+        ];
+        let config = NormalizationConfig {
+            system_message_strategy: SystemMessageStrategy::RemoveAll,
+            ..strict_config()
+        };
+        normalize_with_config(&mut messages, &config);
+        assert!(!messages.iter().any(|m| matches!(m, Message::System(_))));
     }
 }

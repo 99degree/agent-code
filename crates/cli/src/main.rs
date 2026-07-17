@@ -991,7 +991,7 @@ async fn async_main() -> anyhow::Result<()> {
                         &mut state.messages,
                     );
                     state.full_history = frozen;
-                    agent_code_lib::llm::normalize::normalize_messages(&mut state.messages);
+                    agent_code_lib::llm::normalize::normalize_strict(&mut state.messages);
                     state.turn_count = data.turn_count;
                     state.total_cost_usd = data.total_cost_usd;
                     state.total_usage.input_tokens = data.total_input_tokens;
