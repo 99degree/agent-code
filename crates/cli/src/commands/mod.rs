@@ -953,7 +953,6 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 match agent_code_lib::services::session::load_session(id) {
                     Ok(data) => {
                         let restored_plan = data.plan_mode;
-                        let normalize_report;
                         let skipped_pre_summary;
                         {
                             let state = engine.state_mut();
@@ -969,8 +968,15 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             );
                             skipped_pre_summary = frozen.len();
                             state.full_history = frozen;
-                            normalize_report =
-                                agent_code_lib::llm::normalize::normalize_all(&mut state.messages);
+                            // Apply MiMo-compatible normalization for session resume
+                            agent_code_lib::llm::normalize::normalize_for_mimo(&mut state.messages);
+                            state.turn_count = data.turn_count;
+                            state.total_cost_usd = data.total_cost_usd;
+                            state.total_usage.input_tokens = data.total_input_tokens;
+                            state.total_usage.output_tokens = data.total_output_tokens;
+                            state.plan_mode = restored_plan;
+                            state.brief_mode = data.brief_mode;
+                            if !data.response_style.is_empty()
                             state.turn_count = data.turn_count;
                             state.total_cost_usd = data.total_cost_usd;
                             state.total_usage.input_tokens = data.total_input_tokens;
@@ -5920,7 +5926,6 @@ fn execute_session_picker(engine: &mut QueryEngine) {
     match agent_code_lib::services::session::load_session(&chosen) {
         Ok(data) => {
             let restored_plan = data.plan_mode;
-            let normalize_report;
             let skipped_pre_summary;
             {
                 let state = engine.state_mut();
@@ -5929,8 +5934,8 @@ fn execute_session_picker(engine: &mut QueryEngine) {
                     agent_code_lib::llm::normalize::truncate_to_last_summary(&mut state.messages);
                 skipped_pre_summary = frozen.len();
                 state.full_history = frozen;
-                normalize_report =
-                    agent_code_lib::llm::normalize::normalize_all(&mut state.messages);
+                // Apply MiMo-compatible normalization for session resume
+                agent_code_lib::llm::normalize::normalize_for_mimo(&mut state.messages);
                 state.turn_count = data.turn_count;
                 state.total_cost_usd = data.total_cost_usd;
                 state.total_usage.input_tokens = data.total_input_tokens;

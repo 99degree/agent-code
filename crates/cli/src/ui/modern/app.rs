@@ -1037,7 +1037,7 @@ impl App {
                     skipped_pre_summary = frozen.len();
                     state.full_history = frozen;
                     // Normalize: fill orphaned tool_use with dummy results,
-                    // strip empties, merge consecutive user messages.
+                    // strip empties, insert dummy assistants for alternation.
                     agent_code_lib::llm::normalize::normalize_strict(&mut state.messages);
                     state.turn_count = data.turn_count;
                     state.total_cost_usd = data.total_cost_usd;
