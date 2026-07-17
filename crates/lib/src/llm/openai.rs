@@ -191,6 +191,50 @@ impl OpenAiProvider {
             final_messages.push(msg);
         }
 
+        // Merge consecutive user messages that can arise after system
+        // message filtering or tool_result extraction.
+        let mut merged: Vec<serde_json::Value> = Vec::new();
+        for msg in final_messages {
+            if msg.get("role").and_then(|r| r.as_str()) == Some("user")
+                && merged
+                    .last()
+                    .and_then(|m| m.get("role"))
+                    .and_then(|r| r.as_str())
+                    == Some("user")
+            {
+                // Merge content into the previous user message.
+                if let Some(prev) = merged.last_mut() {
+                    let prev_content = prev.get("content").cloned().unwrap_or_default();
+                    let cur_content = msg.get("content").cloned().unwrap_or_default();
+                    let merged_content = match (&prev_content, &cur_content) {
+                        (serde_json::Value::String(a), serde_json::Value::String(b)) => {
+                            serde_json::json!([{"type":"text","text":a}, {"type":"text","text":b}])
+                        }
+                        (serde_json::Value::String(a), serde_json::Value::Array(b)) => {
+                            let mut parts = vec![serde_json::json!({"type":"text","text":a})];
+                            parts.extend(b.iter().cloned());
+                            serde_json::Value::Array(parts)
+                        }
+                        (serde_json::Value::Array(a), serde_json::Value::String(b)) => {
+                            let mut parts = a.clone();
+                            parts.push(serde_json::json!({"type":"text","text":b}));
+                            serde_json::Value::Array(parts)
+                        }
+                        (serde_json::Value::Array(a), serde_json::Value::Array(b)) => {
+                            let mut parts = a.clone();
+                            parts.extend(b.iter().cloned());
+                            serde_json::Value::Array(parts)
+                        }
+                        _ => cur_content,
+                    };
+                    prev["content"] = merged_content;
+                }
+            } else {
+                merged.push(msg);
+            }
+        }
+        let final_messages = merged;
+
         // Build tools in OpenAI format.
         let tools: Vec<serde_json::Value> = request
             .tools

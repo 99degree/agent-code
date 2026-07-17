@@ -6,6 +6,7 @@
 //! - Empty message handling
 
 use super::message::*;
+use uuid::Uuid;
 
 /// Ensure every tool_use block has a matching tool_result in the
 /// subsequent user message. Orphaned tool_use blocks cause API errors.
@@ -131,6 +132,8 @@ pub fn normalize_messages(messages: &mut Vec<Message>) {
     strip_empty_blocks(messages);
     remove_empty_messages(messages);
     cap_document_blocks(messages, 500_000);
+    remove_mid_conversation_system_messages(messages);
+    ensure_alternation_after_tool_result(messages);
     merge_consecutive_user_messages(messages);
 }
 
@@ -192,6 +195,63 @@ pub fn cap_document_blocks(messages: &mut [Message], max_bytes: usize) {
                     ),
                 };
             }
+        }
+    }
+}
+
+/// Remove System messages that appear after the first user/assistant
+/// message.  Mid-conversation system messages (e.g. "Stream retry
+/// limit reached") break user/assistant alternation once they are
+/// filtered out by provider-specific serialization, creating
+/// consecutive user messages that cause 400 errors.
+///
+/// System messages *before* the first user/assistant are preserved
+/// because some providers use them for system prompts.
+pub fn remove_mid_conversation_system_messages(messages: &mut Vec<Message>) {
+    let first_content = messages
+        .iter()
+        .position(|m| !matches!(m, Message::System(_)));
+    if let Some(start) = first_content {
+        let prefix: Vec<Message> = messages.drain(..start).collect();
+        messages.retain(|m| !matches!(m, Message::System(_)));
+        // Re-insert the prefix (system messages before first user/assistant).
+        let old_len = messages.len();
+        messages.extend(prefix);
+        messages.rotate_right(old_len);
+    }
+}
+
+/// Insert a synthetic assistant text message when a user message containing
+/// tool_results is immediately followed by another user message (no assistant
+/// in between). This happens when the assistant's response stream is
+/// cancelled/interrupted after the tool_results are saved but before the
+/// assistant reply is written. Without this, `build_body` would emit
+/// consecutive user messages after filtering system messages, causing 400
+/// errors from the API.
+pub fn ensure_alternation_after_tool_result(messages: &mut Vec<Message>) {
+    let mut i = 0;
+    while i + 1 < messages.len() {
+        let current_has_tool_result = matches!(&messages[i], Message::User(u) if u.content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. })));
+        let next_is_user = matches!(&messages[i + 1], Message::User(_));
+
+        if current_has_tool_result && next_is_user {
+            // Insert a synthetic assistant message between them.
+            let synthetic = Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                content: vec![ContentBlock::Text {
+                    text: "(response interrupted)".into(),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            });
+            messages.insert(i + 1, synthetic);
+            // Skip past the inserted message and the next user message.
+            i += 2;
+        } else {
+            i += 1;
         }
     }
 }

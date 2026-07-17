@@ -850,6 +850,10 @@ impl QueryEngine {
             crate::llm::normalize::strip_empty_blocks(&mut self.state.messages);
             crate::llm::normalize::remove_empty_messages(&mut self.state.messages);
             crate::llm::normalize::cap_document_blocks(&mut self.state.messages, 500_000);
+            crate::llm::normalize::remove_mid_conversation_system_messages(
+                &mut self.state.messages,
+            );
+            crate::llm::normalize::ensure_alternation_after_tool_result(&mut self.state.messages);
             crate::llm::normalize::merge_consecutive_user_messages(&mut self.state.messages);
 
             debug!("Agent turn {}/{}", turn + 1, max_turns);
