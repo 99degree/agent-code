@@ -811,6 +811,19 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     ));
                 }
                 engine.state_mut().config.api.model = new_model.to_string();
+                // Record model change in conversation history.
+                engine
+                    .state_mut()
+                    .messages
+                    .push(agent_code_lib::llm::message::Message::System(
+                        agent_code_lib::llm::message::SystemMessage {
+                            uuid: uuid::Uuid::new_v4(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            subtype: agent_code_lib::llm::message::SystemMessageType::Informational,
+                            content: format!("Model changed to {new_model}"),
+                            level: agent_code_lib::llm::message::MessageLevel::Info,
+                        },
+                    ));
                 let final_base_url = &engine.state().config.api.base_url;
                 tracing::info!(
                     "[model] Final: model={}, base_url={}",
@@ -920,6 +933,20 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             }
                         }
                         engine.state_mut().config.api.model = chosen.clone();
+                        // Record model change in conversation history.
+                        engine
+                            .state_mut()
+                            .messages
+                            .push(agent_code_lib::llm::message::Message::System(
+                            agent_code_lib::llm::message::SystemMessage {
+                                uuid: uuid::Uuid::new_v4(),
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                subtype:
+                                    agent_code_lib::llm::message::SystemMessageType::Informational,
+                                content: format!("Model changed to {chosen}"),
+                                level: agent_code_lib::llm::message::MessageLevel::Info,
+                            },
+                        ));
 
                         // Recreate provider with new base_url and swap it in.
                         let final_base_url = &engine.state().config.api.base_url;
@@ -968,9 +995,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             );
                             skipped_pre_summary = frozen.len();
                             state.full_history = frozen;
-                            // Apply MiMo-compatible normalization for session resume
-                            let report =
-                                agent_code_lib::llm::normalize::normalize_all(&mut state.messages);
+                            // Apply strict normalization for session resume
+                            let report = agent_code_lib::llm::normalize::normalize_strict(
+                                &mut state.messages,
+                            );
                             if !report.to_string().contains("already normalized") {
                                 println!("{}", report);
                             }
@@ -1050,11 +1078,13 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         }
                         engine.set_live_plan_mode(restored_plan);
                         println!(
-                            "Resumed session {} ({} messages, {} turns, ${:.4})",
+                            "Resumed session {} ({} messages, {} turns, ${:.4}, model: {}, provider: {})",
                             id,
                             engine.state().messages.len(),
                             data.turn_count,
                             data.total_cost_usd,
+                            data.model,
+                            data.base_url,
                         );
                         if skipped_pre_summary > 0 {
                             println!(
@@ -5935,8 +5965,8 @@ fn execute_session_picker(engine: &mut QueryEngine) {
                     agent_code_lib::llm::normalize::truncate_to_last_summary(&mut state.messages);
                 skipped_pre_summary = frozen.len();
                 state.full_history = frozen;
-                // Apply MiMo-compatible normalization for session resume
-                report = agent_code_lib::llm::normalize::normalize_all(&mut state.messages);
+                // Apply strict normalization for session resume
+                report = agent_code_lib::llm::normalize::normalize_strict(&mut state.messages);
                 state.turn_count = data.turn_count;
                 state.total_cost_usd = data.total_cost_usd;
                 state.total_usage.input_tokens = data.total_input_tokens;
@@ -5988,11 +6018,13 @@ fn execute_session_picker(engine: &mut QueryEngine) {
             }
             engine.set_live_plan_mode(restored_plan);
             println!(
-                "Resumed session {} ({} messages, {} turns, ${:.4})",
+                "Resumed session {} ({} messages, {} turns, ${:.4}, model: {}, provider: {})",
                 chosen,
                 engine.state().messages.len(),
                 data.turn_count,
                 data.total_cost_usd,
+                data.model,
+                data.base_url,
             );
             if !report.to_string().contains("already normalized") {
                 println!("{}", report);
