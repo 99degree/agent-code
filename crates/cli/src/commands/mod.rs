@@ -811,6 +811,19 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     ));
                 }
                 engine.state_mut().config.api.model = new_model.to_string();
+                // Record model change in conversation history.
+                engine
+                    .state_mut()
+                    .messages
+                    .push(agent_code_lib::llm::message::Message::System(
+                        agent_code_lib::llm::message::SystemMessage {
+                            uuid: uuid::Uuid::new_v4(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            subtype: agent_code_lib::llm::message::SystemMessageType::Informational,
+                            content: format!("Model changed to {new_model}"),
+                            level: agent_code_lib::llm::message::MessageLevel::Info,
+                        },
+                    ));
                 let final_base_url = &engine.state().config.api.base_url;
                 tracing::info!(
                     "[model] Final: model={}, base_url={}",
@@ -920,6 +933,20 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             }
                         }
                         engine.state_mut().config.api.model = chosen.clone();
+                        // Record model change in conversation history.
+                        engine
+                            .state_mut()
+                            .messages
+                            .push(agent_code_lib::llm::message::Message::System(
+                            agent_code_lib::llm::message::SystemMessage {
+                                uuid: uuid::Uuid::new_v4(),
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                subtype:
+                                    agent_code_lib::llm::message::SystemMessageType::Informational,
+                                content: format!("Model changed to {chosen}"),
+                                level: agent_code_lib::llm::message::MessageLevel::Info,
+                            },
+                        ));
 
                         // Recreate provider with new base_url and swap it in.
                         let final_base_url = &engine.state().config.api.base_url;
@@ -1047,11 +1074,12 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         }
                         engine.set_live_plan_mode(restored_plan);
                         println!(
-                            "Resumed session {} ({} messages, {} turns, ${:.4})",
+                            "Resumed session {} ({} messages, {} turns, ${:.4}, model: {})",
                             id,
                             engine.state().messages.len(),
                             data.turn_count,
                             data.total_cost_usd,
+                            data.model,
                         );
                         if !normalize_report.to_string().contains("already normalized") {
                             println!("{}", normalize_report);
@@ -5987,11 +6015,12 @@ fn execute_session_picker(engine: &mut QueryEngine) {
             }
             engine.set_live_plan_mode(restored_plan);
             println!(
-                "Resumed session {} ({} messages, {} turns, ${:.4})",
+                "Resumed session {} ({} messages, {} turns, ${:.4}, model: {})",
                 chosen,
                 engine.state().messages.len(),
                 data.turn_count,
                 data.total_cost_usd,
+                data.model,
             );
             if !normalize_report.to_string().contains("already normalized") {
                 println!("{}", normalize_report);
