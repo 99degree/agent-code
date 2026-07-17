@@ -258,9 +258,25 @@ pub fn ensure_alternation_after_tool_result(messages: &mut Vec<Message>) {
 
 /// Merge consecutive user messages into a single message.
 /// The API requires strict user/assistant alternation.
+///
+/// **Exception**: User messages that contain *only* `ToolResult` blocks
+/// are never merged because each must map to a separate `tool` role
+/// message with its own `tool_call_id` in the OpenAI wire format.
 pub fn merge_consecutive_user_messages(messages: &mut Vec<Message>) {
     let mut i = 0;
     while i + 1 < messages.len() {
+        let current_is_tool_only = matches!(&messages[i], Message::User(u)
+            if u.content.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. })));
+        let next_is_tool_only = matches!(&messages[i + 1], Message::User(u)
+            if u.content.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. })));
+
+        // Never merge two tool-result-only messages — each needs its own
+        // tool_call_id in the OpenAI wire format.
+        if current_is_tool_only && next_is_tool_only {
+            i += 1;
+            continue;
+        }
+
         let both_user = matches!(&messages[i], Message::User(_))
             && matches!(&messages[i + 1], Message::User(_));
 
