@@ -363,6 +363,39 @@ impl ToolContext {
             active_call_id: Some(call_id.into()),
         }
     }
+
+    /// Clone this context with a shared task manager wired in.
+    ///
+    /// Read-only concurrency-safe tools such as the Monitor tool need the
+    /// task manager to read background-task status; the executor propagates
+    /// it into the parallel batch path, but tests / one-shot callers can
+    /// wire it explicitly with this helper.
+    pub fn with_task_manager(
+        &self,
+        task_manager: std::sync::Arc<crate::services::background::TaskManager>,
+    ) -> Self {
+        Self {
+            cwd: self.cwd.clone(),
+            cancel: self.cancel.clone(),
+            permission_checker: self.permission_checker.clone(),
+            verbose: self.verbose,
+            plan_mode: self.plan_mode,
+            file_cache: self.file_cache.clone(),
+            denial_tracker: self.denial_tracker.clone(),
+            task_manager: Some(task_manager),
+            subagent_colors: self.subagent_colors.clone(),
+            session_allows: self.session_allows.clone(),
+            session_allow_all: self.session_allow_all.clone(),
+            permission_prompter: self.permission_prompter.clone(),
+            question_asker: self.question_asker.clone(),
+            agent_origin: self.agent_origin.clone(),
+            sandbox: self.sandbox.clone(),
+            active_disk_output_style: self.active_disk_output_style.clone(),
+            agent_limiter: self.agent_limiter.clone(),
+            tool_events: self.tool_events.clone(),
+            active_call_id: self.active_call_id.clone(),
+        }
+    }
 }
 
 /// Result of a tool execution.

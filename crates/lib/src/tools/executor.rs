@@ -136,6 +136,12 @@ pub async fn execute_tool_calls(
                         let ctx_denials = ctx.denial_tracker.clone();
                         let ctx_events = ctx.tool_events.clone();
                         let ctx_origin = ctx.agent_origin.clone();
+                        // Read-only concurrency-safe tools (e.g. Monitor) may still
+                        // need the task manager / subagent color handles, which are
+                        // cheap Arc clones — clone them up front so they can move
+                        // into the spawned task.
+                        let ctx_task_manager = ctx.task_manager.clone();
+                        let ctx_subagent_colors = ctx.subagent_colors.clone();
                         handles.push(tokio::spawn(async move {
                             execute_single_tool(
                                 &call,
@@ -148,8 +154,12 @@ pub async fn execute_tool_calls(
                                     plan_mode: ctx_plan_mode,
                                     file_cache: ctx_file_cache,
                                     denial_tracker: ctx_denials,
-                                    task_manager: None,
-                                    subagent_colors: None,
+                                    // Read-only concurrency-safe tools (e.g. Monitor)
+                                    // may still need the task manager / subagent color
+                                    // handles, which are cheap Arc clones — propagate
+                                    // them so those tools work on the parallel path.
+                                    task_manager: ctx_task_manager.clone(),
+                                    subagent_colors: ctx_subagent_colors.clone(),
                                     session_allows: ctx_allows,
                                     session_allow_all: ctx_allow_all,
                                     permission_prompter: ctx_prompter,

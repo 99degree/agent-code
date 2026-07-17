@@ -146,6 +146,11 @@ fn align_to_char_boundary(bytes: &[u8], offset: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::background::TaskManager;
+    use crate::tools::ToolContext;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn align_to_char_boundary_passes_ascii_through() {
@@ -199,5 +204,43 @@ mod tests {
         let tail = tail_of_file(&path, 4); // would cut mid-é if naive
         // Tail should be valid UTF-8 ending with "llo".
         assert!(tail.ends_with("llo"));
+    }
+
+    #[tokio::test]
+    async fn monitor_succeeds_when_task_manager_wired() {
+        let mgr = Arc::new(TaskManager::new());
+        // Spawn a quick task that completes and writes output.
+        let info = mgr
+            .spawn_shell("echo done", "echo", PathBuf::from(".").as_path())
+            .await
+            .expect("spawn");
+        // Let it finish.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let ctx = ToolContext::minimal(PathBuf::from("."), CancellationToken::new())
+            .with_task_manager(mgr);
+        let result = MonitorTool
+            .call(serde_json::json!({ "id": info }), &ctx)
+            .await
+            .expect("call");
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert!(
+            result.content.contains("Status: completed"),
+            "expected completed status, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn monitor_errors_without_task_manager() {
+        let ctx = ToolContext::minimal(PathBuf::from("."), CancellationToken::new());
+        let err = MonitorTool
+            .call(serde_json::json!({"id": "abc"}), &ctx)
+            .await
+            .expect_err("should fail without task manager");
+        assert!(
+            err.to_string().contains("task manager"),
+            "expected task-manager error, got: {err}"
+        );
     }
 }
