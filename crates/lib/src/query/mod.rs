@@ -1207,36 +1207,13 @@ impl QueryEngine {
                                         continue 'turn;
                                     }
                                 }
-                                // Surface the error so the user sees it in the
-                                // conversation (not only in logs).
-                                let err_system = Message::System(SystemMessage {
-                                    uuid: Uuid::new_v4(),
-                                    timestamp: chrono::Utc::now().to_rfc3339(),
-                                    subtype: SystemMessageType::ApiError,
-                                    content: reason.clone(),
-                                    level: MessageLevel::Error,
-                                });
-                                self.state.push_message(err_system);
-
-                                // Also push an assistant message so the
-                                // conversation maintains user/assistant
-                                // alternation. Without this, the next user
-                                // message would follow a system message,
-                                // causing consecutive user messages and 400
-                                // errors from the API on session resume.
-                                let err_assistant = Message::Assistant(AssistantMessage {
-                                    uuid: Uuid::new_v4(),
-                                    timestamp: chrono::Utc::now().to_rfc3339(),
-                                    content: vec![ContentBlock::Text {
-                                        text: format!("(error: {reason})"),
-                                    }],
-                                    model: None,
-                                    usage: None,
-                                    stop_reason: None,
-                                    request_id: None,
-                                });
-                                self.state.push_message(err_assistant);
-
+                                // Do NOT pollute the message history with placeholder
+                                // entries: openai.rs strips ApiError system messages
+                                // before serializing, so earlier attempts to pad with
+                                // "(error: ...)" assistant turns ended up stacking two
+                                // assistant turns on the wire, which the server 400s.
+                                // Surface the failure through the sink and error hooks
+                                // only - the history keeps its real alternation.
                                 sink.on_error(&reason);
                                 self.state.is_query_active = false;
                                 // Error hooks fire once per turn that
