@@ -854,6 +854,7 @@ impl QueryEngine {
                 &mut self.state.messages,
             );
             crate::llm::normalize::ensure_alternation_after_tool_result(&mut self.state.messages);
+            crate::llm::normalize::remove_stray_synthetic_assistants(&mut self.state.messages);
             crate::llm::normalize::merge_consecutive_user_messages(&mut self.state.messages);
 
             debug!("Agent turn {}/{}", turn + 1, max_turns);

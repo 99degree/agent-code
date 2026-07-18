@@ -290,24 +290,130 @@ pub fn ensure_alternation_after_tool_result(messages: &mut Vec<Message>) {
             if u.content.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. })));
 
         if current_has_tool_result && next_is_user && !next_is_tool_only {
-            // Insert a synthetic assistant message between them.
-            let synthetic = Message::Assistant(AssistantMessage {
-                uuid: Uuid::new_v4(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                content: vec![ContentBlock::Text {
-                    text: "(response interrupted)".into(),
-                }],
-                model: None,
-                usage: None,
-                stop_reason: None,
-                request_id: None,
-            });
-            messages.insert(i + 1, synthetic);
-            // Skip past the inserted message and the next user message.
-            i += 2;
+            // Check if the tool_results in the current user match the
+            // preceding assistant's tool_calls. If they do, the tool
+            // results belong to that assistant and will be emitted
+            // correctly by build_body without breaking alternation.
+            let tool_result_ids: Vec<String> = match &messages[i] {
+                Message::User(u) => u.content.iter().filter_map(|b| {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = b {
+                        Some(tool_use_id.clone())
+                    } else { None }
+                }).collect(),
+                _ => Vec::new(),
+            };
+
+            let needs_synthetic = if i > 0 {
+                match &messages[i - 1] {
+                    Message::Assistant(a) => {
+                        let assistant_tool_ids: std::collections::HashSet<String> =
+                            a.content.iter().filter_map(|b| {
+                                if let ContentBlock::ToolUse { id, .. } = b {
+                                    Some(id.clone())
+                                } else { None }
+                            }).collect();
+                        // If ANY tool_result doesn't match the preceding assistant,
+                        // we need the synthetic assistant.
+                        tool_result_ids.iter().any(|id| !assistant_tool_ids.contains(id))
+                    }
+                    _ => true, // No preceding assistant — need synthetic
+                }
+            } else {
+                true // First message — need synthetic
+            };
+
+            if needs_synthetic {
+                // Insert a synthetic assistant message between them.
+                let synthetic = Message::Assistant(AssistantMessage {
+                    uuid: Uuid::new_v4(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    content: vec![ContentBlock::Text {
+                        text: "(response interrupted)".into(),
+                    }],
+                    model: None,
+                    usage: None,
+                    stop_reason: None,
+                    request_id: None,
+                });
+                messages.insert(i + 1, synthetic);
+                // Skip past the inserted message and the next user message.
+                i += 2;
+            } else {
+                // Tool results belong to preceding assistant — no synthetic needed.
+                i += 1;
+            }
         } else {
             i += 1;
         }
+    }
+}
+
+/// Remove synthetic assistant messages with only "(response interrupted)" text
+/// that were incorrectly inserted between an assistant with tool_calls and
+/// its tool results, or between a user (no tool_results) and a user with
+/// tool_results that match an earlier assistant.
+pub fn remove_stray_synthetic_assistants(messages: &mut Vec<Message>) {
+    let mut i = 1;
+    while i + 1 < messages.len() {
+        // Check if messages[i] is a synthetic assistant with only "(response interrupted)"
+        let is_synthetic = match &messages[i] {
+            Message::Assistant(a) => a.content.len() == 1 && matches!(&a.content[0], ContentBlock::Text { text } if text == "(response interrupted)"),
+            _ => false,
+        };
+
+        if is_synthetic {
+            // Case 1: Synthetic between assistant with tool_calls and user with matching tool_results
+            let prev_has_tool_calls = match &messages[i - 1] {
+                Message::Assistant(a) => a.content.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. })),
+                _ => false,
+            };
+            
+            let next_tool_result_ids: Vec<String> = if let Message::User(u) = &messages[i + 1] {
+                u.content.iter().filter_map(|b| {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = b { Some(tool_use_id.clone()) } else { None }
+                }).collect()
+            } else { Vec::new() };
+
+            let case1 = prev_has_tool_calls && !next_tool_result_ids.is_empty();
+            
+            // Case 2: Synthetic between user (no tool_results) and user with tool_results
+            // where the tool_results match an earlier assistant's tool_calls
+            let prev_is_user_no_tool_results = matches!(&messages[i - 1], Message::User(u) if !u.content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. })));
+            let case2 = if prev_is_user_no_tool_results {
+                let next_tool_result_ids: Vec<String> = if let Message::User(u) = &messages[i + 1] {
+                    u.content.iter().filter_map(|b| {
+                        if let ContentBlock::ToolResult { tool_use_id, .. } = b { Some(tool_use_id.clone()) } else { None }
+                    }).collect()
+                } else { Vec::new() };
+                
+                if !next_tool_result_ids.is_empty() {
+                    // Find the assistant with tool_calls that match these tool_results
+                    let mut found_match = false;
+                    for msg in messages[..i].iter().rev() {
+                        if let Message::Assistant(a) = msg {
+                            let assistant_tool_ids: std::collections::HashSet<String> = a.content.iter().filter_map(|b| {
+                                if let ContentBlock::ToolUse { id, .. } = b { Some(id.clone()) } else { None }
+                            }).collect();
+                            if next_tool_result_ids.iter().any(|id| assistant_tool_ids.contains(id)) {
+                                found_match = true;
+                                break;
+                            }
+                        }
+                    }
+                    found_match
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if case1 || case2 {
+                messages.remove(i);
+                continue;
+            }
+        }
+        i += 1;
     }
 }
 
