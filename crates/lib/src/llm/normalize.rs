@@ -17,12 +17,16 @@ use uuid::Uuid;
 /// any tool_use with that ID (out-of-order corruption).
 pub fn ensure_tool_result_pairing(messages: &mut Vec<Message>) {
 
-    // First pass: collect all tool_use IDs and count occurrences per ID.
+    // First pass: collect all tool_use IDs in order and count occurrences per ID.
     let mut tool_use_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut tool_use_order: Vec<String> = Vec::new();
     for msg in messages.iter() {
         if let Message::Assistant(a) = msg {
             for block in &a.content {
                 if let ContentBlock::ToolUse { id, .. } = block {
+                    if !tool_use_counts.contains_key(id) {
+                        tool_use_order.push(id.clone());
+                    }
                     *tool_use_counts.entry(id.clone()).or_insert(0) += 1;
                 }
             }
@@ -89,9 +93,11 @@ pub fn ensure_tool_result_pairing(messages: &mut Vec<Message>) {
     }
 
     // Any remaining unpaired tool_use_ids need synthetic error results.
-    let unpaired: Vec<String> = tool_use_counts
+    // Iterate in tool_use_order to preserve original insertion order.
+    let unpaired: Vec<String> = tool_use_order
         .into_iter()
-        .flat_map(|(id, count)| {
+        .flat_map(|id| {
+            let count = tool_use_counts.get(&id).copied().unwrap_or(0);
             let kept = kept_counts.get(&id).copied().unwrap_or(0);
             (0..count.saturating_sub(kept)).map(move |_| id.clone())
         })
