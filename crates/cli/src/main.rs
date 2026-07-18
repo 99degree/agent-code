@@ -30,8 +30,8 @@ fn estimate_model_cost(usage: &agent_code_lib::llm::message::Usage, model: &str)
 }
 
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 use std::io::Write;
+use tracing_subscriber::EnvFilter;
 
 use std::sync::Arc;
 
@@ -389,9 +389,7 @@ async fn async_main() -> anyhow::Result<()> {
             }
             "xai" | "grok" | "supergrok" => {
                 eprintln!("Starting SuperGrok / X Premium device sign-in…");
-                eprintln!(
-                    "(Works well on headless/SSH: open the printed URL on any browser.)"
-                );
+                eprintln!("(Works well on headless/SSH: open the printed URL on any browser.)");
                 let path = agent_code_lib::llm::xai_auth::device_code_login(true)
                     .await
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -528,9 +526,7 @@ async fn async_main() -> anyhow::Result<()> {
     // gate applies uniformly.
     if cli.no_sandbox {
         if config.security.disable_bypass_permissions {
-            tracing::warn!(
-                "--no-sandbox ignored: security.disable_bypass_permissions is set"
-            );
+            tracing::warn!("--no-sandbox ignored: security.disable_bypass_permissions is set");
             agent_code_lib::services::warnings::warn(
                 "--no-sandbox ignored: security.disable_bypass_permissions is set in config",
             );
@@ -616,7 +612,9 @@ async fn async_main() -> anyhow::Result<()> {
                         "--permissions-overlay {overlay_path} is not valid TOML: {e}"
                     ),
                 },
-                Err(e) => tracing::warn!("Failed to read --permissions-overlay {overlay_path}: {e}"),
+                Err(e) => {
+                    tracing::warn!("Failed to read --permissions-overlay {overlay_path}: {e}")
+                }
             }
         }
     }
@@ -1373,16 +1371,9 @@ async fn handle_schedule_run(
         fn on_tool_start(&self, name: &str, _: &serde_json::Value) {
             eprintln!("[{name}]");
         }
-        fn on_tool_result(
-            &self,
-            name: &str,
-            r: &agent_code_lib::tools::ToolResult,
-        ) {
+        fn on_tool_result(&self, name: &str, r: &agent_code_lib::tools::ToolResult) {
             if r.is_error {
-                eprintln!(
-                    "[{name} error: {}]",
-                    r.content.lines().next().unwrap_or("")
-                );
+                eprintln!("[{name} error: {}]", r.content.lines().next().unwrap_or(""));
             }
         }
         fn on_error(&self, e: &str) {

@@ -854,6 +854,7 @@ impl QueryEngine {
             crate::llm::normalize::remove_mid_conversation_system_messages(
                 &mut self.state.messages,
             );
+            crate::llm::normalize::split_mixed_tool_result_users(&mut self.state.messages);
             crate::llm::normalize::ensure_alternation_after_tool_result(&mut self.state.messages);
             crate::llm::normalize::remove_stray_synthetic_assistants(&mut self.state.messages);
             crate::llm::normalize::merge_consecutive_user_messages(&mut self.state.messages);
@@ -1057,7 +1058,12 @@ impl QueryEngine {
                             .iter()
                             .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null))
                             .collect();
-                        Some((request.model.clone(), msgs, request.system_prompt.clone(), request.max_tokens as u64))
+                        Some((
+                            request.model.clone(),
+                            msgs,
+                            request.system_prompt.clone(),
+                            request.max_tokens as u64,
+                        ))
                     } else {
                         None
                     };
@@ -1130,7 +1136,8 @@ impl QueryEngine {
                                 // Final failure for this attempt - dump the request we sent
                                 // before, so the caller can inspect what tripped the server.
                                 if let Some((model, msgs, sys, max_tokens)) = dump_snapshot {
-                                    let dir = crate::config::agent_config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                                    let dir = crate::config::agent_config_dir()
+                                        .unwrap_or_else(|| std::path::PathBuf::from("."));
                                     let _ = std::fs::create_dir_all(&dir);
                                     let dump = serde_json::json!({
                                         "model": model,
@@ -1140,7 +1147,10 @@ impl QueryEngine {
                                         "error": reason,
                                     });
                                     let path = dir.join("last_failed_request.json");
-                                    let _ = std::fs::write(&path, serde_json::to_string_pretty(&dump).unwrap_or_default());
+                                    let _ = std::fs::write(
+                                        &path,
+                                        serde_json::to_string_pretty(&dump).unwrap_or_default(),
+                                    );
                                     debug!("Dumped failed LLM request to {}", path.display());
                                 }
                                 // Unattended retry: in non-interactive mode, retry
@@ -1223,15 +1233,18 @@ impl QueryEngine {
                                     content: reason.clone(),
                                     level: MessageLevel::Error,
                                 }));
-                                self.state.push_message(Message::Assistant(AssistantMessage {
-                                    uuid: Uuid::new_v4(),
-                                    timestamp: chrono::Utc::now().to_rfc3339(),
-                                    content: vec![ContentBlock::Text { text: String::new() }],
-                                    model: None,
-                                    usage: None,
-                                    stop_reason: None,
-                                    request_id: None,
-                                }));
+                                self.state
+                                    .push_message(Message::Assistant(AssistantMessage {
+                                        uuid: Uuid::new_v4(),
+                                        timestamp: chrono::Utc::now().to_rfc3339(),
+                                        content: vec![ContentBlock::Text {
+                                            text: String::new(),
+                                        }],
+                                        model: None,
+                                        usage: None,
+                                        stop_reason: None,
+                                        request_id: None,
+                                    }));
 
                                 sink.on_error(&reason);
                                 self.state.is_query_active = false;
@@ -1864,6 +1877,33 @@ impl QueryEngine {
                     result.result.is_error,
                 );
                 self.state.push_message(msg);
+            }
+
+            // Cancel during tool execution: any tool_use that did not
+            // produce a result must still get a compensated tool_result,
+            // otherwise the next API call will fail on an orphaned
+            // tool_call. Push an explicit cancellation result for those
+            // ids instead of relying on the normalize-time band-aid
+            // (which cannot know the user cancelled).
+            if self.cancel.is_cancelled() {
+                let answered: std::collections::HashSet<String> =
+                    results.iter().map(|r| r.tool_use_id.clone()).collect();
+                for call in &tool_calls {
+                    if answered.contains(&call.id) {
+                        continue;
+                    }
+                    sink.on_tool_call_result(
+                        &call.id,
+                        &call.name,
+                        &crate::tools::ToolResult::error("(cancelled)".to_string()),
+                    );
+                    self.state
+                        .push_message(tool_result_message(&call.id, "(cancelled)", true));
+                }
+                sink.on_warning("Cancelled");
+                sink.on_turn_outcome(turn + 1, "cancelled");
+                self.state.is_query_active = false;
+                return Ok(());
             }
 
             // Continue the loop — the model will see the tool results.
