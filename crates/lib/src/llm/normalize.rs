@@ -10,40 +10,94 @@ use uuid::Uuid;
 
 /// Ensure every tool_use block has a matching tool_result in the
 /// subsequent user message. Orphaned tool_use blocks cause API errors.
+/// Ensure every tool_use block has a matching tool_result in the
+/// subsequent user message. Orphaned tool_use blocks cause API errors.
+/// Deduplicates tool_results for the same tool_use_id by preferring
+/// LATER occurrences. Also removes tool_results that appear before
+/// any tool_use with that ID (out-of-order corruption).
 pub fn ensure_tool_result_pairing(messages: &mut Vec<Message>) {
-    let mut pending_tool_ids: Vec<String> = Vec::new();
 
-    let mut i = 0;
-    while i < messages.len() {
-        match &messages[i] {
-            Message::Assistant(a) => {
-                // Collect tool_use IDs from this message.
-                for block in &a.content {
-                    if let ContentBlock::ToolUse { id, .. } = block {
-                        pending_tool_ids.push(id.clone());
-                    }
+    // First pass: collect all tool_use IDs and count occurrences per ID.
+    let mut tool_use_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for msg in messages.iter() {
+        if let Message::Assistant(a) = msg {
+            for block in &a.content {
+                if let ContentBlock::ToolUse { id, .. } = block {
+                    *tool_use_counts.entry(id.clone()).or_insert(0) += 1;
                 }
             }
-            Message::User(u) => {
-                // Remove tool_result IDs that are satisfied.
-                for block in &u.content {
-                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                        pending_tool_ids.retain(|id| id != tool_use_id);
-                    }
-                }
-            }
-            _ => {}
         }
-        i += 1;
     }
 
-    // Any remaining pending IDs need synthetic error results.
-    // Combine all into a single user message so that build_body extracts
-    // them as contiguous role:"tool" messages after the assistant that
-    // made the tool calls. Separate messages would risk being split by a
-    // dummy assistant, which the OpenAI API rejects.
-    if !pending_tool_ids.is_empty() {
-        let blocks: Vec<ContentBlock> = pending_tool_ids
+
+    // Second pass (forward): pair tool_results with PRECEDING tool_uses in order.
+    // Track how many tool_uses we've seen so far per ID.
+    let mut seen_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut to_remove_forward: Vec<(usize, usize)> = Vec::new();
+    for (msg_idx, msg) in messages.iter().enumerate() {
+        if let Message::Assistant(a) = msg {
+            for block in &a.content {
+                if let ContentBlock::ToolUse { id, .. } = block {
+                    *seen_counts.entry(id.clone()).or_insert(0) += 1;
+                }
+            }
+        } else if let Message::User(u) = msg {
+            for (content_idx, block) in u.content.iter().enumerate() {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                    let seen = seen_counts.get(tool_use_id).copied().unwrap_or(0);
+                    if seen == 0 {
+                        // Tool_result appears before any tool_use with this ID - mark for removal.
+                        to_remove_forward.push((msg_idx, content_idx));
+                    }
+                }
+            }
+        }
+    }
+    // Remove marked (from highest index to lowest).
+    to_remove_forward.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    for (msg_idx, content_idx) in to_remove_forward {
+        if let Message::User(u) = &mut messages[msg_idx] {
+            u.content.remove(content_idx);
+        }
+    }
+
+    // Third pass (backward): from the end, keep up to N tool_results per ID
+    // where N is the total tool_use count. This handles duplicate IDs.
+    let mut kept_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut to_remove_backward: Vec<(usize, usize)> = Vec::new();
+    for (msg_idx, msg) in messages.iter().enumerate().rev() {
+        if let Message::User(u) = msg {
+            for (content_idx, block) in u.content.iter().enumerate().rev() {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                    let max_allowed = tool_use_counts.get(tool_use_id).copied().unwrap_or(0);
+                    let already_kept = kept_counts.get(tool_use_id).copied().unwrap_or(0);
+                    if already_kept < max_allowed {
+                        *kept_counts.entry(tool_use_id.clone()).or_insert(0) += 1;
+                    } else {
+                        to_remove_backward.push((msg_idx, content_idx));
+                    }
+                }
+            }
+        }
+    }
+    // Remove marked (from highest index to lowest).
+    to_remove_backward.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    for (msg_idx, content_idx) in to_remove_backward {
+        if let Message::User(u) = &mut messages[msg_idx] {
+            u.content.remove(content_idx);
+        }
+    }
+
+    // Any remaining unpaired tool_use_ids need synthetic error results.
+    let unpaired: Vec<String> = tool_use_counts
+        .into_iter()
+        .flat_map(|(id, count)| {
+            let kept = kept_counts.get(&id).copied().unwrap_or(0);
+            (0..count.saturating_sub(kept)).map(move |_| id.clone())
+        })
+        .collect();
+    if !unpaired.is_empty() {
+        let blocks: Vec<ContentBlock> = unpaired
             .iter()
             .map(|id| ContentBlock::ToolResult {
                 tool_use_id: id.clone(),
@@ -59,34 +113,6 @@ pub fn ensure_tool_result_pairing(messages: &mut Vec<Message>) {
             is_meta: true,
             is_compact_summary: false,
         }));
-    }
-
-    // Remove tool_results that don't have matching tool_use IDs.
-    // This handles history corruption from compaction where tool_results
-    // exist without their corresponding tool_use.
-    let all_tool_use_ids: Vec<String> = messages
-        .iter()
-        .filter_map(|msg| match msg {
-            Message::Assistant(a) => Some(a.content.iter()),
-            _ => None,
-        })
-        .flatten()
-        .filter_map(|block| match block {
-            ContentBlock::ToolUse { id, .. } => Some(id.clone()),
-            _ => None,
-        })
-        .collect();
-
-    for msg in messages.iter_mut() {
-        if let Message::User(u) = msg {
-            u.content.retain(|block| {
-                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                    all_tool_use_ids.contains(tool_use_id)
-                } else {
-                    true
-                }
-            });
-        }
     }
 }
 
