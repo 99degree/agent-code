@@ -31,6 +31,7 @@ fn estimate_model_cost(usage: &agent_code_lib::llm::message::Usage, model: &str)
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
+use std::io::Write;
 
 use std::sync::Arc;
 
@@ -112,8 +113,7 @@ struct Cli {
     /// the file's permissions block *replaces* the effective permissions
     /// for this run (default mode + rules). Used by the parent process to
     /// hand a spawned subagent its own permission set without mutating
-    /// global config. Ignored when `security.disable_bypass_permissions`
-    /// is set.
+    /// global config. Ignored when `security.disable_bypass_permissions` is set.
     #[arg(long)]
     permissions_overlay: Option<String>,
 
@@ -298,19 +298,6 @@ fn parse_api_auth_mode(value: &str) -> anyhow::Result<ApiAuthMode> {
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    // Harden the process BEFORE the async runtime starts, while the process is
-    // still single-threaded: hardening mutates the environment (unsound once
-    // Tokio worker threads exist) and may re-exec into a clean environment to
-    // escape an injected library that the loader already mapped in.
-    harden::harden_process();
-
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async_main())
-}
-
 async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let cli_auth_mode = cli
@@ -344,9 +331,37 @@ async fn async_main() -> anyhow::Result<()> {
         anyhow::bail!("--output-format json requires --prompt (non-interactive mode)");
     }
 
+    // Load configuration (files + env + CLI overrides).
+    let mut config = Config::load()?;
+    if let Some(ref url) = cli.api_base_url {
+        config.api.base_url = url.clone();
+    }
+    if let Some(ref model) = cli.model {
+        config.api.model = model.clone();
+    }
+    if let Some(ref key) = cli.api_key {
+        config.api.api_key = Some(key.clone());
+    }
+    if let Some(auth_mode) = cli_auth_mode {
+        config.api.auth_mode = auth_mode;
+    }
+
     // Set working directory if specified.
     if let Some(ref cwd) = cli.cwd {
         std::env::set_current_dir(cwd)?;
+    }
+
+    // Set the terminal title to the current directory name.
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(dir_name) = cwd.file_name().and_then(|s| s.to_str()) {
+            eprint!("\x1b]0;👾: {}\x07", dir_name);
+        } else {
+            eprint!("\x1b]0;👾\x07");
+        }
+        let _ = std::io::stderr().flush();
+    } else {
+        eprint!("\x1b]0;👾\x07");
+        let _ = std::io::stderr().flush();
     }
 
     // `agent login` runs a browser OAuth flow to create a subscription session.
@@ -374,7 +389,9 @@ async fn async_main() -> anyhow::Result<()> {
             }
             "xai" | "grok" | "supergrok" => {
                 eprintln!("Starting SuperGrok / X Premium device sign-in…");
-                eprintln!("(Works well on headless/SSH: open the printed URL on any browser.)");
+                eprintln!(
+                    "(Works well on headless/SSH: open the printed URL on any browser.)"
+                );
                 let path = agent_code_lib::llm::xai_auth::device_code_login(true)
                     .await
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -388,7 +405,7 @@ async fn async_main() -> anyhow::Result<()> {
                 return Ok(());
             }
             other => {
-                anyhow::bail!("unknown login provider `{other}` (supported: codex, xai)")
+                anyhow::bail!("unknown login provider `{other}` (supported: codex, xai)");
             }
         }
     }
@@ -447,15 +464,29 @@ async fn async_main() -> anyhow::Result<()> {
         && cli_auth_mode != Some(ApiAuthMode::XaiOauth)
         && ui::setup::needs_setup()
     {
+        eprintln!("No API key found. Starting setup...\n");
         run_setup_wizard();
+        // Reload config and reapply CLI overrides
+        let mut new_config = Config::load()?;
+        if let Some(ref url) = cli.api_base_url {
+            new_config.api.base_url = url.clone();
+        }
+        if let Some(ref model) = cli.model {
+            new_config.api.model = model.clone();
+        }
+        if let Some(ref key) = cli.api_key {
+            new_config.api.api_key = Some(key.clone());
+        }
+        if let Some(auth_mode) = cli_auth_mode {
+            new_config.api.auth_mode = auth_mode;
+        }
+        config = new_config;
     }
 
-    // First-run onboarding (welcome banner + theme picker with live
-    // diff preview). Independent of the API-key wizard so users who
-    // already have keys configured still see the polished theme
-    // picker once on first launch. The sentinel ensures the picker
-    // only ever fires once unless the user explicitly invokes
-    // `/theme` later.
+    // First-run onboarding (welcome banner + theme picker with live diff preview).
+    // Independent of the API-key wizard so users who already have keys configured
+    // still see the polished theme picker once on first launch. The sentinel ensures
+    // the picker only ever fires once unless the user explicitly invokes `/theme` later.
     if cli.prompt.is_none()
         && !cli.dump_system_prompt
         && !cli.serve
@@ -464,6 +495,21 @@ async fn async_main() -> anyhow::Result<()> {
         && !ui::onboarding::already_onboarded()
     {
         ui::onboarding::run_first_run();
+        // Reload config and reapply CLI overrides
+        let mut new_config = Config::load()?;
+        if let Some(ref url) = cli.api_base_url {
+            new_config.api.base_url = url.clone();
+        }
+        if let Some(ref model) = cli.model {
+            new_config.api.model = model.clone();
+        }
+        if let Some(ref key) = cli.api_key {
+            new_config.api.api_key = Some(key.clone());
+        }
+        if let Some(auth_mode) = cli_auth_mode {
+            new_config.api.auth_mode = auth_mode;
+        }
+        config = new_config;
     }
 
     // Detect session environment.
@@ -478,26 +524,13 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Memory consolidation check is deferred until after provider setup.
 
-    // Load configuration (files + env + CLI overrides).
-    let mut config = Config::load()?;
-    if let Some(ref url) = cli.api_base_url {
-        config.api.base_url = url.clone();
-    }
-    if let Some(ref model) = cli.model {
-        config.api.model = model.clone();
-    }
-    if let Some(ref key) = cli.api_key {
-        config.api.api_key = Some(key.clone());
-    }
-    if let Some(auth_mode) = cli_auth_mode {
-        config.api.auth_mode = auth_mode;
-    }
-
     // Apply --no-sandbox before permission-mode handling so the bypass
     // gate applies uniformly.
     if cli.no_sandbox {
         if config.security.disable_bypass_permissions {
-            tracing::warn!("--no-sandbox ignored: security.disable_bypass_permissions is set");
+            tracing::warn!(
+                "--no-sandbox ignored: security.disable_bypass_permissions is set"
+            );
             agent_code_lib::services::warnings::warn(
                 "--no-sandbox ignored: security.disable_bypass_permissions is set in config",
             );
@@ -583,9 +616,7 @@ async fn async_main() -> anyhow::Result<()> {
                         "--permissions-overlay {overlay_path} is not valid TOML: {e}"
                     ),
                 },
-                Err(e) => {
-                    tracing::warn!("Failed to read --permissions-overlay {overlay_path}: {e}")
-                }
+                Err(e) => tracing::warn!("Failed to read --permissions-overlay {overlay_path}: {e}"),
             }
         }
     }
@@ -623,7 +654,21 @@ async fn async_main() -> anyhow::Result<()> {
     {
         eprintln!("No API key found. Starting setup...\n");
         run_setup_wizard();
-        config = Config::load()?;
+        // Reload config and reapply CLI overrides
+        let mut new_config = Config::load()?;
+        if let Some(ref url) = cli.api_base_url {
+            new_config.api.base_url = url.clone();
+        }
+        if let Some(ref model) = cli.model {
+            new_config.api.model = model.clone();
+        }
+        if let Some(ref key) = cli.api_key {
+            new_config.api.api_key = Some(key.clone());
+        }
+        if let Some(auth_mode) = cli_auth_mode {
+            new_config.api.auth_mode = auth_mode;
+        }
+        config = new_config;
     }
 
     // CLI --api-key overrides everything.
@@ -1328,9 +1373,16 @@ async fn handle_schedule_run(
         fn on_tool_start(&self, name: &str, _: &serde_json::Value) {
             eprintln!("[{name}]");
         }
-        fn on_tool_result(&self, name: &str, r: &agent_code_lib::tools::ToolResult) {
+        fn on_tool_result(
+            &self,
+            name: &str,
+            r: &agent_code_lib::tools::ToolResult,
+        ) {
             if r.is_error {
-                eprintln!("[{name} error: {}]", r.content.lines().next().unwrap_or(""));
+                eprintln!(
+                    "[{name} error: {}]",
+                    r.content.lines().next().unwrap_or("")
+                );
             }
         }
         fn on_error(&self, e: &str) {
@@ -1367,4 +1419,17 @@ async fn handle_schedule_run(
         outcome.session_id // codeql[cleartext-logging]: non-secret session ID for /resume
     );
     Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    // Harden the process BEFORE the async runtime starts, while the process is
+    // still single-threaded: hardening mutates the environment (unsound once
+    // Tokio worker threads exist) and may re-exec into a clean environment to
+    // escape an injected library that the loader already mapped in.
+    harden::harden_process();
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
 }
