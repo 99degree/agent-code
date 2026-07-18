@@ -220,11 +220,22 @@ pub fn remove_mid_conversation_system_messages(messages: &mut Vec<Message>) {
         .position(|m| !matches!(m, Message::System(_)));
     if let Some(start) = first_content {
         let prefix: Vec<Message> = messages.drain(..start).collect();
+        let before = messages.len();
         messages.retain(|m| !matches!(m, Message::System(_)));
+        let mid_systems_removed = before - messages.len();
         // Re-insert the prefix (system messages before first user/assistant).
-        let old_len = messages.len();
-        messages.extend(prefix);
-        messages.rotate_right(old_len);
+        if mid_systems_removed == 0 {
+            // No mid-conversation systems were removed — just prepend the
+            // leading systems back without rotation.  The old rotate-right
+            // path is only correct when retain actually shrunk the vec.
+            let mut restored = prefix;
+            restored.append(messages);
+            *messages = restored;
+        } else {
+            let old_len = messages.len();
+            messages.extend(prefix);
+            messages.rotate_right(old_len);
+        }
     }
 }
 
