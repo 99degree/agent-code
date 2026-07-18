@@ -141,6 +141,130 @@ pub fn strip_empty_blocks(messages: &mut [Message]) {
             _ => {}
         }
     }
+
+    #[test]
+    fn test_clean_tool_use_input_null_input() {
+        // Regression test: tool_use with null input should be cleaned to empty object.
+        let mut messages = vec![
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "Write".into(),
+                    input: serde_json::Value::Null,
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+
+        clean_tool_use_input(&mut messages);
+
+        // The tool_use input should now be an empty object, not null
+        if let Message::Assistant(a) = &messages[0] {
+            for block in &a.content {
+                if let ContentBlock::ToolUse { input, .. } = block {
+                    assert!(!input.is_null(), "tool_use input should not be null");
+                    assert!(input.is_object(), "tool_use input should be an object");
+                    assert_eq!(*input, serde_json::json!({}));
+                    // Note: deref input before comparing
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_clean_tool_use_input_non_object_input() {
+        // Regression test: tool_use with non-object input (string, number, bool) should be cleaned.
+        let mut messages = vec![
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_2".into(),
+                    name: "Bash".into(),
+                    input: serde_json::Value::String("not an object".into()),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+
+        clean_tool_use_input(&mut messages);
+
+        // The tool_use input should now be an empty object
+        if let Message::Assistant(a) = &messages[0] {
+            for block in &a.content {
+                if let ContentBlock::ToolUse { input, .. } = block {
+                    assert!(input.is_object(), "tool_use input should be an object");
+                    assert_eq!(*input, serde_json::json!({}));
+                    // Note: deref input before comparing
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_clean_tool_use_input_empty_object_preserved() {
+        // Empty object input should be preserved (not double-cleaned)
+        let mut messages = vec![
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_3".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({}),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+
+        clean_tool_use_input(&mut messages);
+
+        // The tool_use input should remain an empty object
+        if let Message::Assistant(a) = &messages[0] {
+            for block in &a.content {
+                if let ContentBlock::ToolUse { input, .. } = block {
+                    assert!(input.is_object(), "tool_use input should be an object");
+                    assert_eq!(*input, serde_json::json!({}));
+                    // Note: deref input before comparing
+                }
+            }
+        }
+    }
+}
+
+/// Replace null/missing tool_use input with empty object.
+/// Some providers reject tool calls with null input or non-object input.
+pub fn clean_tool_use_input(messages: &mut [Message]) {
+    for msg in messages.iter_mut() {
+        if let Message::Assistant(a) = msg {
+            for block in a.content.iter_mut() {
+                if let ContentBlock::ToolUse { input, .. } = block {
+                    if input.is_null() {
+                        *input = serde_json::json!({});
+                    } else if !input.is_object() {
+                        // Non-object input (string, number, bool, array) is invalid for function calling
+                        *input = serde_json::json!({});
+                    } else if let Some(obj) = input.as_object_mut() {
+                        // Ensure input is an object, not a primitive
+                        if obj.is_empty() {
+                            *input = serde_json::json!({});
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Validate that the message sequence alternates correctly
@@ -644,6 +768,9 @@ pub fn normalize_all(messages: &mut Vec<Message>) -> NormalizeReport {
     strip_empty_blocks(messages);
     report.empty_blocks_removed = before.saturating_sub(count_text_blocks(messages));
 
+    // 2.5. Clean tool_use blocks with null input.
+    clean_tool_use_input(messages);
+
     // 3. Remove empty messages.
     let before = messages.len();
     remove_empty_messages(messages);
@@ -766,6 +893,147 @@ fn count_document_blocks(messages: &[Message]) -> usize {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn test_clean_tool_use_input_null_input() {
+        // Regression test: tool_use with null input should be cleaned to empty object.
+        let mut messages = vec![
+            Message::System(SystemMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                subtype: SystemMessageType::Informational,
+                content: String::new(),
+                level: MessageLevel::Info,
+            }),
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::Text { text: "do it".into() }],
+                is_meta: false,
+                is_compact_summary: false,
+            }),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "Write".into(),
+                    input: serde_json::Value::Null,
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+
+        clean_tool_use_input(&mut messages);
+
+        // The tool_use input should now be an empty object, not null
+        if let Message::Assistant(a) = &messages[2] {
+            for block in &a.content {
+                if let ContentBlock::ToolUse { input, .. } = block {
+                    assert!(!input.is_null(), "tool_use input should not be null");
+                    assert!(input.is_object(), "tool_use input should be an object");
+                    assert_eq!(*input, serde_json::json!({}));
+                    // Note: deref input before comparing
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_clean_tool_use_input_non_object_input() {
+        // Regression test: tool_use with non-object input (string, number, bool) should be cleaned.
+        let mut messages = vec![
+            Message::System(SystemMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                subtype: SystemMessageType::Informational,
+                content: String::new(),
+                level: MessageLevel::Info,
+            }),
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::Text { text: "do it".into() }],
+                is_meta: false,
+                is_compact_summary: false,
+            }),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_2".into(),
+                    name: "Bash".into(),
+                    input: serde_json::Value::String("not an object".into()),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+
+        clean_tool_use_input(&mut messages);
+
+        // The tool_use input should now be an empty object
+        if let Message::Assistant(a) = &messages[2] {
+            for block in &a.content {
+                if let ContentBlock::ToolUse { input, .. } = block {
+                    assert!(input.is_object(), "tool_use input should be an object");
+                    assert_eq!(*input, serde_json::json!({}));
+                    // Note: deref input before comparing
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_clean_tool_use_input_empty_object_preserved() {
+        // Empty object input should be preserved (not double-cleaned)
+        let mut messages = vec![
+            Message::System(SystemMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                subtype: SystemMessageType::Informational,
+                content: String::new(),
+                level: MessageLevel::Info,
+            }),
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::Text { text: "do it".into() }],
+                is_meta: false,
+                is_compact_summary: false,
+            }),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_3".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({}),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+
+        clean_tool_use_input(&mut messages);
+
+        // The tool_use input should remain an empty object
+        if let Message::Assistant(a) = &messages[2] {
+            for block in &a.content {
+                if let ContentBlock::ToolUse { input, .. } = block {
+                    assert!(input.is_object(), "tool_use input should be an object");
+                    assert_eq!(*input, serde_json::json!({}));
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_tool_result_pairing() {
@@ -1585,4 +1853,5 @@ mod tests {
             _ => panic!("expected combined tool-result user message"),
         }
     }
+
 }

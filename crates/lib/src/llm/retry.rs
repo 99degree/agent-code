@@ -162,8 +162,9 @@ pub enum RetryAction {
 fn calculate_backoff(attempt: u32, initial: Duration, max: Duration, multiplier: f64) -> Duration {
     let base = initial.as_millis() as f64 * multiplier.powi(attempt as i32 - 1);
     let capped = base.min(max.as_millis() as f64);
-    // Add 10% jitter.
-    let jitter = capped * 0.1 * rand_f64();
+    // Scale jitter as 10% on retry 1, 20% on retry 2, 40% on retry 3+.
+    let jitter_fraction = 0.1 * 2f64.powi(attempt as i32 - 1);
+    let jitter = capped * jitter_fraction * rand_f64();
     Duration::from_millis((capped + jitter) as u64)
 }
 

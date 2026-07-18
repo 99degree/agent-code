@@ -848,6 +848,7 @@ impl QueryEngine {
             // Normalize messages for API compatibility.
             crate::llm::normalize::ensure_tool_result_pairing(&mut self.state.messages);
             crate::llm::normalize::strip_empty_blocks(&mut self.state.messages);
+            crate::llm::normalize::clean_tool_use_input(&mut self.state.messages);
             crate::llm::normalize::remove_empty_messages(&mut self.state.messages);
             crate::llm::normalize::cap_document_blocks(&mut self.state.messages, 500_000);
             crate::llm::normalize::remove_mid_conversation_system_messages(
