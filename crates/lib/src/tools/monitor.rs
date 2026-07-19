@@ -75,11 +75,12 @@ impl Tool for MonitorTool {
             .map(|n| (n as usize).min(TAIL_CAP_BYTES))
             .unwrap_or(TAIL_CAP_BYTES);
 
-        let task_manager = ctx.task_manager.as_ref().ok_or_else(|| {
-            ToolError::ExecutionFailed(
-                "Monitor tool requires a task manager in context (not wired up)".into(),
-            )
-        })?;
+        let Some(task_manager) = ctx.task_manager.as_ref() else {
+            return Ok(ToolResult::success(format!(
+                "Task manager not available. Cannot monitor task '{id}' — \
+                 task tracking may not be wired up in this context."
+            )));
+        };
 
         let info = task_manager.get_status(id).await.ok_or_else(|| {
             ToolError::NotFound(format!("Task '{id}' not found — was it actually spawned?"))
@@ -232,15 +233,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn monitor_errors_without_task_manager() {
+    async fn monitor_gracefully_handles_missing_task_manager() {
         let ctx = ToolContext::minimal(PathBuf::from("."), CancellationToken::new());
-        let err = MonitorTool
+        let result = MonitorTool
             .call(serde_json::json!({"id": "abc"}), &ctx)
             .await
-            .expect_err("should fail without task manager");
+            .expect("should not error without task manager");
         assert!(
-            err.to_string().contains("task manager"),
-            "expected task-manager error, got: {err}"
+            !result.is_error,
+            "expected success with info message, got error: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("Task manager not available"),
+            "expected helpful message, got: {}",
+            result.content
         );
     }
 }
