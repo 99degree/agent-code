@@ -29,6 +29,7 @@ use crate::config::{Config, PermissionMode, PermissionsConfig};
 use crate::error::ToolError;
 use crate::llm::message::{ContentBlock, Message};
 use crate::llm::provider::create_provider_from_config;
+use crate::llm::provider::detect_provider;
 use crate::output_styles::AgentKind;
 use crate::permissions::PermissionChecker;
 use crate::query::{NullSink, QueryEngine, QueryEngineConfig};
@@ -207,6 +208,7 @@ impl Tool for AgentTool {
         } else {
             ctx.cwd.clone()
         };
+        let config = Config::load().unwrap_or_default();
 
         // Background mode: register a tracked task, spawn the subagent
         // subprocess detached, and return immediately. The subagent's
@@ -267,6 +269,7 @@ impl Tool for AgentTool {
                     "Agent ({description}, type={subagent_type}) started in the background as task {id} (in-process). \n                 Its result surfaces automatically when it completes — do not wait on it."
                 )));
             }
+            let config = Config::load().unwrap_or_default();
             let id = spawn_background_agent(
                 prompt,
                 description,
@@ -278,6 +281,7 @@ impl Tool for AgentTool {
                 ctx.agent_limiter.clone(),
                 Some(&definition),
                 model_override,
+                &config,
             )
             .await;
             return Ok(ToolResult::success(format!(
@@ -324,6 +328,7 @@ impl Tool for AgentTool {
             ctx.active_disk_output_style.as_deref(),
             Some(&definition),
             model_override,
+            &config,
         );
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -415,8 +420,31 @@ async fn run_subagent_in_process(
     model_override: Option<&str>,
 ) -> Result<String, ToolError> {
     let mut config = Config::load().unwrap_or_default();
-    if let Some(model) = model_override {
-        config.api.model = model.to_string();
+
+    // Resolve subagent model: explicit override > definition.model > config.subagent_model > main model
+    let subagent_model = model_override
+        .or(definition.model.as_deref())
+        .or(config.api.subagent_model.as_deref())
+        .map(|s| s.to_string());
+
+    if let Some(ref model) = subagent_model {
+        config.api.model = model.clone();
+    }
+
+    // Resolve subagent base_url: explicit config > auto-detect from model
+    if let Some(ref base_url) = config.api.subagent_base_url {
+        config.api.base_url = base_url.clone();
+    } else if subagent_model.is_some() {
+        // Auto-detect base URL from the model name
+        config.api.base_url = detect_provider(&config.api.model, "")
+            .default_base_url()
+            .unwrap_or("&")
+            .to_string();
+    }
+
+    // Resolve subagent auth_mode: explicit config > inherit parent
+    if let Some(ref auth_mode) = config.api.subagent_auth_mode {
+        config.api.auth_mode = *auth_mode;
     }
 
     let llm = create_provider_from_config(&config.api.model, &config.api.base_url, &config);
@@ -485,6 +513,7 @@ const SUBAGENT_ENV_PASSTHROUGH: &[&str] = &[
     "GROQ_API_KEY",
     "MISTRAL_API_KEY",
     "TOGETHER_API_KEY",
+    "NOVITA_API_KEY",
     "AGENT_CODE_API_BASE_URL",
     "AGENT_CODE_MODEL",
 ];
@@ -500,6 +529,7 @@ const SUBAGENT_ENV_PASSTHROUGH: &[&str] = &[
 /// the background path hands the command to
 /// [`crate::services::background::TaskManager::spawn_command`], which
 /// pipes stdio and isolates the process group.
+#[allow(clippy::too_many_arguments)]
 pub fn build_subagent_command(
     prompt: &str,
     cwd: &std::path::Path,
@@ -508,6 +538,7 @@ pub fn build_subagent_command(
     disk_output_style: Option<&str>,
     definition: Option<&AgentDefinition>,
     model_override: Option<&str>,
+    config: &Config,
 ) -> tokio::process::Command {
     let full_prompt = match definition {
         Some(def) => compose_agent_prompt(def, prompt),
@@ -522,10 +553,24 @@ pub fn build_subagent_command(
     cmd.arg("--prompt").arg(full_prompt).current_dir(cwd);
 
     if let Some(def) = definition {
-        apply_agent_definition(&mut cmd, def, model_override);
+        apply_agent_definition(&mut cmd, def, model_override, config);
     } else if let Some(model) = model_override {
         cmd.arg("--model")
             .arg(crate::services::coordinator::resolve_model_alias(model));
+    } else if let Some(ref model) = config.api.subagent_model {
+        // No definition, no explicit override — use config default
+        cmd.arg("--model")
+            .arg(crate::services::coordinator::resolve_model_alias(model));
+        if let Some(ref base_url) = config.api.subagent_base_url {
+            cmd.arg("--api-base-url").arg(base_url);
+        }
+        if let Some(ref auth_mode) = config.api.subagent_auth_mode {
+            cmd.arg("--auth-mode").arg(match auth_mode {
+                crate::config::ApiAuthMode::ApiKey => "api_key",
+                crate::config::ApiAuthMode::CodexChatgpt => "codex_chatgpt",
+                crate::config::ApiAuthMode::XaiOauth => "xai_oauth",
+            });
+        }
     }
 
     for var in SUBAGENT_ENV_PASSTHROUGH {
@@ -570,6 +615,7 @@ pub async fn spawn_background_agent(
     limiter: Option<std::sync::Arc<crate::services::agent_control::AgentExecutionLimiter>>,
     definition: Option<&AgentDefinition>,
     model_override: Option<&str>,
+    config: &Config,
 ) -> crate::services::background::TaskId {
     use crate::services::background::{TaskKind, TaskPayload};
 
@@ -581,6 +627,7 @@ pub async fn spawn_background_agent(
         disk_output_style,
         definition,
         model_override,
+        config,
     );
     let payload = TaskPayload::LocalAgent {
         subagent_kind: Some(
@@ -624,6 +671,7 @@ pub async fn spawn_background_workflow(
     color: Option<SubagentColor>,
     disk_output_style: Option<&str>,
     limiter: Option<std::sync::Arc<crate::services::agent_control::AgentExecutionLimiter>>,
+    config: &Config,
 ) -> crate::services::background::TaskId {
     use crate::services::background::{TaskKind, TaskPayload};
 
@@ -635,6 +683,7 @@ pub async fn spawn_background_workflow(
         disk_output_style,
         None,
         None,
+        config,
     );
     let payload = TaskPayload::LocalWorkflow {
         workflow: workflow.to_string(),
@@ -720,6 +769,7 @@ mod tests {
             None,
             None,
             None,
+            &Config::default(),
         );
         let std_cmd = cmd.as_std();
 
@@ -763,6 +813,7 @@ mod tests {
             Some("concise"),
             None,
             None,
+            &Config::default(),
         );
         let envs: HashMap<String, String> = cmd
             .as_std()
@@ -792,6 +843,7 @@ mod tests {
             None,
             Some(def),
             Some("grok-4"),
+            &Config::default(),
         );
         let std_cmd = cmd.as_std();
         let args: Vec<String> = std_cmd
@@ -857,6 +909,7 @@ mod tests {
             None,
             None,
             Some("gpt-5.4"),
+            &Config::default(),
         );
         let args: Vec<String> = cmd
             .as_std()
@@ -887,6 +940,7 @@ mod tests {
             None,
             None,
             None,
+            &Config::default(),
         )
         .await;
 

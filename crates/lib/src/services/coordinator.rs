@@ -13,7 +13,7 @@
 //! Agents are defined as configurations that customize the tool
 //! set, system prompt, and permission mode.
 
-use crate::config::{PermissionMode, PermissionRule, PermissionsConfig};
+use crate::config::{Config, PermissionMode, PermissionRule, PermissionsConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -594,6 +594,8 @@ pub struct Coordinator {
     teams: Arc<Mutex<HashMap<String, Team>>>,
     /// Working directory.
     cwd: PathBuf,
+    /// Config for subagent defaults (subagent_model, subagent_base_url, etc.)
+    config: Arc<Config>,
 }
 
 /// Apply agent-definition flags (model, turns, read-only, permissions)
@@ -601,13 +603,33 @@ pub struct Coordinator {
 ///
 /// Used by both the coordinator and the Agent tool so typed subagents
 /// share one code path for overlays and include/exclude tool lists.
+/// Also applies subagent config defaults (subagent_model, subagent_base_url, subagent_auth_mode)
+/// when no explicit override or definition.model is provided.
 pub fn apply_agent_definition(
     cmd: &mut tokio::process::Command,
     definition: &AgentDefinition,
     model_override: Option<&str>,
+    config: &crate::config::Config,
 ) {
-    if let Some(model) = model_override.or(definition.model.as_deref()) {
+    // Priority: model_override > definition.model > config.api.subagent_model
+    if let Some(model) = model_override
+        .or(definition.model.as_deref())
+        .or(config.api.subagent_model.as_deref())
+    {
         cmd.arg("--model").arg(resolve_model_alias(model));
+    }
+    // Pass subagent_base_url if configured and no explicit model override from tool/definition
+    if model_override.is_none() && definition.model.is_none() {
+        if let Some(ref base_url) = config.api.subagent_base_url {
+            cmd.arg("--api-base-url").arg(base_url);
+        }
+        if let Some(ref auth_mode) = config.api.subagent_auth_mode {
+            cmd.arg("--auth-mode").arg(match auth_mode {
+                crate::config::ApiAuthMode::ApiKey => "api_key",
+                crate::config::ApiAuthMode::CodexChatgpt => "codex_chatgpt",
+                crate::config::ApiAuthMode::XaiOauth => "xai_oauth",
+            });
+        }
     }
     if let Some(max_turns) = definition.max_turns {
         cmd.arg("--max-turns").arg(max_turns.to_string());
@@ -659,6 +681,7 @@ fn build_agent_command(
     definition: &AgentDefinition,
     prompt: &str,
     cwd: &std::path::Path,
+    config: &Config,
 ) -> tokio::process::Command {
     let full_prompt = compose_agent_prompt(definition, prompt);
 
@@ -673,7 +696,7 @@ fn build_agent_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    apply_agent_definition(&mut cmd, definition, None);
+    apply_agent_definition(&mut cmd, definition, None, config);
 
     // Pass through API keys so subagents use the same provider.
     for var in &[
@@ -700,7 +723,7 @@ fn build_agent_command(
 
 impl Coordinator {
     /// Create a new coordinator.
-    pub fn new(cwd: PathBuf) -> Self {
+    pub fn new(cwd: PathBuf, config: Arc<Config>) -> Self {
         let mut registry = AgentRegistry::with_defaults();
         registry.load_from_disk(Some(&cwd));
 
@@ -709,6 +732,7 @@ impl Coordinator {
             instances: Arc::new(Mutex::new(HashMap::new())),
             teams: Arc::new(Mutex::new(HashMap::new())),
             cwd,
+            config,
         }
     }
 
@@ -767,7 +791,7 @@ impl Coordinator {
 
         debug!("Running agent '{agent_name}' ({agent_id})");
 
-        let mut cmd = build_agent_command(&definition, prompt, &self.cwd);
+        let mut cmd = build_agent_command(&definition, prompt, &self.cwd, &self.config);
         let output = cmd
             .output()
             .await
@@ -821,6 +845,7 @@ impl Coordinator {
 
             let coordinator_instances = Arc::clone(&self.instances);
             let cwd = self.cwd.clone();
+            let config = Arc::clone(&self.config);
             let prompt = prompt.to_string();
             let agent_id_clone = agent_id.clone();
 
@@ -858,7 +883,7 @@ impl Coordinator {
                     }
                 }
 
-                let mut cmd = build_agent_command(&definition, &prompt, &cwd);
+                let mut cmd = build_agent_command(&definition, &prompt, &cwd, &config);
 
                 match cmd.output().await {
                     Ok(output) => {
@@ -995,6 +1020,7 @@ impl Coordinator {
 #[cfg(test)]
 mod coordinator_tests {
     use super::*;
+    use crate::config::Config;
 
     #[test]
     fn test_agent_status_eq() {
@@ -1006,7 +1032,7 @@ mod coordinator_tests {
 
     #[tokio::test]
     async fn test_spawn_agent() {
-        let coord = Coordinator::new(std::env::temp_dir());
+        let coord = Coordinator::new(std::env::temp_dir(), Arc::new(Config::default()));
         let id = coord
             .spawn_agent("general-purpose", Some("test-agent".into()))
             .await;
@@ -1020,14 +1046,14 @@ mod coordinator_tests {
 
     #[tokio::test]
     async fn test_spawn_unknown_type() {
-        let coord = Coordinator::new(std::env::temp_dir());
+        let coord = Coordinator::new(std::env::temp_dir(), Arc::new(Config::default()));
         let result = coord.spawn_agent("nonexistent", None).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_send_message() {
-        let coord = Coordinator::new(std::env::temp_dir());
+        let coord = Coordinator::new(std::env::temp_dir(), Arc::new(Config::default()));
         let id = coord
             .spawn_agent("general-purpose", Some("receiver".into()))
             .await
@@ -1043,7 +1069,7 @@ mod coordinator_tests {
 
     #[tokio::test]
     async fn test_send_message_by_name() {
-        let coord = Coordinator::new(std::env::temp_dir());
+        let coord = Coordinator::new(std::env::temp_dir(), Arc::new(Config::default()));
         coord
             .spawn_agent("explore", Some("explorer".into()))
             .await
@@ -1055,7 +1081,7 @@ mod coordinator_tests {
 
     #[tokio::test]
     async fn test_create_team() {
-        let coord = Coordinator::new(std::env::temp_dir());
+        let coord = Coordinator::new(std::env::temp_dir(), Arc::new(Config::default()));
         let team_id = coord
             .create_team("my-team", &["general-purpose", "explore"])
             .await;

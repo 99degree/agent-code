@@ -252,6 +252,19 @@ pub struct ApiConfig {
     /// remainder of the session. Defaults to None — falls back to a
     /// provider-aware sensible default when toggled.
     pub fast_model: Option<String>,
+    /// Optional default model for sub-agents (Agent tool). When set,
+    /// sub-agents use this model instead of the main agent's model,
+    /// unless overridden by the Agent tool's `model` parameter or an
+    /// AgentDefinition's `model`.
+    #[serde(default)]
+    pub subagent_model: Option<String>,
+    /// Optional base URL for sub-agent provider. If unset, auto-detected from
+    /// `subagent_model` (same logic as main agent).
+    #[serde(default)]
+    pub subagent_base_url: Option<String>,
+    /// Optional auth mode for sub-agents. Defaults to main agent's auth_mode.
+    #[serde(default)]
+    pub subagent_auth_mode: Option<ApiAuthMode>,
     /// API key. Resolved from (in order): config, AGENT_CODE_API_KEY,
     /// ANTHROPIC_API_KEY, OPENAI_API_KEY env vars.
     #[serde(skip_serializing)]
@@ -387,6 +400,9 @@ impl Default for ApiConfig {
             model: "gpt-5.4".to_string(),
             auth_mode: ApiAuthMode::ApiKey,
             fast_model: None,
+            subagent_model: None,
+            subagent_base_url: None,
+            subagent_auth_mode: None,
             api_key,
             api_key_helper: None,
             provider_keys: std::collections::HashMap::new(),

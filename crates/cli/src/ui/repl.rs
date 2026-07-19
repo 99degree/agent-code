@@ -1516,6 +1516,7 @@ pub async fn run_repl(engine: &mut QueryEngine) -> anyhow::Result<()> {
                         let agent_limiter = engine.state().agent_limiter.clone();
                         let cwd = engine.state().cwd.clone();
                         let subagent_id = uuid::Uuid::new_v4().to_string();
+                        let config = engine.state().config.clone();
 
                         // `&/skill args` runs a named skill/workflow as a
                         // background task; `& <prompt>` runs a free-form
@@ -1556,6 +1557,7 @@ pub async fn run_repl(engine: &mut QueryEngine) -> anyhow::Result<()> {
                                             None,
                                             None,
                                             Some(agent_limiter),
+                                            &config,
                                         )
                                         .await;
                                     eprintln!(
@@ -1586,6 +1588,7 @@ pub async fn run_repl(engine: &mut QueryEngine) -> anyhow::Result<()> {
                                 Some(agent_limiter),
                                 None,
                                 None,
+                                &config,
                             )
                             .await;
                             eprintln!(
