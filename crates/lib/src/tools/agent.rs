@@ -269,7 +269,6 @@ impl Tool for AgentTool {
                     "Agent ({description}, type={subagent_type}) started in the background as task {id} (in-process). \n                 Its result surfaces automatically when it completes — do not wait on it."
                 )));
             }
-            let config = Config::load().unwrap_or_default();
             let id = spawn_background_agent(
                 prompt,
                 description,
@@ -514,6 +513,7 @@ const SUBAGENT_ENV_PASSTHROUGH: &[&str] = &[
     "MISTRAL_API_KEY",
     "TOGETHER_API_KEY",
     "NOVITA_API_KEY",
+    "AZURE_OPENAI_API_KEY",
     "AGENT_CODE_API_BASE_URL",
     "AGENT_CODE_MODEL",
 ];
