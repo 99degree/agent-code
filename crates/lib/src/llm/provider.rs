@@ -325,6 +325,10 @@ pub fn create_provider_from_config(
         ProviderKind::AzureOpenAi => std::sync::Arc::new(
             crate::llm::azure_openai::AzureOpenAiProvider::new(base_url, &resolved_key),
         ),
+        ProviderKind::Novita => std::sync::Arc::new(crate::llm::novita::NovitaProvider::new(
+            base_url,
+            &resolved_key,
+        )),
         _ => match kind.wire_format() {
             WireFormat::Anthropic => std::sync::Arc::new(
                 crate::llm::anthropic::AnthropicProvider::new(base_url, &resolved_key),
@@ -401,6 +405,9 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     }
     if url_lower.contains("nvidia") || url_lower.contains("nvidianim") {
         return ProviderKind::Nvidia;
+    }
+    if url_lower.contains("novita.ai") {
+        return ProviderKind::Novita;
     }
     if url_lower.contains("localhost") || url_lower.contains("127.0.0.1") {
         return ProviderKind::OpenAiCompatible;
@@ -589,6 +596,7 @@ Self::Nvidia,
             | Self::Cohere
             | Self::Perplexity
             | Self::Nvidia
+            | Self::Novita
             | Self::OpenAiCompatible
             | Self::AgentCode
             | Self::Kilo => WireFormat::OpenAiCompatible,
@@ -605,6 +613,7 @@ Self::Nvidia,
             Self::DeepSeek => "deepseek",
             Self::Mistral => "mistral",
             Self::Nvidia => "nvidia",
+            Self::Novita => "novita",
             Self::OpenRouter => "openrouter",
             Self::OpenCode => "opencode",
             Self::OpenCodeGo => "opencode-go",
@@ -647,6 +656,7 @@ Self::Nvidia,
             | Self::AzureOpenAi
             | Self::OpenAiCompatible
             | Self::AgentCode => None,
+            Self::Novita => Some("https://api.novita.ai/openai/v1"),
         }
     }
 
@@ -669,6 +679,7 @@ Self::Nvidia,
             Self::Cohere => "COHERE_API_KEY",
             Self::Perplexity => "PERPLEXITY_API_KEY",
             Self::Nvidia => "NVIDIA_API_KEY",
+            Self::Novita => "NOVITA_API_KEY",
             Self::OpenAiCompatible => "OPENAI_API_KEY",
             Self::AgentCode => "AGENT_CODE_API_KEY",
             Self::Kilo => "KILO_API_KEY",
@@ -826,6 +837,14 @@ mod tests {
         assert!(matches!(
             detect_provider("any", "https://ai.api.nvidia.com/v1"),
             ProviderKind::Nvidia
+        ));
+    }
+
+    #[test]
+    fn test_detect_from_url_novita() {
+        assert!(matches!(
+            detect_provider("any", "https://api.novita.ai/openai/v1"),
+            ProviderKind::Novita
         ));
     }
 
@@ -1008,6 +1027,7 @@ mod tests {
             "PERPLEXITY_API_KEY"
         );
         assert_eq!(ProviderKind::Nvidia.env_var_name(), "NVIDIA_API_KEY");
+        assert_eq!(ProviderKind::Novita.env_var_name(), "NOVITA_API_KEY");
         assert_eq!(
             ProviderKind::OpenAiCompatible.env_var_name(),
             "OPENAI_API_KEY"

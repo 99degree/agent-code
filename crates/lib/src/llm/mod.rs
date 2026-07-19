@@ -16,6 +16,7 @@ pub mod codex_auth;
 pub mod message;
 pub mod models_config;
 pub mod normalize;
+pub mod novita;
 pub mod openai;
 pub mod provider;
 pub mod retry;
