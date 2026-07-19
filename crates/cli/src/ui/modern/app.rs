@@ -26,6 +26,16 @@ pub enum PendingModelAction {
     Set(String),
 }
 
+/// Local `/subagent` action deferred to the run loop (needs the engine lock).
+/// Allows switching the default sub-agent model at runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingSubagentAction {
+    /// Show current sub-agent model in the transcript.
+    Show,
+    /// Set `config.api.subagent_model` to this id.
+    Set(String),
+}
+
 /// Local `/session` / `/resume` action deferred to the run loop (needs the
 /// engine lock to restore state).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +64,27 @@ pub(crate) fn parse_model_slash(input: &str) -> Option<PendingModelAction> {
     match args {
         None | Some("") => Some(PendingModelAction::Show),
         Some(name) => Some(PendingModelAction::Set(name.to_string())),
+    }
+}
+
+/// Parse `/subagent` / `/subagent <model>` from a slash line. Returns `None`
+/// if the input is not a subagent command.
+pub(crate) fn parse_subagent_slash(input: &str) -> Option<PendingSubagentAction> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let rest = trimmed.trim_start_matches('/');
+    let (cmd, args) = match rest.split_once(char::is_whitespace) {
+        Some((c, a)) => (c, Some(a.trim())),
+        None => (rest, None),
+    };
+    if !cmd.eq_ignore_ascii_case("subagent") {
+        return None;
+    }
+    match args {
+        None | Some("") => Some(PendingSubagentAction::Show),
+        Some(name) => Some(PendingSubagentAction::Set(name.to_string())),
     }
 }
 
@@ -366,6 +397,8 @@ pub struct App {
     pub pending_submit: Option<String>,
     /// `/model` action waiting for the run loop (needs the engine lock).
     pub pending_model: Option<PendingModelAction>,
+    /// `/subagent` action waiting for the run loop (needs the engine lock).
+    pub pending_subagent: Option<PendingSubagentAction>,
     /// `/session` / `/resume` action waiting for the run loop (needs the engine lock).
     pub pending_resume: Option<PendingSessionAction>,
     /// `/normalize` action waiting for the run loop (needs the engine lock).
@@ -469,6 +502,7 @@ impl App {
             should_quit: false,
             pending_submit: None,
             pending_model: None,
+            pending_subagent: None,
             pending_resume: None,
             pending_normalize: false,
             pending_import_pi: None,
@@ -812,6 +846,14 @@ impl App {
             self.dirty = true;
             return;
         }
+        // /subagent sets the default sub-agent model (needs the engine lock).
+        if let Some(action) = parse_subagent_slash(&text) {
+            self.pending_subagent = Some(action);
+            self.input.clear();
+            self.cursor = 0;
+            self.dirty = true;
+            return;
+        }
         // /session and /resume also need the engine lock (to restore state).
         if let Some(action) = parse_session_slash(&text) {
             self.pending_resume = Some(action);
@@ -981,6 +1023,37 @@ impl App {
                     self.transcript
                         .push(TranscriptItem::System(format!("Model changed to: {name}")));
                 }
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Apply a deferred `/subagent` action against live engine state.
+    /// Shows or sets `config.api.subagent_model`.
+    pub fn apply_subagent_action(
+        &mut self,
+        action: PendingSubagentAction,
+        current: &str,
+        set_model: impl FnOnce(String),
+    ) {
+        match action {
+            PendingSubagentAction::Show => {
+                if current.is_empty() {
+                    self.transcript.push(TranscriptItem::System(
+                        "Sub-agent model: (not set — inherits main model)".into(),
+                    ));
+                } else {
+                    self.transcript.push(TranscriptItem::System(format!(
+                        "Sub-agent model: {current}"
+                    )));
+                }
+            }
+            PendingSubagentAction::Set(name) => {
+                set_model(name.clone());
+                self.status_message = format!("sub-agent model → {name}");
+                self.transcript.push(TranscriptItem::System(format!(
+                    "Sub-agent model changed to: {name}"
+                )));
             }
         }
         self.dirty = true;
@@ -1680,6 +1753,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_subagent_slash_show_and_set() {
+        assert_eq!(
+            parse_subagent_slash("/subagent"),
+            Some(PendingSubagentAction::Show)
+        );
+        assert_eq!(
+            parse_subagent_slash("/subagent  "),
+            Some(PendingSubagentAction::Show)
+        );
+        assert_eq!(
+            parse_subagent_slash("/subagent claude-sonnet-4"),
+            Some(PendingSubagentAction::Set("claude-sonnet-4".into()))
+        );
+        assert_eq!(
+            parse_subagent_slash("/SUBAGENT grok-4"),
+            Some(PendingSubagentAction::Set("grok-4".into()))
+        );
+        assert!(parse_subagent_slash("/help").is_none());
+        assert!(parse_subagent_slash("subagent").is_none());
+        assert!(parse_subagent_slash("hello").is_none());
+    }
+
+    #[test]
     fn insert_str_at_cursor_and_normalizes_crlf() {
         let mut app = App::new("m", "/tmp", "s");
         app.input = "ab".into();
@@ -1736,6 +1832,30 @@ mod tests {
     }
 
     #[test]
+    fn submit_subagent_show_sets_pending_not_turn() {
+        let mut app = App::new("grok-4", "/tmp", "s");
+        app.input = "/subagent".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert_eq!(app.pending_subagent, Some(PendingSubagentAction::Show));
+        assert!(app.pending_submit.is_none());
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn submit_subagent_set_sets_pending() {
+        let mut app = App::new("grok-4", "/tmp", "s");
+        app.input = "/subagent claude-sonnet-4".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert_eq!(
+            app.pending_subagent,
+            Some(PendingSubagentAction::Set("claude-sonnet-4".into()))
+        );
+        assert!(app.queue.is_empty());
+    }
+
+    #[test]
     fn apply_model_action_set_updates_badge_and_transcript() {
         let mut app = App::new("old-model", "/tmp", "s");
         let mut engine_model = "old-model".to_string();
@@ -1779,6 +1899,42 @@ mod tests {
             joined.contains("/model"),
             "catalog should mention how to switch"
         );
+    }
+
+    #[test]
+    fn apply_subagent_action_set_updates_config() {
+        let mut app = App::new("grok-4", "/tmp", "s");
+        let mut engine_model: Option<String> = None;
+        app.apply_subagent_action(
+            PendingSubagentAction::Set("claude-sonnet-4".into()),
+            "",
+            |name| engine_model = Some(name),
+        );
+        assert_eq!(engine_model.as_deref(), Some("claude-sonnet-4"));
+        match app.transcript.last() {
+            Some(TranscriptItem::System(s)) => assert!(s.contains("claude-sonnet-4")),
+            other => panic!("expected System line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_subagent_action_show_empty() {
+        let mut app = App::new("grok-4", "/tmp", "s");
+        app.apply_subagent_action(PendingSubagentAction::Show, "", |_| {});
+        match app.transcript.last() {
+            Some(TranscriptItem::System(s)) => assert!(s.contains("not set")),
+            other => panic!("expected System line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_subagent_action_show_with_value() {
+        let mut app = App::new("grok-4", "/tmp", "s");
+        app.apply_subagent_action(PendingSubagentAction::Show, "gpt-4o-mini", |_| {});
+        match app.transcript.last() {
+            Some(TranscriptItem::System(s)) => assert!(s.contains("gpt-4o-mini")),
+            other => panic!("expected System line, got {other:?}"),
+        }
     }
 
     #[test]

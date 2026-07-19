@@ -498,6 +498,7 @@ pub enum ProviderKind {
     Nvidia,
     /// Kilo AI (OpenAI-compatible endpoint https://api.kilo.ai).
     Kilo,
+    Novita,
     OpenAiCompatible,
     /// Generic / unspecified provider. Owns `AGENT_CODE_API_KEY` — the
     /// fallback key used when no concrete provider is assigned.
@@ -514,21 +515,21 @@ impl ProviderKind {
             Self::Google,
             Self::DeepSeek,
             Self::Mistral,
-Self::Nvidia,
-        Self::Kilo,
-        Self::OpenRouter,
-        Self::OpenCode,
-        Self::OpenCodeGo,
-        Self::Groq,
-        Self::Together,
-        Self::Zhipu,
-        Self::Cohere,
-        Self::Perplexity,
-        Self::Bedrock,
-        Self::Vertex,
-        Self::AzureOpenAi,
-        Self::OpenAiCompatible,
-        Self::AgentCode,
+            Self::Nvidia,
+            Self::Kilo,
+            Self::OpenRouter,
+            Self::OpenCode,
+            Self::OpenCodeGo,
+            Self::Groq,
+            Self::Together,
+            Self::Zhipu,
+            Self::Cohere,
+            Self::Perplexity,
+            Self::Bedrock,
+            Self::Vertex,
+            Self::AzureOpenAi,
+            Self::OpenAiCompatible,
+            Self::AgentCode,
         ]
     }
 
@@ -569,9 +570,7 @@ Self::Nvidia,
             }
             Self::Kilo => {
                 // KILO_API_KEY
-                std::env::var("KILO_API_KEY")
-                    .ok()
-                    .filter(|k| !k.is_empty())
+                std::env::var("KILO_API_KEY").ok().filter(|k| !k.is_empty())
             }
             _ => None,
         }

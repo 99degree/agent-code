@@ -345,6 +345,29 @@ pub(super) async fn event_loop(
             }
         }
 
+        // Apply deferred `/subagent` (show or set sub-agent model). Same
+        // try_lock pattern as `/model` — retry on next iteration if busy.
+        if let Some(action) = app.pending_subagent.take() {
+            let engine_arc = session.engine();
+            match engine_arc.try_lock() {
+                Ok(mut eng) => {
+                    let current = eng
+                        .state()
+                        .config
+                        .api
+                        .subagent_model
+                        .clone()
+                        .unwrap_or_default();
+                    app.apply_subagent_action(action, &current, |name| {
+                        eng.state_mut().config.api.subagent_model = Some(name);
+                    });
+                }
+                Err(_) => {
+                    app.pending_subagent = Some(action);
+                }
+            }
+        }
+
         // Apply deferred `/session` / `/resume` (list or restore). try_lock
         // so a mid-turn resume does not block the UI; retry on next iteration.
         if let Some(action) = app.pending_resume.take() {

@@ -76,6 +76,12 @@ pub const COMMANDS: &[Command] = &[
         hidden: false,
     },
     Command {
+        name: "subagent",
+        aliases: &[],
+        description: "Show or change the default sub-agent model",
+        hidden: false,
+    },
+    Command {
         name: "diff",
         aliases: &[],
         description: "Show git diff of current changes",
@@ -972,6 +978,22 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         println!("Model changed to: {chosen}");
                     }
                 }
+            }
+            CommandResult::Handled
+        }
+        Some("subagent") => {
+            if let Some(new_model) = args {
+                engine.state_mut().config.api.subagent_model = Some(new_model.to_string());
+                println!("Sub-agent model changed to: {new_model}");
+            } else {
+                let current = engine
+                    .state()
+                    .config
+                    .api
+                    .subagent_model
+                    .as_deref()
+                    .unwrap_or("(not set — inherits main model)");
+                println!("Sub-agent model: {current}");
             }
             CommandResult::Handled
         }
