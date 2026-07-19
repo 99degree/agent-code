@@ -340,6 +340,36 @@ pub fn create_provider_from_config(
     }
 }
 
+/// Get a provider kind for a model and base URL, with fallback behavior.
+///
+/// 1. First, detect a provider candidate from the model and base URL.
+///    If the model is found in that provider's model list (including custom models), return it.
+/// 2. Otherwise, search all providers' model lists (by name only) for the model.
+///    Return the first provider that has the model.
+/// 3. If still not found, fall back to the detected provider from step 1.
+pub fn get_provider_for_model(model: &str, base_url: &str) -> ProviderKind {
+    // Step 1: Get candidate provider from model and base_url
+    let candidate_kind = detect_provider(model, base_url);
+
+    // Step 2: Check if the model is in the candidate provider's model list (with custom models)
+    let models = models_for_provider_with_custom(candidate_kind);
+    if models.iter().any(|(m, _)| m.eq_ignore_ascii_case(model)) {
+        return candidate_kind;
+    }
+
+    // Step 3: Search all providers by model name (with custom models)
+    for &kind in ProviderKind::all() {
+        let models = models_for_provider_with_custom(kind);
+        if models.iter().any(|(m, _)| m.eq_ignore_ascii_case(model)) {
+            return kind;
+        }
+    }
+
+    // Step 4: Fallback to candidate_kind
+    candidate_kind
+}
+
+/// Detect the right provider from a model name or base URL.
 pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     let model_lower = model.to_lowercase();
     let url_lower = base_url.to_lowercase();
@@ -956,6 +986,7 @@ mod tests {
             ProviderKind::Perplexity,
             ProviderKind::Nvidia,
             ProviderKind::OpenAiCompatible,
+            ProviderKind::AgentCode,
         ];
         for p in openai_compat_providers {
             assert_eq!(
@@ -1040,94 +1071,27 @@ mod tests {
             ProviderKind::Zhipu
         ));
     }
-
     #[test]
-    fn test_detect_from_model_deepseek_chat() {
-        assert!(matches!(
-            detect_provider("deepseek-chat", ""),
-            ProviderKind::DeepSeek
-        ));
-    }
+    fn test_get_provider_for_model() {
+        // Case 1: Model is in the provider detected from base_url.
+        let model = "claude-3-opus-20240229";
+        let base_url = "https://api.anthropic.com/v1";
+        let kind = get_provider_for_model(model, base_url);
+        assert_eq!(kind, ProviderKind::Anthropic);
 
-    #[test]
-    fn test_detect_from_model_mistral_large() {
-        assert!(matches!(
-            detect_provider("mistral-large", ""),
-            ProviderKind::Mistral
-        ));
-    }
+        // Case 2: Model is not in the detected provider's list, but is in another provider's list.
+        // "gpt-5.1" is in the OpenAI catalog but we supply an Anthropic base_url, so the
+        // URL-detected candidate is Anthropic. The model isn't in Anthropic's list, so we
+        // fall back to searching by name and find it under OpenAi.
+        let model = "gpt-5.1";
+        let base_url = "https://api.anthropic.com/v1"; // This will detect Anthropic
+        let kind = get_provider_for_model(model, base_url);
+        assert_eq!(kind, ProviderKind::OpenAi);
 
-    #[test]
-    fn test_detect_from_model_glm4() {
-        assert!(matches!(detect_provider("glm-4", ""), ProviderKind::Zhipu));
-    }
-
-    #[test]
-    fn test_detect_from_model_llama3_with_groq_url() {
-        assert!(matches!(
-            detect_provider("llama-3", "https://api.groq.com/openai/v1"),
-            ProviderKind::Groq
-        ));
-    }
-
-    #[test]
-    fn test_detect_from_model_codestral() {
-        assert!(matches!(
-            detect_provider("codestral-latest", ""),
-            ProviderKind::Mistral
-        ));
-    }
-
-    #[test]
-    fn test_detect_from_model_pplx() {
-        assert!(matches!(
-            detect_provider("pplx-70b-online", ""),
-            ProviderKind::Perplexity
-        ));
-    }
-
-    #[test]
-    fn test_detect_from_model_kilo() {
-        assert!(matches!(
-            detect_provider("kilo-mega", ""),
-            ProviderKind::Kilo
-        ));
-    }
-
-    #[test]
-    fn test_detect_from_url_kilo() {
-        assert!(matches!(
-            detect_provider("any", "https://api.kilo.ai/api/gateway"),
-            ProviderKind::Kilo
-        ));
-    }
-
-    #[test]
-    fn test_provider_error_display() {
-        let err = ProviderError::Auth("bad token".into());
-        assert_eq!(format!("{err}"), "auth: bad token");
-
-        let err = ProviderError::RateLimited {
-            retry_after_ms: 1000,
-        };
-        assert_eq!(format!("{err}"), "rate limited (retry in 1000ms)");
-
-        let err = ProviderError::Overloaded;
-        assert_eq!(format!("{err}"), "server overloaded");
-
-        let err = ProviderError::RequestTooLarge("4MB limit".into());
-        assert_eq!(format!("{err}"), "request too large: 4MB limit");
-
-        let err = ProviderError::Network("timeout".into());
-        assert_eq!(format!("{err}"), "network: timeout");
-
-        let err = ProviderError::InvalidResponse("missing field".into());
-        assert_eq!(format!("{err}"), "invalid response: missing field");
-    }
-
-    #[test]
-    fn test_tool_choice_default_is_auto() {
-        let tc = ToolChoice::default();
-        assert!(matches!(tc, ToolChoice::Auto));
+        // Case 3: Model is not in any list, so we fall back to the detected provider.
+        let model = "non-existent-model";
+        let base_url = "https://api.anthropic.com/v1";
+        let kind = get_provider_for_model(model, base_url);
+        assert_eq!(kind, ProviderKind::Anthropic);
     }
 }

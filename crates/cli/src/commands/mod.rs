@@ -784,38 +784,25 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
         }
         Some("model") => {
             if let Some(new_model) = args {
-                // Find provider for this model.
-                let mut found_provider = None;
-                for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
-                    let models =
-                        agent_code_lib::llm::provider::models_for_provider_with_custom(kind);
-                    if models.iter().any(|(n, _)| *n == new_model) {
-                        found_provider = Some(kind);
-                        if let Some(url) = kind.default_base_url() {
-                            tracing::info!(
-                                "[model] Found in {:?}, setting base_url to {}",
-                                kind,
-                                url
-                            );
-                            engine.state_mut().config.api.base_url = url.to_string();
-                        } else {
-                            // Provider has no default URL — clear stale base_url.
-                            engine.state_mut().config.api.base_url.clear();
-                        }
-                        break;
-                    }
-                }
-                // Fallback: detect from current base_url.
-                if found_provider.is_none() {
-                    let base_url = &engine.state().config.api.base_url;
+                // Find provider for this model using URL-first logic with fallback.
+                let base_url = &engine.state().config.api.base_url;
+                let provider_kind =
+                    agent_code_lib::llm::provider::get_provider_for_model(new_model, base_url);
+
+                // Set base URL based on provider (clear if no default URL).
+                if let Some(url) = provider_kind.default_base_url() {
                     tracing::info!(
-                        "[model] Not found in any provider list, detecting from base_url: {}",
-                        base_url
+                        "[model] Found provider {:?} for model {}, setting base_url to {}",
+                        provider_kind,
+                        new_model,
+                        url
                     );
-                    found_provider = Some(agent_code_lib::llm::provider::detect_provider(
-                        new_model, base_url,
-                    ));
+                    engine.state_mut().config.api.base_url = url.to_string();
+                } else {
+                    // Provider has no default URL — clear stale base_url.
+                    engine.state_mut().config.api.base_url.clear();
                 }
+
                 engine.state_mut().config.api.model = new_model.to_string();
                 // Record model change in conversation history.
                 engine
@@ -838,10 +825,11 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 );
 
                 // Recreate provider with new base_url and swap it in.
-                let swap_kind =
-                    found_provider.unwrap_or_else(|| detect_provider(new_model, final_base_url));
-                if agent_code_lib::llm::provider::resolve_api_key(swap_kind, &engine.state().config)
-                    .is_some()
+                if agent_code_lib::llm::provider::resolve_api_key(
+                    provider_kind,
+                    &engine.state().config,
+                )
+                .is_some()
                 {
                     let new_provider = agent_code_lib::llm::provider::create_provider_from_config(
                         new_model,
@@ -853,19 +841,15 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 } else {
                     println!(
                         "⚠ No API key for {:?}. Set {} or add a [api.provider_keys.{}] entry in config.toml.",
-                        swap_kind,
-                        swap_kind.env_var_name(),
-                        swap_kind.toml_key()
+                        provider_kind,
+                        provider_kind.env_var_name(),
+                        provider_kind.toml_key()
                     );
                 }
                 // Update provider_kind to match the new model.
-                engine.state_mut().provider_kind = swap_kind;
+                engine.state_mut().provider_kind = provider_kind;
 
-                if let Some(kind) = found_provider {
-                    println!("Model changed to: {new_model} [{kind:?}]");
-                } else {
-                    println!("Model changed to: {new_model}");
-                }
+                println!("Model changed to: {new_model} [{provider_kind:?}]");
             } else {
                 // Interactive model selector showing all configured providers.
                 let current = engine.state().config.api.model.clone();
