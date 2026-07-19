@@ -122,7 +122,7 @@ struct Cli {
     #[arg(long)]
     no_sandbox: bool,
 
-    /// LLM provider: anthropic, openai, xai (grok), nvidia (NIM), or auto (default).
+    /// LLM provider: anthropic, openai, xai (grok), nvidia (NIM), kilo, or auto (default).
     #[arg(long, default_value = "auto")]
     provider: String,
 
@@ -716,6 +716,7 @@ async fn async_main() -> anyhow::Result<()> {
             "opencode" | "oc" | "zen" => ProviderKind::OpenCode,
             "opencode-go" | "oc-go" | "zen-go" => ProviderKind::OpenCodeGo,
             "agentcode" | "ac" => ProviderKind::AgentCode,
+            "kilo" => ProviderKind::Kilo,
             _ => detect_provider(&config.api.model, &config.api.base_url),
         },
     };

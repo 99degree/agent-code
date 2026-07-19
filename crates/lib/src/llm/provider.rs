@@ -489,6 +489,8 @@ pub enum ProviderKind {
     Cohere,
     Perplexity,
     Nvidia,
+    /// Kilo AI (OpenAI-compatible endpoint https://api.kilo.ai).
+    Kilo,
     OpenAiCompatible,
     /// Generic / unspecified provider. Owns `AGENT_CODE_API_KEY` — the
     /// fallback key used when no concrete provider is assigned.
@@ -505,20 +507,21 @@ impl ProviderKind {
             Self::Google,
             Self::DeepSeek,
             Self::Mistral,
-            Self::Nvidia,
-            Self::OpenRouter,
-            Self::OpenCode,
-            Self::OpenCodeGo,
-            Self::Groq,
-            Self::Together,
-            Self::Zhipu,
-            Self::Cohere,
-            Self::Perplexity,
-            Self::Bedrock,
-            Self::Vertex,
-            Self::AzureOpenAi,
-            Self::OpenAiCompatible,
-            Self::AgentCode,
+Self::Nvidia,
+        Self::Kilo,
+        Self::OpenRouter,
+        Self::OpenCode,
+        Self::OpenCodeGo,
+        Self::Groq,
+        Self::Together,
+        Self::Zhipu,
+        Self::Cohere,
+        Self::Perplexity,
+        Self::Bedrock,
+        Self::Vertex,
+        Self::AzureOpenAi,
+        Self::OpenAiCompatible,
+        Self::AgentCode,
         ]
     }
 
@@ -557,6 +560,12 @@ impl ProviderKind {
                     .ok()
                     .filter(|k| !k.is_empty())
             }
+            Self::Kilo => {
+                // KILO_API_KEY
+                std::env::var("KILO_API_KEY")
+                    .ok()
+                    .filter(|k| !k.is_empty())
+            }
             _ => None,
         }
     }
@@ -581,7 +590,8 @@ impl ProviderKind {
             | Self::Perplexity
             | Self::Nvidia
             | Self::OpenAiCompatible
-            | Self::AgentCode => WireFormat::OpenAiCompatible,
+            | Self::AgentCode
+            | Self::Kilo => WireFormat::OpenAiCompatible,
         }
     }
 
@@ -606,6 +616,7 @@ impl ProviderKind {
             Self::AzureOpenAi => "openai",
             Self::OpenAiCompatible => "",
             Self::AgentCode => "agentcode",
+            Self::Kilo => "kilo",
         }
     }
 
@@ -629,6 +640,7 @@ impl ProviderKind {
             Self::Cohere => Some("https://api.cohere.com/v2"),
             Self::Perplexity => Some("https://api.perplexity.ai"),
             Self::Nvidia => Some("https://integrate.api.nvidia.com/v1"),
+            Self::Kilo => Some("https://api.kilo.ai"),
             // These require user-supplied URLs.
             Self::Bedrock
             | Self::Vertex
@@ -659,6 +671,7 @@ impl ProviderKind {
             Self::Nvidia => "NVIDIA_API_KEY",
             Self::OpenAiCompatible => "OPENAI_API_KEY",
             Self::AgentCode => "AGENT_CODE_API_KEY",
+            Self::Kilo => "KILO_API_KEY",
         }
     }
 }
@@ -1051,6 +1064,22 @@ mod tests {
         assert!(matches!(
             detect_provider("pplx-70b-online", ""),
             ProviderKind::Perplexity
+        ));
+    }
+
+    #[test]
+    fn test_detect_from_model_kilo() {
+        assert!(matches!(
+            detect_provider("kilo-mega", ""),
+            ProviderKind::Kilo
+        ));
+    }
+
+    #[test]
+    fn test_detect_from_url_kilo() {
+        assert!(matches!(
+            detect_provider("any", "https://api.kilo.ai/api/gateway"),
+            ProviderKind::Kilo
         ));
     }
 

@@ -774,3 +774,14 @@ name = "Llama 4 Scout"
 [[together]]
 id = "deepseek-ai/DeepSeek-V4"
 name = "DeepSeek V4"
+
+# ============================================================================
+# KILO
+# ============================================================================
+[[kilo]]
+id = "kilo-alpha"
+name = "Kilo Alpha"
+
+[[kilo]]
+id = "kilo-beta"
+name = "Kilo Beta"
