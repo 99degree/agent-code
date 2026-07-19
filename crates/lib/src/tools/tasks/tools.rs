@@ -257,12 +257,13 @@ impl Tool for TaskListTool {
         _input: serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let count = TASK_COUNTER.load(Ordering::Relaxed) - 1;
-        let mut out = format!("{count} task(s) created this session.");
+        let mut out = String::new();
+
+        // Collect active tasks from the task manager if available.
         if let Some(mgr) = ctx.task_manager.as_ref() {
             let tasks = mgr.list().await;
             if !tasks.is_empty() {
-                out.push_str("\n\nActive tasks:\n");
+                out.push_str("Active tasks:\n");
                 for info in tasks {
                     out.push_str(&format!(
                         "  {} [kind: {}] {:?}: {}\n",
@@ -272,8 +273,24 @@ impl Tool for TaskListTool {
                         info.description,
                     ));
                 }
+            } else {
+                out.push_str("No active tasks.");
             }
+        } else {
+            // Fallback: show the session task counter for tools that don't
+            // have a task_manager (TaskCreate/TaskUpdate are always available).
+            let count = TASK_COUNTER.load(Ordering::Relaxed).saturating_sub(1);
+            out.push_str(&format!("{count} task(s) created this session.\n"));
+            out.push_str("(Task manager not available — task details unavailable)");
         }
+
+        // Also show the session-wide task count for backward compat.
+        let session_count = TASK_COUNTER.load(Ordering::Relaxed).saturating_sub(1);
+        out.push_str(&format!(
+            "\n{} task(s) created this session via TaskCreate.",
+            session_count
+        ));
+
         Ok(ToolResult::success(out))
     }
 }
