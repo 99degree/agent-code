@@ -157,8 +157,14 @@ pub(crate) fn format_session_list(
     sessions: &[agent_code_lib::services::session::SessionSummary],
 ) -> Vec<String> {
     if sessions.is_empty() {
-        return vec!["No sessions found.".into()];
+        return vec!["No sessions found for this directory. Use /sessions --all to see all.".into()];
     }
+    let cwd_short = |s: &str| {
+        std::path::Path::new(s)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| s.to_string())
+    };
     let mut lines = vec!["Recent sessions (use /resume <id>):".into()];
     for s in sessions {
         let display_id = if s.id.len() > 12 { &s.id[..12] } else { &s.id };
@@ -168,14 +174,15 @@ pub(crate) fn format_session_list(
         } else {
             format!(" [{}]", s.tags.join(", "))
         };
+        let dir = cwd_short(&s.cwd);
         let time = &s.updated_at;
         let time_short = if time.len() >= 16 { &time[..16] } else { time };
         lines.push(format!(
-            "  {display_id}  {label}{tag_str}  {}/{}, turn {}, {time_short}",
-            s.model, s.message_count, s.turn_count,
+            "  {display_id}  {label}{tag_str}  {dir}/{}, turn {}, {time_short}",
+            s.model, s.turn_count,
         ));
     }
-    lines.push("Use /resume <id> to continue a session.".into());
+    lines.push("Use /resume <id> to continue, /sessions --all for every directory.".into());
     lines
 }
 
@@ -1069,7 +1076,15 @@ impl App {
     ) {
         match action {
             PendingSessionAction::Show => {
-                let sessions = agent_code_lib::services::session::list_sessions(20);
+                let sessions = agent_code_lib::services::session::list_sessions_for_cwd(
+                    &self.cwd,
+                    20,
+                );
+                let sessions = if sessions.is_empty() {
+                    agent_code_lib::services::session::list_sessions(20)
+                } else {
+                    sessions
+                };
                 for line in format_session_list(&sessions) {
                     self.transcript.push(TranscriptItem::System(line));
                 }

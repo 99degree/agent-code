@@ -242,6 +242,30 @@ pub fn list_sessions(limit: usize) -> Vec<SessionSummary> {
     sessions
 }
 
+/// Canonicalize a path for comparison: resolve `.` / `..` and remove
+/// trailing slashes so `/home/user/project/` matches `/home/user/project`.
+fn canonicalize_cwd(path: &str) -> String {
+    std::path::Path::new(path)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(path))
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// List recent sessions filtered to the given working directory.
+///
+/// Sessions whose `cwd` does not match `target_cwd` (after
+/// canonicalization) are excluded.  Returns an empty vec when no
+/// sessions match, preserving the same sort order as [`list_sessions`].
+pub fn list_sessions_for_cwd(target_cwd: &str, limit: usize) -> Vec<SessionSummary> {
+    let canonical = canonicalize_cwd(target_cwd);
+    let mut sessions = list_sessions(limit * 4); // over-fetch before filtering
+    sessions.retain(|s| canonicalize_cwd(&s.cwd) == canonical);
+    sessions.truncate(limit);
+    sessions
+}
+
 /// Summary fields only, deserialized WITHOUT materializing the
 /// `messages` transcript (serde skips the unknown field), so hot-path
 /// callers don't pay to allocate every session's full history.
