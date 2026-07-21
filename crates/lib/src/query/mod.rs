@@ -113,6 +113,8 @@ pub trait StreamSink: Send + Sync {
     fn on_usage(&self, _usage: &Usage) {}
     fn on_compact(&self, _freed_tokens: u64) {}
     fn on_warning(&self, _msg: &str) {}
+    /// Continuous log/status message — overwrites the previous line.
+    fn on_log(&self, _msg: &str) {}
 
     /// Tool started with stable `call_id` for UI card correlation.
     /// Default forwards to [`Self::on_tool_start`].
@@ -154,6 +156,7 @@ impl StreamSink for NullSink {
     fn on_tool_start(&self, _: &str, _: &serde_json::Value) {}
     fn on_tool_result(&self, _: &str, _: &crate::tools::ToolResult) {}
     fn on_error(&self, _: &str) {}
+    fn on_log(&self, _: &str) {}
 }
 
 /// Coalesced, always-latest status of the engine's current turn.

@@ -6,6 +6,7 @@
 //! prompts.
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
@@ -741,6 +742,10 @@ struct TerminalSink {
     turn_state: super::tui::SharedTurnState,
     /// Hide tool details in the turn summary panel.
     hide_tool_summary_details: bool,
+    /// Pending log line — overwrites previous on the same screen line.
+    pending_log: Arc<Mutex<Option<String>>>,
+    /// Byte length of last printed log line (for clearing longer lines).
+    log_len: Arc<Mutex<usize>>,
 }
 
 impl TerminalSink {
@@ -752,6 +757,8 @@ impl TerminalSink {
             verbose,
             turn_state: super::tui::new_turn_state(),
             hide_tool_summary_details: false,
+            pending_log: Arc::new(Mutex::new(None)),
+            log_len: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -770,6 +777,9 @@ impl TerminalSink {
             raw_print("\n");
             *mid = false;
         }
+        drop(mid);
+        // Flush any pending log line so tool output always starts clean.
+        self.flush_log();
     }
 
     /// Stop the activity indicator (called when first token arrives).
@@ -787,10 +797,28 @@ impl TerminalSink {
             *guard = Some(ActivityIndicator::thinking());
         }
     }
+
+    /// Flush the pending log line to its own screen line (newline), then clear
+    /// the slot so the next real output starts clean.
+    fn flush_log(&self) {
+        if let Ok(mut g) = self.pending_log.lock() {
+            if let Some(msg) = g.take() {
+                let prev_len = *self.log_len.lock().unwrap();
+                // Pad with spaces to clear any longer previous content, then newline.
+                raw_eprint(&format!(
+                    "\r{}\n",
+                    format!("{}{}", msg, " ".repeat(prev_len.saturating_sub(msg.len())))
+                ));
+            }
+            *self.log_len.lock().unwrap() = 0;
+        }
+    }
 }
 
 impl StreamSink for TerminalSink {
     fn on_text(&self, text: &str) {
+        // Flush any pending log line first.
+        self.flush_log();
         // First text token: stop the activity indicator.
         self.stop_indicator();
 
@@ -874,6 +902,7 @@ impl StreamSink for TerminalSink {
     fn on_thinking(&self, text: &str) {
         self.stop_indicator();
         self.turn_state.lock().unwrap().thinking_chars = text.len();
+        self.flush_log();
         super::tui::render_thinking_block(text);
     }
 
@@ -925,11 +954,23 @@ impl StreamSink for TerminalSink {
     }
 
     fn on_warning(&self, msg: &str) {
+        self.flush_log();
         let t = super::theme::current();
         raw_eprint(&format!(
             "\n{} {msg}\n",
             super::theme::label(" WARN ", t.warning, crossterm::style::Color::Black)
         ));
+    }
+
+    fn on_log(&self, msg: &str) {
+        self.stop_indicator();
+        let len = msg.len();
+        let prev_len = *self.log_len.lock().unwrap();
+        // Write to stdout (same stream as the prompt) so the terminal
+        // correctly tracks cursor position between log line and prompt.
+        raw_print(&format!("\r{}\r{msg}", " ".repeat(prev_len)));
+        *self.pending_log.lock().unwrap() = Some(msg.to_string());
+        *self.log_len.lock().unwrap() = len;
     }
 }
 
@@ -945,6 +986,9 @@ fn spawn_escape_watcher(
     let steer = engine.steer_sender();
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop2 = stop.clone();
+    // Staging queue shared with the guard so finish() can drain it.
+    let staging = Arc::new(Mutex::new(VecDeque::new()));
+    let staging2 = staging.clone();
 
     let handle = std::thread::spawn(move || -> String {
         use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -960,6 +1004,19 @@ fn spawn_escape_watcher(
         // echoed (raw mode, mid-stream); the queued text is confirmed on
         // Enter instead.
         let mut steer_buf = String::new();
+        // Index into staging2.queue: if None, we're in normal steer mode.
+        // If Some(idx), we're editing a staged prompt from that index.
+        let mut editing_staged: Option<usize> = None;
+
+        let mut prev_buf_len: usize = 0;
+        // Helper: render the current steer_buf to the button line.
+        let flush_buf = |buf: &str, prev_len: &mut usize| {
+            let len = buf.len();
+            let out = format!("\r  ↳ {buf}{}", " ".repeat(prev_len.saturating_sub(len)));
+            let _ = std::io::stderr().write_all(out.as_bytes());
+            let _ = std::io::stderr().flush();
+            *prev_len = len + 4; // +4 for "  ↳ "
+        };
 
         while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
             // While a permission prompt owns the terminal, release stdin so the
@@ -977,6 +1034,13 @@ fn spawn_escape_watcher(
             {
                 match code {
                     KeyCode::Esc => {
+                        // Clear button line on cancel.
+                        if !steer_buf.is_empty() {
+                            let _ = std::io::stderr().write_all(
+                                format!("\r{}\r", " ".repeat(prev_buf_len.saturating_sub(1))).as_bytes(),
+                            );
+                            let _ = std::io::stderr().flush();
+                        }
                         cancel_handle.lock().unwrap().cancel();
                         break;
                     }
@@ -985,25 +1049,56 @@ fn spawn_escape_watcher(
                         cancel_handle.lock().unwrap().cancel();
                         break;
                     }
+                    KeyCode::Up if modifiers.contains(KeyModifiers::ALT) => {
+                        // Alt+↑: pull the newest staged prompt into the buffer for editing.
+                        if let Some(text) = staging2.lock().unwrap().pop_back() {
+                            steer_buf = text;
+                            editing_staged = Some(0); // marker: we're editing a staged item
+                            flush_buf(&steer_buf, &mut prev_buf_len);
+                        }
+                    }
                     KeyCode::Enter => {
                         let text = steer_buf.trim().to_string();
                         steer_buf.clear();
-                        if !text.is_empty() && steer.send(text.clone()).is_ok() {
+                        editing_staged = None;
+                        // Clear button line.
+                        let _ = std::io::stderr().write_all(
+                            format!("\r{}\r", " ".repeat(prev_buf_len.saturating_sub(1))).as_bytes(),
+                        );
+                        let _ = std::io::stderr().flush();
+                        prev_buf_len = 0;
+                        if text.is_empty() {
+                            // Blank line: nothing to stage.
+                        } else if steer.send(text.clone()).is_ok() {
                             let preview: String = text.chars().take(60).collect();
-                            // CRLF: the terminal is in raw mode during the turn.
-                            let _ = std::io::Write::write_all(
-                                &mut std::io::stderr(),
+                            let _ = std::io::stderr().write_all(
                                 format!("\r\n  ↳ steering queued: {preview}\r\n").as_bytes(),
                             );
-                            let _ = std::io::Write::flush(&mut std::io::stderr());
+                            let _ = std::io::stderr().flush();
+                        }
+                    }
+                    KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        // Ctrl+S: stage current buffer for Alt+↑, don't send.
+                        let content = std::mem::take(&mut steer_buf);
+                        editing_staged = None;
+                        if !content.trim().is_empty() {
+                            staging2.lock().unwrap().push_back(content.trim().to_string());
+                            // Clear button line and show confirmation.
+                            let _ = std::io::stderr().write_all(
+                                format!("\r{}\r  ↳ staged (Alt+↑ to edit)\r\n", " ".repeat(prev_buf_len.saturating_sub(1))).as_bytes(),
+                            );
+                            let _ = std::io::stderr().flush();
+                            prev_buf_len = 0;
                         }
                     }
                     KeyCode::Backspace => {
                         steer_buf.pop();
+                        flush_buf(&steer_buf, &mut prev_buf_len);
                     }
                     // Buffer ordinary typed characters (ignore control combos).
                     KeyCode::Char(ch) if !modifiers.contains(KeyModifiers::CONTROL) => {
                         steer_buf.push(ch);
+                        flush_buf(&steer_buf, &mut prev_buf_len);
                     }
                     _ => {}
                 }
@@ -1020,6 +1115,7 @@ fn spawn_escape_watcher(
     EscapeWatcherGuard {
         stop,
         handle: Some(handle),
+        staging,
     }
 }
 
@@ -1027,13 +1123,16 @@ fn spawn_escape_watcher(
 struct EscapeWatcherGuard {
     stop: Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<String>>,
+    /// Queue of staged prompts the user typed mid-turn and wants to send
+    /// next (Alt+↑). Shared with the watcher thread via Arc.
+    staging: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl EscapeWatcherGuard {
-    /// Stop the watcher and return the still-unsubmitted typed text, so the
-    /// REPL can pre-fill it into the next prompt. Consumes the guard; `Drop`
+    /// Stop the watcher and return (leftover text, staged prompts), so the
+    /// caller can pre-fill the next prompt. Consumes the guard; `Drop`
     /// remains as the panic/early-return fallback that only restores raw mode.
-    fn finish(mut self) -> String {
+    fn finish(mut self) -> (String, VecDeque<String>) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         let leftover = self
             .handle
@@ -1041,7 +1140,8 @@ impl EscapeWatcherGuard {
             .and_then(|h| h.join().ok())
             .unwrap_or_default();
         let _ = crossterm::terminal::disable_raw_mode();
-        leftover
+        let staged = self.staging.lock().unwrap().drain(..).collect();
+        (leftover, staged)
     }
 }
 
@@ -1337,6 +1437,9 @@ pub async fn run_repl(engine: &mut QueryEngine) -> anyhow::Result<()> {
     // Text typed during the previous turn but not submitted with Enter,
     // carried over to pre-fill the next prompt (see esc_guard.finish()).
     let mut pending_input = String::new();
+    // Staging queue: prompts typed mid-turn, accessible via Alt+↑ (modern
+    // TUI style). Pushed in FIFO order; popped newest-first for editing.
+    let mut staging_queue: std::collections::VecDeque<String> = Default::default();
     // Turn number of the last status divider printed, so empty submissions
     // and other no-output re-prompts don't restack a duplicate divider.
     let mut last_statusline_turn: u64 = 0;
@@ -1428,6 +1531,11 @@ pub async fn run_repl(engine: &mut QueryEngine) -> anyhow::Result<()> {
         if let Ok(mut ctx) = model_ctx.lock() {
             ctx.0 = engine.state().config.api.model.clone();
             ctx.1 = engine.state().config.api.base_url.clone();
+        }
+
+        // Alt+↑ brings the newest staged prompt back for editing.
+        if let Some(text) = staging_queue.pop_back() {
+            pending_input = text;
         }
 
         // Pre-fill the prompt with any text carried over from typing during
@@ -1687,7 +1795,10 @@ pub async fn run_repl(engine: &mut QueryEngine) -> anyhow::Result<()> {
                     }
                 }
                 // Carry any typed-but-unsubmitted text into the next prompt.
-                pending_input = esc_guard.finish();
+                // Staged prompts go into the staging queue for Alt+↑.
+                let (leftover, staged) = esc_guard.finish();
+                pending_input = leftover;
+                staging_queue.extend(staged);
                 sink.ensure_newline();
                 println!();
 
