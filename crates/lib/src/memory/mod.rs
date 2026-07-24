@@ -185,15 +185,22 @@ impl MemoryContext {
         None
     }
 
-    pub fn to_system_prompt_section(&self) -> String {
-        let mut section = String::new();
+    /// Return only the project context section (AGENTS.md), for injection
+    /// at a higher-priority position in the system prompt.
+    pub fn project_context_section(&self) -> String {
         if let Some(ref project) = self.project_context
             && !project.is_empty()
         {
-            section.push_str("# Project Context\n\n");
-            section.push_str(project);
-            section.push_str("\n\n");
+            format!("# Project Context\n\n{project}\n\n")
+        } else {
+            String::new()
         }
+    }
+
+    pub fn to_system_prompt_section(&self) -> String {
+        let mut section = String::new();
+        // Project context is injected separately at a higher priority;
+        // skip it here to avoid duplication.
         if let Some(ref team) = self.team_memory
             && !team.is_empty()
         {

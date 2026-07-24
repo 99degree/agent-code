@@ -2164,6 +2164,17 @@ pub fn build_system_prompt(
     }
     prompt.push('\n');
 
+    // Load memory context early so project context (AGENTS.md) can be
+    // placed near the top of the prompt for higher salience.
+    let mut memory = crate::memory::MemoryContext::load(Some(std::path::Path::new(&state.cwd)));
+
+    // Project context (AGENTS.md) placed right after environment so the
+    // agent reads project rules before any style or tool instructions.
+    let project_section = memory.project_context_section();
+    if !project_section.is_empty() {
+        prompt.push_str(&project_section);
+    }
+
     // Brief mode: user has opted into terse responses. The instruction
     // lives near the top so it stays highly salient across long
     // contexts. Takes precedence over /output-style — brief wins.
@@ -2192,9 +2203,6 @@ pub fn build_system_prompt(
             prompt.push_str("\n\n");
         }
     }
-
-    // Inject memory context (project + user + on-demand relevant).
-    let mut memory = crate::memory::MemoryContext::load(Some(std::path::Path::new(&state.cwd)));
 
     // On-demand: surface relevant memories based on recent conversation.
     let recent_text: String = state
