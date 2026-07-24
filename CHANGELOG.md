@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-*No changes yet.*
+### Fixed
+
+- **Steering typing indicator no longer produces visual garbage** (`repl`): the mid-turn `↳` indicator was written to stderr while streaming output goes to stdout; since carriage-return is stream-relative, each keystroke appended a new line instead of overwriting. The indicator now writes to stdout (same stream as output) and caps display width at 60 characters.
+- **Bash dangerous-variable detection relaxed for common patterns**: removed `PATH` and `LD_LIBRARY_PATH` from the always-blocked list; the check now only flags actual `VAR=value` assignments after command separators, not bare references. `PATH=/usr/local/bin:$PATH cargo build` no longer triggers a warning.
+- **Clippy warnings eliminated** (`commands/mod.rs`, `repl.rs`): removed unused `editing_staged` variable, fixed `let_and_return` and `format_in_format_args` lints.
 
 ## [0.26.0] - 2026-07-10
 
