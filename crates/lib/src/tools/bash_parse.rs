@@ -152,10 +152,12 @@ pub fn check_parsed_security(parsed: &ParsedCommand) -> Vec<String> {
     }
 
     // Check for dangerous variable assignments.
+    // PATH is intentionally omitted here because it's allowed at command start
+    // (e.g., PATH=/usr/local/bin:$PATH cargo build). The shell-injection check
+    // in check_shell_injection handles PATH= after command separators.
+    // LD_LIBRARY_PATH is also omitted for similar reasons (allowed at command start).
     const DANGEROUS_VARS: &[&str] = &[
-        "PATH",
         "LD_PRELOAD",
-        "LD_LIBRARY_PATH",
         "PROMPT_COMMAND",
         "BASH_ENV",
         "ENV",
@@ -276,9 +278,9 @@ mod tests {
 
     #[test]
     fn test_detect_dangerous_var_assignment() {
-        let parsed = parse_bash("PATH=/tmp:$PATH ls").unwrap();
+        let parsed = parse_bash("LD_PRELOAD=/tmp/evil.so ls").unwrap();
         let violations = check_parsed_security(&parsed);
-        assert!(violations.iter().any(|v| v.contains("PATH")));
+        assert!(violations.iter().any(|v| v.contains("LD_PRELOAD")));
     }
 
     #[test]

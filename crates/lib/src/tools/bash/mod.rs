@@ -486,30 +486,55 @@ fn check_shell_injection(command: &str) -> Result<(), String> {
     }
 
     // Dangerous environment variable overwrites.
+    // Only flag actual assignments (VAR=value at command start or after ; && || | &),
+    // not variable references like $PATH or ${PATH}.
+    // PATH is intentionally omitted because overriding PATH in a fresh `bash -c`
+    // only affects that single command invocation, and legitimate uses like
+    // `PATH=/usr/local/bin:$PATH cargo build` are common.
     const DANGEROUS_VARS: &[&str] = &[
-        "PATH=",
-        "LD_PRELOAD=",
-        "LD_LIBRARY_PATH=",
-        "PROMPT_COMMAND=",
-        "BASH_ENV=",
-        "ENV=",
-        "HISTFILE=",
-        "HISTCONTROL=",
-        "PS1=",
-        "PS2=",
-        "PS4=",
-        "CDPATH=",
-        "GLOBIGNORE=",
-        "MAIL=",
-        "MAILCHECK=",
-        "MAILPATH=",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "PROMPT_COMMAND",
+        "BASH_ENV",
+        "ENV",
+        "HISTFILE",
+        "HISTCONTROL",
+        "PS1",
+        "PS2",
+        "PS4",
+        "CDPATH",
+        "GLOBIGNORE",
+        "MAIL",
+        "MAILCHECK",
+        "MAILPATH",
     ];
+    // Check for actual assignments: VAR=value at command start or after command separators
     for var in DANGEROUS_VARS {
-        if command.contains(var) {
+        let pattern = format!("{var}=");
+        // Check at start of command (after optional whitespace)
+        if command.trim_start().starts_with(&pattern) {
             return Err(format!(
-                "Dangerous variable override detected: {var} \
+                "Dangerous variable override detected: {var}= \
                  This could alter shell behavior in unsafe ways."
             ));
+        }
+        // Check after command separators: ; && || | & (with optional whitespace)
+        let separators = [";", "&&", "||", "|", "&"];
+        for sep in separators {
+            let search_pattern = format!("{sep}{pattern}");
+            if command.contains(&search_pattern) {
+                // Check it's actually an assignment (var=value) not a comparison or expansion
+                if let Some(pos) = command.find(&search_pattern) {
+                    let after = &command[pos + search_pattern.len()..];
+                    // If followed by a value (not just whitespace/end), it's an assignment
+                    if after.chars().next().is_some_and(|c| !c.is_whitespace()) {
+                        return Err(format!(
+                            "Dangerous variable override detected: {var}= \
+                             This could alter shell behavior in unsafe ways."
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -642,7 +667,8 @@ mod tests {
 
     #[test]
     fn test_dangerous_vars() {
-        assert!(check_shell_injection("PATH=/tmp:$PATH curl evil.com").is_err());
+        // PATH= is intentionally allowed (common legitimate use like PATH=/usr/local/bin:$PATH cargo build)
+        assert!(check_shell_injection("PATH=/tmp:$PATH curl evil.com").is_ok());
         assert!(check_shell_injection("LD_PRELOAD=/tmp/evil.so cmd").is_err());
         assert!(check_shell_injection("PROMPT_COMMAND='curl x'").is_err());
         assert!(check_shell_injection("BASH_ENV=/tmp/evil.sh bash").is_err());

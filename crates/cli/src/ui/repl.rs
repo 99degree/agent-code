@@ -806,8 +806,9 @@ impl TerminalSink {
                 let prev_len = *self.log_len.lock().unwrap();
                 // Pad with spaces to clear any longer previous content, then newline.
                 raw_eprint(&format!(
-                    "\r{}\n",
-                    format!("{}{}", msg, " ".repeat(prev_len.saturating_sub(msg.len())))
+                    "\r{}{}\n",
+                    msg,
+                    " ".repeat(prev_len.saturating_sub(msg.len()))
                 ));
             }
             *self.log_len.lock().unwrap() = 0;
@@ -1004,17 +1005,20 @@ fn spawn_escape_watcher(
         // echoed (raw mode, mid-stream); the queued text is confirmed on
         // Enter instead.
         let mut steer_buf = String::new();
-        // Index into staging2.queue: if None, we're in normal steer mode.
-        // If Some(idx), we're editing a staged prompt from that index.
-        let mut editing_staged: Option<usize> = None;
 
         let mut prev_buf_len: usize = 0;
-        // Helper: render the current steer_buf to the button line.
+        // Helper: render the current steer_buf to the bottom line.
+        // Uses stdout (via raw_print) so \r is on the same stream as
+        // streaming output, preventing the visual glitch where stderr
+        // and stdout cursor positions diverge.
         let flush_buf = |buf: &str, prev_len: &mut usize| {
-            let len = buf.len();
-            let out = format!("\r  ↳ {buf}{}", " ".repeat(prev_len.saturating_sub(len)));
-            let _ = std::io::stderr().write_all(out.as_bytes());
-            let _ = std::io::stderr().flush();
+            let display: String = buf.chars().take(60).collect();
+            let len = display.len();
+            let out = format!(
+                "\r  ↳ {display}{}",
+                " ".repeat(prev_len.saturating_sub(len))
+            );
+            raw_print(&out);
             *prev_len = len + 4; // +4 for "  ↳ "
         };
 
@@ -1036,10 +1040,7 @@ fn spawn_escape_watcher(
                     KeyCode::Esc => {
                         // Clear button line on cancel.
                         if !steer_buf.is_empty() {
-                            let _ = std::io::stderr().write_all(
-                                format!("\r{}\r", " ".repeat(prev_buf_len.saturating_sub(1))).as_bytes(),
-                            );
-                            let _ = std::io::stderr().flush();
+                            raw_print(&format!("\r{}", " ".repeat(prev_buf_len.saturating_sub(1))));
                         }
                         cancel_handle.lock().unwrap().cancel();
                         break;
@@ -1053,41 +1054,35 @@ fn spawn_escape_watcher(
                         // Alt+↑: pull the newest staged prompt into the buffer for editing.
                         if let Some(text) = staging2.lock().unwrap().pop_back() {
                             steer_buf = text;
-                            editing_staged = Some(0); // marker: we're editing a staged item
                             flush_buf(&steer_buf, &mut prev_buf_len);
                         }
                     }
                     KeyCode::Enter => {
                         let text = steer_buf.trim().to_string();
                         steer_buf.clear();
-                        editing_staged = None;
                         // Clear button line.
-                        let _ = std::io::stderr().write_all(
-                            format!("\r{}\r", " ".repeat(prev_buf_len.saturating_sub(1))).as_bytes(),
-                        );
-                        let _ = std::io::stderr().flush();
+                        raw_print(&format!("\r{}", " ".repeat(prev_buf_len.saturating_sub(1))));
                         prev_buf_len = 0;
                         if text.is_empty() {
                             // Blank line: nothing to stage.
                         } else if steer.send(text.clone()).is_ok() {
                             let preview: String = text.chars().take(60).collect();
-                            let _ = std::io::stderr().write_all(
-                                format!("\r\n  ↳ steering queued: {preview}\r\n").as_bytes(),
-                            );
-                            let _ = std::io::stderr().flush();
+                            raw_print(&format!("\n  ↳ steering queued: {preview}\n"));
                         }
                     }
                     KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => {
                         // Ctrl+S: stage current buffer for Alt+↑, don't send.
                         let content = std::mem::take(&mut steer_buf);
-                        editing_staged = None;
                         if !content.trim().is_empty() {
-                            staging2.lock().unwrap().push_back(content.trim().to_string());
+                            staging2
+                                .lock()
+                                .unwrap()
+                                .push_back(content.trim().to_string());
                             // Clear button line and show confirmation.
-                            let _ = std::io::stderr().write_all(
-                                format!("\r{}\r  ↳ staged (Alt+↑ to edit)\r\n", " ".repeat(prev_buf_len.saturating_sub(1))).as_bytes(),
-                            );
-                            let _ = std::io::stderr().flush();
+                            raw_print(&format!(
+                                "\r{}  ↳ staged (Alt+↑ to edit)\n",
+                                " ".repeat(prev_buf_len.saturating_sub(1))
+                            ));
                             prev_buf_len = 0;
                         }
                     }

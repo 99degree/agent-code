@@ -157,7 +157,9 @@ pub(crate) fn format_session_list(
     sessions: &[agent_code_lib::services::session::SessionSummary],
 ) -> Vec<String> {
     if sessions.is_empty() {
-        return vec!["No sessions found for this directory. Use /sessions --all to see all.".into()];
+        return vec![
+            "No sessions found for this directory. Use /sessions --all to see all.".into(),
+        ];
     }
     let cwd_short = |s: &str| {
         std::path::Path::new(s)
@@ -1076,10 +1078,8 @@ impl App {
     ) {
         match action {
             PendingSessionAction::Show => {
-                let sessions = agent_code_lib::services::session::list_sessions_for_cwd(
-                    &self.cwd,
-                    20,
-                );
+                let sessions =
+                    agent_code_lib::services::session::list_sessions_for_cwd(&self.cwd, 20);
                 let sessions = if sessions.is_empty() {
                     agent_code_lib::services::session::list_sessions(20)
                 } else {

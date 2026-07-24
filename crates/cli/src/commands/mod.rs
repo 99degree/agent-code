@@ -1117,11 +1117,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 .and_then(|a| {
                     let after_tag = a.strip_prefix("--tag ")?.trim();
                     // Don't treat --all as a tag name.
-                    let tag_val = after_tag
+                    after_tag
                         .split_whitespace()
                         .next()
-                        .filter(|t| !t.eq_ignore_ascii_case("all"));
-                    tag_val
+                        .filter(|t| !t.eq_ignore_ascii_case("all"))
                 })
                 .filter(|s| !s.is_empty());
             let show_all = args
@@ -1175,7 +1174,9 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         s.id, s.cwd, s.turn_count, s.message_count, s.updated_at,
                     );
                 }
-                println!("\nUse /resume <id> to restore, /sessions --tag <tag> to filter, or /sessions --all for every directory.");
+                println!(
+                    "\nUse /resume <id> to restore, /sessions --tag <tag> to filter, or /sessions --all for every directory."
+                );
             }
             CommandResult::Handled
         }
