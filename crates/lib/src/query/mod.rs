@@ -827,6 +827,7 @@ impl QueryEngine {
             }
 
             // Normalize messages for API compatibility.
+            crate::llm::normalize::sanitize_tool_use_input(&mut self.state.messages);
             crate::llm::normalize::ensure_tool_result_pairing(&mut self.state.messages);
             crate::llm::normalize::strip_empty_blocks(&mut self.state.messages);
             crate::llm::normalize::remove_empty_messages(&mut self.state.messages);
@@ -1301,6 +1302,7 @@ impl QueryEngine {
                                                                 agent_limiter: None,
                                                                 tool_events,
                                                                 active_call_id,
+                                                                subagent_api_defaults: None,
                                                             },
                                                         )
                                                         .await
@@ -1566,6 +1568,11 @@ impl QueryEngine {
                 agent_limiter: Some(self.state.agent_limiter.clone()),
                 tool_events: Some(tool_event_tx),
                 active_call_id: None,
+                subagent_api_defaults: Some(
+                    crate::services::coordinator::SubagentEndpoint::from_api_config(
+                        &self.state.config.api,
+                    ),
+                ),
             };
 
             // Collect streaming tool results first.
