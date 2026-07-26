@@ -20,6 +20,8 @@ mod run;
 mod scroll;
 mod search;
 mod sink;
+#[cfg(test)]
+mod snapshot;
 mod stream_buffer;
 mod tasks;
 mod terminal_caps;
