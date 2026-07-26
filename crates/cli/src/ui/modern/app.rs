@@ -419,6 +419,8 @@ pub struct App {
     pub command_palette: Option<super::palette::CommandPalette>,
     /// Ctrl+M / `/model` in-TUI model picker.
     pub model_picker: Option<super::model_picker::ModelPicker>,
+    /// Ctrl+F in-transcript search.
+    pub search: Option<super::search::Search>,
     /// `/theme` in-TUI theme picker (live preview, Esc reverts).
     pub theme_picker: Option<super::theme_picker::ThemePicker>,
     /// Theme id the session is configured with (`auto`, `one-dark`, …).
@@ -583,6 +585,7 @@ impl App {
             queue_selected: 0,
             command_palette: None,
             model_picker: None,
+            search: None,
             theme_picker: None,
             theme_name: "auto".to_string(),
             inherit_fg: false,
