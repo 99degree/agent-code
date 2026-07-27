@@ -83,7 +83,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             // length limit, and a truncating cast would wrap a huge plan
             // round to a one-row request.
             let needed = u16::try_from(
-                super::tasks::pane_rows_with_todos(&app.tasks, &app.todos).saturating_add(1),
+                super::tasks::pane_rows_with_todos(&app.tasks, &app.todos, &app.collapsed_groups)
+                    .saturating_add(1),
             )
             .unwrap_or(u16::MAX);
             let strip = needed
@@ -786,6 +787,24 @@ fn draw_queue_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// One selectable pane row, tied back to the task list it came from.
+///
+/// `task` is an index into `app.tasks` (what the selection stores), not
+/// a position among rendered rows — folding a group must not shift it.
+struct RowAnchor {
+    task: usize,
+    /// First line of this row: the one carrying the `❯` marker. Rows are
+    /// not a uniform height — a task is a status line plus a headline, a
+    /// folded heading is a single line — so this is recorded rather than
+    /// derived from `end`.
+    start: usize,
+    /// Line index this row's rendering ends on.
+    end: usize,
+    /// Tasks this row accounts for: 1 normally, the group size for a
+    /// folded heading.
+    covers: usize,
+}
+
 /// Tasks/agents pane: state-ordered subagent rows (plan §M8).
 fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
     use super::tasks::TaskState;
@@ -797,8 +816,11 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // measure the real content box instead of the outer area.
     let inner = block.inner(area);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    // Line index of each task's last row, for the overflow count below.
-    let mut task_ends: Vec<usize> = Vec::new();
+    // Where each pane row ends, keyed by the task index it belongs to —
+    // the selection is an index into `app.tasks`, so a folded group
+    // ahead of it must not shift the lookup. Used by the overflow
+    // windowing below.
+    let mut anchors: Vec<RowAnchor> = Vec::new();
     let inner_w = (inner.width as usize).saturating_sub(1);
     let max_rows = inner.height as usize;
     // Checklist first: it is what the model says it is doing, which
@@ -873,6 +895,7 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let mut last_source: Option<super::tasks::TaskSource> = None;
     for (idx, t) in app.tasks.iter().enumerate() {
+        let group_folded = app.collapsed_groups.contains(&t.source);
         let p = palette();
         let selected = idx == app.tasks_selected;
         // Group header when the source changes. Subagents and background
@@ -882,13 +905,41 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
             if last_source.is_some() {
                 lines.push(Line::from(""));
             }
-            lines.push(Line::from(Span::styled(
-                t.source.heading().to_string(),
-                Style::default()
-                    .fg(palette().muted)
-                    .add_modifier(Modifier::BOLD),
-            )));
+            let count = app.tasks.iter().filter(|x| x.source == t.source).count();
+            // A folded group shows its size, so collapsing does not hide
+            // how much is behind it.
+            let heading = if group_folded {
+                format!("{} {} ({count})", "▸", t.source.heading())
+            } else {
+                format!("{} {}", "▾", t.source.heading())
+            };
+            // A folded group is selected through its heading, so the
+            // marker has to appear there or the pane looks unselected.
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if group_folded && selected { "❯" } else { " " }.to_string(),
+                    Style::default().fg(p.accent),
+                ),
+                Span::styled(
+                    heading,
+                    Style::default().fg(p.muted).add_modifier(Modifier::BOLD),
+                ),
+            ]));
             last_source = Some(t.source);
+            if group_folded {
+                // The heading is the whole group's one row on screen, so
+                // it accounts for every task behind it.
+                anchors.push(RowAnchor {
+                    task: idx,
+                    start: lines.len() - 1,
+                    end: lines.len() - 1,
+                    covers: count,
+                });
+            }
+        }
+        // Folded: the heading above stands in for the group's rows.
+        if group_folded {
+            continue;
         }
         let color = match t.state {
             TaskState::Working => palette().accent,
@@ -918,7 +969,13 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
             format!("  {head}"),
             Style::default().fg(palette().inactive),
         )));
-        task_ends.push(lines.len() - 1);
+        anchors.push(RowAnchor {
+            task: idx,
+            // Status line: pushed just above the headline.
+            start: lines.len() - 2,
+            end: lines.len() - 1,
+            covers: 1,
+        });
     }
     // When the area is still too short (many tasks, tiny terminal),
     // window the rows around the selection — Up/Down cycles the whole
@@ -927,11 +984,22 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // checklist above is already bounded and carries its own count, so
     // this footer speaks only for the rows the arrows navigate.
     if lines.len() > max_rows && max_rows > 0 {
-        let sel_end = task_ends.get(app.tasks_selected).copied().unwrap_or(0);
-        // The status row (with the ❯ marker) sits directly above the
-        // headline row; when space is too tight for both, the marker
-        // row is the one that must survive.
-        let sel_start = sel_end.saturating_sub(1);
+        let sel = anchors
+            .iter()
+            .find(|a| a.task == app.tasks_selected)
+            .or_else(|| {
+                // Selection inside a folded group but not on its first
+                // row: the nearest anchor at or before it is that
+                // group's heading.
+                anchors.iter().rev().find(|a| a.task <= app.tasks_selected)
+            });
+        let sel_end = sel.map(|a| a.end).unwrap_or(0);
+        // The row carrying the ❯ marker: the status line for a task, the
+        // heading itself for a folded group. When space is too tight for
+        // the whole row, this is the line that must survive — deriving it
+        // as `sel_end - 1` would step off a one-line folded heading onto
+        // the blank separator above it and hide the selection.
+        let sel_start = sel.map(|a| a.start).unwrap_or(0);
         if max_rows == 1 {
             let row = lines
                 .into_iter()
@@ -943,10 +1011,14 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
             let window = |visible_h: usize| {
                 let anchor = if visible_h >= 2 { sel_end } else { sel_start };
                 let offset = anchor.saturating_sub(visible_h - 1).min(total - visible_h);
-                let shown = task_ends
+                // A folded heading that survives the window accounts for
+                // its whole group: the user can read its "(n)", so those
+                // rows are not part of the "+n more" that scrolled away.
+                let shown: usize = anchors
                     .iter()
-                    .filter(|&&e| e >= offset && e < offset + visible_h)
-                    .count();
+                    .filter(|a| a.end >= offset && a.end < offset + visible_h)
+                    .map(|a| a.covers)
+                    .sum();
                 (offset, app.tasks.len().saturating_sub(shown))
             };
             // The footer costs a row, so it has to earn it. When every
@@ -1614,6 +1686,13 @@ pub fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
 
 #[cfg(test)]
 mod tests {
+    // The crate root allows dead code for its public API surface, which
+    // also silences a test that loses its `#[test]` — exactly what a
+    // merge did to `normal_mode_is_visible_in_the_prompt` here. Opt this
+    // module back in: an unannotated test is unreachable, so the
+    // compiler is the thing that should notice.
+    #![deny(dead_code)]
+
     use super::*;
     use crate::ui::modern::app::TranscriptItem;
     use ratatui::Terminal;
@@ -2484,6 +2563,39 @@ mod tests {
     }
 
     #[test]
+    fn a_folded_group_hides_its_rows_and_shows_its_size() {
+        use crate::ui::modern::tasks::TaskSource;
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut app = App::new("m", "/tmp", "s");
+        crate::ui::modern::tasks::upsert(&mut app.tasks, "a1", "working", "explore the parser");
+        crate::ui::modern::tasks::upsert_with_source(
+            &mut app.tasks,
+            "b1",
+            "working",
+            "cargo build",
+            TaskSource::Background,
+        );
+
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let open = buffer_to_string(term.backend().buffer());
+        assert!(open.contains("explore the parser"), "buffer:\n{open}");
+        assert!(open.contains("▾ agents"), "no expanded marker:\n{open}");
+
+        app.collapsed_groups.push(TaskSource::Subagent);
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let folded = buffer_to_string(term.backend().buffer());
+        assert!(
+            !folded.contains("explore the parser"),
+            "folding did not hide the row:\n{folded}"
+        );
+        // The count keeps the group honest about what it is hiding.
+        assert!(folded.contains("▸ agents (1)"), "buffer:\n{folded}");
+        // The other group is untouched.
+        assert!(folded.contains("cargo build"), "buffer:\n{folded}");
+    }
+
+    #[test]
     fn normal_mode_is_visible_in_the_prompt() {
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).unwrap();
@@ -2871,6 +2983,187 @@ mod tests {
             s.contains("job number 5"),
             "selected task scrolled out of view:\n{s}"
         );
+    }
+
+    /// A pane holding a big folded group ahead of a selected, expanded
+    /// one — the shape that broke the overflow window.
+    fn app_with_folded_group_then_background(agents: usize, jobs: usize) -> App {
+        let mut app = App::new("m", "/tmp", "s");
+        for i in 0..agents {
+            crate::ui::modern::tasks::upsert(
+                &mut app.tasks,
+                &format!("a{i}"),
+                "working",
+                &format!("agent number {i}"),
+            );
+        }
+        let rows = (0..jobs)
+            .map(|i| crate::ui::modern::tasks::ManagerRow {
+                id: format!("b{i}"),
+                state: "working".into(),
+                headline: format!("job number {i}"),
+                subagent_id: None,
+            })
+            .collect();
+        app.sync_background_tasks(rows);
+        app.collapsed_groups
+            .push(crate::ui::modern::tasks::TaskSource::Subagent);
+        app
+    }
+
+    /// The "… +n more" count.
+    fn hidden_count(s: &str) -> usize {
+        let tail = s.split("… +").nth(1).expect("no overflow indicator");
+        tail.split(' ')
+            .next()
+            .expect("no count")
+            .parse()
+            .expect("count not a number")
+    }
+
+    /// `task_ends` was a dense list of *rendered* rows indexed by the
+    /// absolute task index, so a folded group ahead of the selection
+    /// shifted the lookup: the window anchored on the wrong row (or fell
+    /// back to zero) and scrolled the selected task off screen.
+    #[test]
+    fn overflow_window_follows_selection_past_a_folded_group() {
+        let backend = TestBackend::new(100, 16);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut app = app_with_folded_group_then_background(20, 6);
+        // Last background row: far below the folded group.
+        app.tasks_selected = app.tasks.len() - 1;
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = buffer_to_string(term.backend().buffer());
+        assert!(
+            s.contains("job number 5"),
+            "selected task scrolled out of view past a folded group:\n{s}"
+        );
+    }
+
+    /// Walking down the visible group must keep every step on screen,
+    /// not just the first.
+    #[test]
+    fn stepping_through_a_group_after_a_folded_one_stays_visible() {
+        let backend = TestBackend::new(100, 16);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut app = app_with_folded_group_then_background(20, 6);
+        app.tasks_selected =
+            crate::ui::modern::tasks::selectable_indices(&app.tasks, &app.collapsed_groups)[1];
+        for step in 0..6 {
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            let s = buffer_to_string(term.backend().buffer());
+            let headline = format!("job number {step}");
+            assert!(
+                s.contains(&headline),
+                "step {step}: selected task not on screen:\n{s}"
+            );
+            app.tasks_select(1);
+        }
+    }
+
+    /// A folded heading that is on screen already tells the user how
+    /// many rows are behind it, so those must not be counted again in
+    /// the "+n more" tally.
+    #[test]
+    fn a_visible_folded_heading_accounts_for_its_own_rows() {
+        let backend = TestBackend::new(100, 16);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut app = app_with_folded_group_then_background(20, 6);
+        app.tasks_selected =
+            crate::ui::modern::tasks::selectable_indices(&app.tasks, &app.collapsed_groups)[0];
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = buffer_to_string(term.backend().buffer());
+        assert!(s.contains("▸ agents (20)"), "folded heading missing:\n{s}");
+        let hidden = hidden_count(&s);
+        assert!(
+            hidden <= 6,
+            "the 20 rows behind the visible folded heading were counted as hidden: +{hidden}\n{s}"
+        );
+    }
+
+    /// A folded heading is one line, but the window used to derive the
+    /// marker row as `end - 1` — the shape of a two-line task row. On a
+    /// short pane that stepped onto the blank separator above the
+    /// heading and dropped the selected group off screen entirely, so
+    /// the user had to unfold it blind. The second group is the folded
+    /// one here: the first group's heading sits at line 0, where the
+    /// off-by-one is invisible.
+    #[test]
+    fn a_selected_folded_heading_survives_every_pane_height() {
+        for h in 8..=22u16 {
+            let mut term = Terminal::new(TestBackend::new(100, h)).unwrap();
+            let mut app = App::new("m", "/tmp", "s");
+            for i in 0..12 {
+                crate::ui::modern::tasks::upsert(
+                    &mut app.tasks,
+                    &format!("a{i}"),
+                    "working",
+                    &format!("agent number {i}"),
+                );
+            }
+            let rows = (0..3)
+                .map(|i| crate::ui::modern::tasks::ManagerRow {
+                    id: format!("b{i}"),
+                    state: "working".into(),
+                    headline: format!("job number {i}"),
+                    subagent_id: None,
+                })
+                .collect();
+            app.sync_background_tasks(rows);
+            // "background" sorts after "agents", so this is the second
+            // group.
+            app.collapsed_groups
+                .push(crate::ui::modern::tasks::TaskSource::Background);
+            app.tasks_selected = app
+                .tasks
+                .iter()
+                .position(|t| t.source == crate::ui::modern::tasks::TaskSource::Background)
+                .unwrap();
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            let s = buffer_to_string(term.backend().buffer());
+            assert!(
+                s.contains("❯▸ background (3)"),
+                "height {h}: selected folded heading not on screen:\n{s}"
+            );
+        }
+    }
+
+    /// The same window must still keep a selected *task* row's marker
+    /// on screen — the marker sits on the status line, above the
+    /// headline.
+    #[test]
+    fn a_selected_task_row_keeps_its_marker_at_every_pane_height() {
+        for h in 8..=22u16 {
+            let mut term = Terminal::new(TestBackend::new(100, h)).unwrap();
+            let mut app = App::new("m", "/tmp", "s");
+            let rows = (0..8)
+                .map(|i| crate::ui::modern::tasks::ManagerRow {
+                    id: format!("b{i}"),
+                    state: "working".into(),
+                    headline: format!("job number {i}"),
+                    subagent_id: None,
+                })
+                .collect();
+            app.sync_background_tasks(rows);
+            app.tasks_selected = app.tasks.len() - 1;
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            let s = buffer_to_string(term.backend().buffer());
+            assert!(s.contains('❯'), "height {h}: selection marker lost:\n{s}");
+        }
+    }
+
+    /// The selection marker has to render on the heading when the
+    /// selected group is folded, or the pane looks like it lost focus.
+    #[test]
+    fn a_folded_heading_shows_the_selection_marker() {
+        let backend = TestBackend::new(100, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut app = app_with_folded_group_then_background(2, 2);
+        app.tasks_selected =
+            crate::ui::modern::tasks::selectable_indices(&app.tasks, &app.collapsed_groups)[0];
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = buffer_to_string(term.backend().buffer());
+        assert!(s.contains("❯▸ agents (2)"), "marker not on heading:\n{s}");
     }
 
     #[test]
