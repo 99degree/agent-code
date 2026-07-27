@@ -74,6 +74,9 @@ pub async fn run_modern_tui(mut engine: QueryEngine) -> anyhow::Result<()> {
 
     let session = Session::new(engine);
     let mut app = App::new_with_security(model, cwd, session_id, disable_skill_shell);
+    // Constructors install defaults only; the user's file is read once
+    // here so tests building Apps stay independent of machine config.
+    app.keybindings = std::sync::Arc::new(crate::ui::keybindings::KeybindingRegistry::load());
     // The picker previews by mutating the global theme, so the App has to
     // remember what the user actually configured in order to revert.
     app.theme_name = configured.clone();
@@ -1084,6 +1087,14 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // A user chord from `keybindings.json` wins over the built-in
+    // dispatch below, which is the point of customization. Reserved
+    // chords (Ctrl+C, Esc) are filtered out inside `action_for`, and
+    // they are handled above this line anyway.
+    if apply_user_keybinding(app, &key) {
+        return;
+    }
+
     match (key.modifiers, key.code) {
         (m, KeyCode::Char('d') | KeyCode::Char('D'))
             if m.contains(KeyModifiers::CONTROL) && app.input.is_empty() =>
@@ -1387,6 +1398,79 @@ fn handle_theme_picker_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// Dispatch a user-defined keybinding. Returns true when one fired.
+///
+/// Only chords the user actually wrote are dispatched: the built-in
+/// defaults in the registry describe chords the hardcoded handler
+/// already owns, so routing those through here would run them twice.
+fn apply_user_keybinding(app: &mut App, key: &KeyEvent) -> bool {
+    use crate::ui::keybindings::{KeyAction, chord_string};
+
+    // A held key emits Repeat events; dispatching a binding on each one
+    // would queue a duplicate turn per repeat from a single hold. Only
+    // the initial press fires — built-in handlers below keep their own
+    // repeat behavior (held Ctrl+C must still count).
+    if key.kind != KeyEventKind::Press {
+        return false;
+    }
+    let Some(chord) = chord_string(key.code, key.modifiers) else {
+        return false;
+    };
+    if !app.keybindings.is_user_defined(&chord) {
+        return false;
+    }
+    let registry = app.keybindings.clone();
+    let Some(action) = registry.action_for(key.code, key.modifiers) else {
+        return false;
+    };
+    // Bound actions submit their own text, never the composer's draft —
+    // stash the draft so opening the tasks pane (or any binding) does not
+    // silently discard what the user was writing.
+    let draft = std::mem::take(&mut app.input);
+    let draft_cursor = app.cursor;
+    app.cursor = 0;
+    match action {
+        // Both go through the normal submit path so slash dispatch,
+        // queueing and mid-turn behaviour are identical to typing it.
+        KeyAction::Command { command } => {
+            app.input = format!("/{}", command.trim_start_matches('/'));
+            app.cursor = app.input.len();
+            app.submit();
+        }
+        KeyAction::Prompt { prompt } => {
+            app.input = prompt.clone();
+            app.cursor = app.input.len();
+            app.submit();
+        }
+        KeyAction::Toggle { setting } => {
+            // Toggles map onto the slash commands that own each setting
+            // rather than reaching into state directly.
+            let cmd = match setting.as_str() {
+                "tasks" => Some("/tasks"),
+                "queue" => Some("/queue"),
+                "minimal" => Some("/minimal"),
+                "fullscreen" => Some("/fullscreen"),
+                _ => None,
+            };
+            match cmd {
+                Some(c) => {
+                    app.input = c.to_string();
+                    app.cursor = app.input.len();
+                    app.submit();
+                }
+                None => {
+                    app.status_message = format!("keybinding: unknown toggle `{setting}`");
+                    app.dirty = true;
+                }
+            }
+        }
+    }
+    app.input = draft;
+    app.cursor = draft_cursor;
+    app.dirty = true;
+    true
+}
+
 fn handle_model_picker_key(app: &mut App, key: KeyEvent) {
     // Ctrl+M toggles closed; Esc / Ctrl+C dismiss.
     if matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M'))
@@ -1593,6 +1677,171 @@ mod tests {
 
     fn super_key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::SUPER)
+    }
+
+    /// Build an App whose registry has one user binding.
+    fn app_with_binding(chord: &str, action: crate::ui::keybindings::KeyAction) -> App {
+        use crate::ui::keybindings::{Keybinding, KeybindingRegistry};
+        let mut app = App::new("m", "/tmp", "s");
+        app.keybindings =
+            std::sync::Arc::new(KeybindingRegistry::from_user_bindings(vec![Keybinding {
+                key: chord.to_string(),
+                action,
+                description: None,
+            }]));
+        app
+    }
+
+    /// The registry was loaded and listed by `/keybindings`, but nothing
+    /// ever consulted it on a keypress — a user could see their binding
+    /// listed and have it do nothing.
+    #[test]
+    fn a_user_bound_chord_runs_its_command() {
+        use crate::ui::keybindings::KeyAction;
+        let mut app = app_with_binding(
+            "ctrl+k",
+            KeyAction::Command {
+                command: "tasks".into(),
+            },
+        );
+        // Assert on the effect of `/tasks`, not on the composer being
+        // empty — the composer is empty whether or not the binding fires,
+        // which would make this test pass for the wrong reason.
+        let before = app.show_tasks;
+        handle_key(&mut app, ctrl('k'));
+        assert_ne!(
+            app.show_tasks, before,
+            "the bound command did not reach slash dispatch"
+        );
+        assert!(app.input.is_empty(), "the chord left text in the composer");
+    }
+
+    #[test]
+    fn a_user_bound_chord_submits_a_prompt() {
+        use crate::ui::keybindings::KeyAction;
+        let mut app = app_with_binding(
+            "alt+r",
+            KeyAction::Prompt {
+                prompt: "run the tests".into(),
+            },
+        );
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT),
+        );
+        assert_eq!(
+            app.pending_submit.as_deref(),
+            Some("run the tests"),
+            "the bound prompt was not submitted"
+        );
+    }
+
+    /// A held chord emits Repeat events; each must not re-fire the
+    /// binding — one hold of a prompt binding would otherwise queue a
+    /// duplicate turn (and a duplicate model call) per repeat.
+    #[test]
+    fn a_held_chord_repeat_does_not_refire_the_binding() {
+        use crate::ui::keybindings::KeyAction;
+        let mut app = app_with_binding(
+            "alt+r",
+            KeyAction::Prompt {
+                prompt: "run the tests".into(),
+            },
+        );
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT),
+        );
+        assert_eq!(
+            app.pending_submit.as_deref(),
+            Some("run the tests"),
+            "the initial press did not fire"
+        );
+        handle_key(
+            &mut app,
+            KeyEvent::new_with_kind(KeyCode::Char('r'), KeyModifiers::ALT, KeyEventKind::Repeat),
+        );
+        assert!(
+            app.queue.is_empty(),
+            "a key repeat queued a duplicate prompt"
+        );
+    }
+
+    /// A binding fired mid-composition must not eat the draft: the bound
+    /// action submits its own text, the user's half-written prompt stays.
+    #[test]
+    fn a_bound_command_keeps_the_composer_draft() {
+        use crate::ui::keybindings::KeyAction;
+        let mut app = app_with_binding(
+            "ctrl+k",
+            KeyAction::Command {
+                command: "tasks".into(),
+            },
+        );
+        app.input = "half a thought".to_string();
+        app.cursor = 4;
+        let before = app.show_tasks;
+        handle_key(&mut app, ctrl('k'));
+        assert_ne!(app.show_tasks, before, "the bound command did not run");
+        assert_eq!(app.input, "half a thought", "the binding ate the draft");
+        assert_eq!(app.cursor, 4, "the binding moved the cursor");
+    }
+
+    #[test]
+    fn a_bound_prompt_keeps_the_composer_draft() {
+        use crate::ui::keybindings::KeyAction;
+        let mut app = app_with_binding(
+            "alt+r",
+            KeyAction::Prompt {
+                prompt: "run the tests".into(),
+            },
+        );
+        app.input = "half a thought".to_string();
+        app.cursor = 3;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT),
+        );
+        assert_eq!(
+            app.pending_submit.as_deref(),
+            Some("run the tests"),
+            "the bound prompt was not submitted"
+        );
+        assert_eq!(app.input, "half a thought", "the binding ate the draft");
+        assert_eq!(app.cursor, 3, "the binding moved the cursor");
+    }
+
+    /// An unbound chord must still reach the built-in handler.
+    #[test]
+    fn an_unbound_chord_falls_through_to_the_built_in() {
+        use crate::ui::keybindings::KeyAction;
+        let mut app = app_with_binding(
+            "ctrl+k",
+            KeyAction::Command {
+                command: "tasks".into(),
+            },
+        );
+        handle_key(&mut app, ctrl('p'));
+        assert!(
+            app.command_palette_open(),
+            "Ctrl+P stopped opening the palette"
+        );
+    }
+
+    /// Rebinding Ctrl+C must not take away the way out.
+    #[test]
+    fn a_binding_cannot_steal_ctrl_c() {
+        use crate::ui::keybindings::KeyAction;
+        let mut app = app_with_binding(
+            "ctrl+c",
+            KeyAction::Prompt {
+                prompt: "hijacked".into(),
+            },
+        );
+        app.phase = Phase::Streaming;
+        handle_key(&mut app, ctrl('c'));
+        assert!(app.cancel_requested, "Ctrl+C no longer cancels");
+        assert!(app.pending_submit.is_none(), "Ctrl+C submitted a prompt");
     }
 
     #[test]
