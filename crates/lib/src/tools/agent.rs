@@ -60,6 +60,95 @@ pub fn resolve_subagent_id(input: &serde_json::Value) -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// The three fixed segments of the tool's background-dispatch
+/// acknowledgement, in order.
+///
+/// The acknowledgement is assembled from these and matched back against
+/// them, so the emitter and the query loop cannot drift. They are used
+/// as a *skeleton* — anchored at the start, in order, and closed by the
+/// tail — never as a phrase searched for anywhere in the body: a
+/// foreground subagent's own answer is free to contain any wording,
+/// including a description of background launches.
+const ACK_HEAD: &str = "Agent (";
+const ACK_DISPATCH: &str = ") started in the background as task ";
+const ACK_TAIL: &str = "Its result surfaces automatically when it completes — do not wait on it.";
+
+/// Flatten a value interpolated into the acknowledgement onto one line.
+///
+/// `description` (and the `subagent_id` derived from it) is model-authored
+/// and nothing in the schema forbids a newline. The acknowledgement is
+/// defined to be a single line — that is what lets
+/// [`is_background_launch_ack`] reject a foreground result before
+/// inspecting it — so the fields are flattened when it is built rather
+/// than the check being loosened.
+fn one_line(value: &str) -> String {
+    value
+        .replace(['\n', '\r'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The acknowledgement returned when a background task is dispatched.
+///
+/// The single builder both the tool and the tests go through, so the
+/// emitted wording and [`is_background_launch_ack`] cannot diverge.
+/// Every interpolated field is flattened — `description` is
+/// model-authored and the schema does not forbid a newline in it.
+fn background_launch_ack(
+    description: &str,
+    subagent_type: &str,
+    task_id: &str,
+    subagent_id: &str,
+) -> String {
+    format!(
+        "{ACK_HEAD}{}, type={}{ACK_DISPATCH}{} (subagent_id={}). {ACK_TAIL}",
+        one_line(description),
+        one_line(subagent_type),
+        one_line(task_id),
+        one_line(subagent_id),
+    )
+}
+
+/// Whether an Agent tool call asked to be run in the background.
+///
+/// The structured request, read from the call input. Whether the launch
+/// actually happened is a separate question: without a `TaskManager` the
+/// tool falls through to a foreground run.
+pub fn requested_background(input: &serde_json::Value) -> bool {
+    input
+        .get("run_in_background")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Whether a result body is the tool's own background-dispatch
+/// acknowledgement rather than a subagent's answer.
+///
+/// Matches the acknowledgement's structure: it opens with the tool's
+/// header, carries the dispatch clause and the task's `subagent_id`
+/// after it, and closes with the fixed tail. A body that merely mentions
+/// background launches does not match.
+pub fn is_background_launch_ack(content: &str) -> bool {
+    let content = content.trim_end();
+    // The acknowledgement is a single line the tool wrote by itself. A
+    // foreground result opens with its own `Agent (…) completed.` header
+    // and puts the child's answer on later lines, so an acknowledgement
+    // quoted anywhere in that answer is rejected here — before any
+    // segment is inspected — rather than being found by a scan past the
+    // header.
+    if content.contains(['\n', '\r']) {
+        return false;
+    }
+    let Some(rest) = content.strip_prefix(ACK_HEAD) else {
+        return false;
+    };
+    let Some((_, after_dispatch)) = rest.split_once(ACK_DISPATCH) else {
+        return false;
+    };
+    after_dispatch.contains("(subagent_id=") && content.ends_with(ACK_TAIL)
+}
+
 pub struct AgentTool;
 
 #[async_trait]
@@ -303,10 +392,7 @@ impl Tool for AgentTool {
         // output is captured to the task's output file and surfaced when
         // it finishes (see `services::task_surface`). Requires a task
         // manager; without one we fall through to synchronous mode.
-        let run_in_background = input
-            .get("run_in_background")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let run_in_background = requested_background(&input);
         let endpoint = resolve_subagent_endpoint(
             model_override,
             Some(&definition),
@@ -327,10 +413,11 @@ impl Tool for AgentTool {
                 &endpoint,
             )
             .await;
-            return Ok(ToolResult::success(format!(
-                "Agent ({description}, type={subagent_type}) started in the background as task {id} \
-                 (subagent_id={subagent_id}). Its result surfaces automatically when it completes — \
-                 do not wait on it."
+            return Ok(ToolResult::success(background_launch_ack(
+                description,
+                subagent_type,
+                &id.to_string(),
+                &subagent_id,
             )));
         }
 
@@ -1123,6 +1210,128 @@ mod tests {
 
         // Don't leave the child running past the test.
         let _ = tm.kill(&id).await;
+    }
+}
+
+#[cfg(test)]
+mod background_ack_tests {
+    use super::{background_launch_ack, is_background_launch_ack, one_line, requested_background};
+    use serde_json::json;
+
+    /// Pinned by hand rather than rebuilt from the segment constants, so
+    /// a change to the emitted wording that the matcher does not follow
+    /// fails here instead of silently stranding a background row.
+    const REAL_ACK: &str = "Agent (sweep the repo, type=general-purpose) started in the background \
+                            as task bg-7 (subagent_id=sweep the repo). Its result surfaces \
+                            automatically when it completes — do not wait on it.";
+
+    #[test]
+    fn the_tools_own_acknowledgement_matches() {
+        assert!(is_background_launch_ack(REAL_ACK));
+        assert!(
+            is_background_launch_ack(&format!("{REAL_ACK}\n")),
+            "a trailing newline must not defeat the match"
+        );
+    }
+
+    /// The reason this is a structural match and not a phrase search: a
+    /// background request runs in the foreground when no `TaskManager`
+    /// is available, and that child's answer may say anything at all.
+    #[test]
+    fn a_subagent_answer_about_background_launches_is_not_an_acknowledgement() {
+        assert!(!is_background_launch_ack(
+            "Agent (…) started in the background as task N is what you get with run_in_background."
+        ));
+        assert!(!is_background_launch_ack(
+            "The Agent tool reports that work started in the background as task 3 (subagent_id=x)."
+        ));
+        assert!(!is_background_launch_ack(
+            "Its result surfaces automatically when it completes — do not wait on it."
+        ));
+        assert!(!is_background_launch_ack("found three call sites"));
+        assert!(!is_background_launch_ack(""));
+    }
+
+    /// The foreground result carries the tool's *own* `Agent (…)` header
+    /// too, so an anchored prefix alone is not enough: a child that
+    /// quotes a real acknowledgement at the end of its answer would
+    /// otherwise strand its finished row at `working`.
+    #[test]
+    fn a_foreground_result_quoting_an_acknowledgement_is_not_one() {
+        let quoted = format!(
+            "Agent (sweep the repo, type=general-purpose, subagent_id=sweep) completed.\n\n\
+             I launched a helper and it replied:\n{REAL_ACK}"
+        );
+        assert!(
+            !is_background_launch_ack(&quoted),
+            "a quoted acknowledgement inside a foreground result was taken as a dispatch"
+        );
+    }
+
+    /// The degenerate foreground result — the child wrote nothing — is
+    /// still just a completion header.
+    #[test]
+    fn an_empty_foreground_result_is_not_an_acknowledgement() {
+        assert!(!is_background_launch_ack(
+            "Agent (sweep, type=general-purpose, subagent_id=sweep) completed.\n\n"
+        ));
+    }
+
+    /// `description` is model-authored and the schema does not forbid a
+    /// newline in it. Interpolated verbatim it would split the
+    /// acknowledgement across lines, and a genuinely dispatched agent
+    /// would then be reported `done` with its acknowledgement shown as
+    /// the agent's output. The fields are flattened at construction, so
+    /// the acknowledgement the tool actually emits still matches.
+    #[test]
+    fn an_acknowledgement_built_from_multiline_fields_still_matches() {
+        let ack = background_launch_ack(
+            "audit auth\nand report back",
+            "general-purpose",
+            "bg-7",
+            "audit auth\nand report",
+        );
+        assert!(
+            !ack.contains('\n'),
+            "the acknowledgement spans lines: {ack}"
+        );
+        assert!(
+            is_background_launch_ack(&ack),
+            "a real dispatch was not recognised: {ack}"
+        );
+    }
+
+    /// The builder is the single source for the wording, so the pinned
+    /// literal above must be exactly what it produces.
+    #[test]
+    fn the_builder_produces_the_pinned_wording() {
+        assert_eq!(
+            background_launch_ack(
+                "sweep the repo",
+                "general-purpose",
+                "bg-7",
+                "sweep the repo"
+            ),
+            REAL_ACK
+        );
+    }
+
+    #[test]
+    fn one_line_collapses_every_break() {
+        assert_eq!(one_line("a\nb\r\nc"), "a b c");
+        assert_eq!(one_line("  padded \n words  "), "padded words");
+        assert_eq!(one_line("plain"), "plain");
+    }
+
+    #[test]
+    fn requested_background_reads_the_structured_flag() {
+        assert!(requested_background(&json!({"run_in_background": true})));
+        assert!(!requested_background(&json!({"run_in_background": false})));
+        assert!(!requested_background(&json!({"description": "x"})));
+        assert!(
+            !requested_background(&json!({"run_in_background": "true"})),
+            "a non-boolean must not be read as a background request"
+        );
     }
 }
 
