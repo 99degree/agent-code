@@ -1235,6 +1235,16 @@ fn handle_key_inner(app: &mut App, key: KeyEvent) {
                 (_, KeyCode::Char('A')) | (_, KeyCode::Char('4')) => {
                     app.resolve_permission(PermissionResponse::AllowAlways);
                 }
+                // `P` grants the offered prefix. Only bound when one is
+                // offered, so it cannot fire for a command the gate could
+                // not reason about.
+                (_, KeyCode::Char('P')) | (_, KeyCode::Char('5'))
+                    if app.suggested_prefix().is_some() =>
+                {
+                    if let Some(prefix) = app.suggested_prefix() {
+                        app.resolve_permission(PermissionResponse::AllowAlwaysPrefix { prefix });
+                    }
+                }
                 (_, KeyCode::Char('a')) | (_, KeyCode::Char('2')) => {
                     app.resolve_permission(PermissionResponse::AllowSession);
                 }
@@ -2814,6 +2824,7 @@ mod tests {
                         .collect::<Vec<_>>()
                         .join("\n"),
                 ),
+                suggested_prefix: None,
                 respond: tx,
             },
         ));
@@ -2855,6 +2866,7 @@ mod tests {
                 description: "run".into(),
                 origin: None,
                 input_preview: None,
+                suggested_prefix: None,
                 respond: tx,
             },
         ));
@@ -2879,6 +2891,7 @@ mod tests {
                 description: "run".into(),
                 origin: None,
                 input_preview: None,
+                suggested_prefix: None,
                 respond: tx,
             },
         ));
@@ -2972,6 +2985,7 @@ mod tests {
                 description: "run".into(),
                 origin: None,
                 input_preview: None,
+                suggested_prefix: None,
                 respond: tx,
             },
         ));
@@ -3004,6 +3018,7 @@ mod tests {
                 description: "run".into(),
                 origin: None,
                 input_preview: None,
+                suggested_prefix: None,
                 respond: tx,
             },
         ));
@@ -3403,6 +3418,7 @@ mod tests {
                     description: "d".into(),
                     origin: None,
                     input_preview: None,
+                    suggested_prefix: None,
                     respond,
                 },
             ));
