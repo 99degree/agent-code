@@ -427,6 +427,8 @@ pub struct App {
     pub queue_selected: usize,
     /// Selected row in the tasks pane, for drill-in.
     pub tasks_selected: usize,
+    /// Groups folded to their heading in the tasks pane.
+    pub collapsed_groups: Vec<super::tasks::TaskSource>,
     /// The model's current checklist, from the latest `TodoWrite`.
     pub todos: Vec<super::tasks::TodoItem>,
     /// Which conversation `todos` describes. Bumped whenever the
@@ -638,6 +640,7 @@ impl App {
             show_queue_pane: false,
             queue_selected: 0,
             tasks_selected: 0,
+            collapsed_groups: Vec::new(),
             todos: Vec::new(),
             conversation_epoch: 0,
             pending_task_output: None,
@@ -2306,6 +2309,7 @@ impl App {
                     .position(|t| t.task_id.as_deref() == Some(tid.as_str()))
             {
                 self.tasks_selected = idx;
+                self.snap_selection_to_selectable();
                 return;
             }
             if let Some(idx) = self
@@ -2314,20 +2318,75 @@ impl App {
                 .position(|t| t.agent_id == id && t.source == src)
             {
                 self.tasks_selected = idx;
+                self.snap_selection_to_selectable();
                 return;
             }
         }
         self.tasks_selected = self.tasks_selected.min(self.tasks.len().saturating_sub(1));
+        self.snap_selection_to_selectable();
     }
 
     /// Move the tasks-pane selection, clamped to the row count.
     pub fn tasks_select(&mut self, delta: i32) {
-        if self.tasks.is_empty() {
+        // A collapsed group's members are not on screen, so the
+        // selection steps over them and lands on the heading row that
+        // stands in for the group.
+        let selectable = super::tasks::selectable_indices(&self.tasks, &self.collapsed_groups);
+        if selectable.is_empty() {
             return;
         }
-        let n = self.tasks.len() as i32;
-        self.tasks_selected = (self.tasks_selected as i32 + delta).rem_euclid(n) as usize;
+        let here = selectable
+            .iter()
+            .position(|i| *i == self.tasks_selected)
+            .unwrap_or(0);
+        let n = selectable.len() as i32;
+        let next = (here as i32 + delta).rem_euclid(n) as usize;
+        self.tasks_selected = selectable[next];
         self.dirty = true;
+    }
+
+    /// Fold or unfold the group the selection is in.
+    ///
+    /// Folding keeps the selection on the group, moved to the row its
+    /// heading stands in for. Moving it into a *different* group would
+    /// strand the folded one: Up/Down only walks selectable rows, so
+    /// the heading could never be reached to unfold it again.
+    pub fn toggle_selected_group(&mut self) {
+        let Some(source) = self.tasks.get(self.tasks_selected).map(|t| t.source) else {
+            return;
+        };
+        if let Some(pos) = self.collapsed_groups.iter().position(|s| *s == source) {
+            self.collapsed_groups.remove(pos);
+        } else {
+            self.collapsed_groups.push(source);
+            if let Some(first) = self.tasks.iter().position(|t| t.source == source) {
+                self.tasks_selected = first;
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Pull the selection onto a selectable row.
+    ///
+    /// A re-sort can leave `tasks_selected` on a folded group's second
+    /// or later row, which no longer has a row of its own on screen;
+    /// snap it to the heading that represents it.
+    fn snap_selection_to_selectable(&mut self) {
+        if self.tasks.is_empty() {
+            self.tasks_selected = 0;
+            return;
+        }
+        let selectable = super::tasks::selectable_indices(&self.tasks, &self.collapsed_groups);
+        if selectable.contains(&self.tasks_selected) {
+            return;
+        }
+        if let Some(source) = self.tasks.get(self.tasks_selected).map(|t| t.source)
+            && let Some(first) = self.tasks.iter().position(|t| t.source == source)
+        {
+            self.tasks_selected = first;
+            return;
+        }
+        self.tasks_selected = selectable.first().copied().unwrap_or(0);
     }
 
     /// One (label, body) card per captured inline result.
@@ -2358,6 +2417,14 @@ impl App {
     /// manager (`run_in_background`). An inline subagent row has no
     /// output file — say so rather than opening an empty pane.
     pub fn drill_into_selected_task(&mut self) {
+        // On a folded heading the selection stands for the whole group,
+        // not for the one row underneath it — opening that row's output
+        // would act on something the user cannot see. Unfold instead.
+        if super::tasks::is_folded_heading(&self.tasks, &self.collapsed_groups, self.tasks_selected)
+        {
+            self.toggle_selected_group();
+            return;
+        }
         let Some(row) = self.tasks.get(self.tasks_selected) else {
             return;
         };
@@ -2454,6 +2521,16 @@ impl App {
         self.pending_images.clear();
         self.pending_attachments.clear();
         self.dirty = true;
+    }
+
+    /// Whether an unmodified Space belongs to the pane's fold binding
+    /// rather than to the composer.
+    ///
+    /// Two dispatch sites need this answer — the fold arm claims the
+    /// key, and vi normal mode's bare-character arm has to fall through
+    /// for it — so they share one predicate instead of drifting apart.
+    pub fn space_folds_group(&self) -> bool {
+        self.tasks_nav_active() && !self.show_queue_pane && self.input.is_empty()
     }
 
     /// Whether the pane's arrow/Enter bindings may claim the key. Visible
@@ -2847,6 +2924,12 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    // The crate root allows dead code for its public API surface,
+    // which also silences a test that loses its `#[test]`. Opt back in:
+    // an unannotated test is unreachable, so the compiler should be the
+    // thing that notices.
+    #![deny(dead_code)]
+
     use super::*;
     use agent_code_lib::tools::PermissionResponse;
 
@@ -3905,6 +3988,163 @@ mod tests {
         }
     }
 
+    /// Two groups, so folding one leaves somewhere else for the
+    /// selection to run off to.
+    fn app_with_two_groups() -> App {
+        use crate::ui::modern::tasks::TaskSource;
+        let mut app = App::new("m", "/tmp", "s");
+        crate::ui::modern::tasks::upsert(&mut app.tasks, "a1", "working", "explore");
+        crate::ui::modern::tasks::upsert(&mut app.tasks, "a2", "working", "audit");
+        crate::ui::modern::tasks::upsert_with_source(
+            &mut app.tasks,
+            "b1",
+            "working",
+            "build",
+            TaskSource::Background,
+        );
+        app
+    }
+
+    fn first_of(app: &App, source: crate::ui::modern::tasks::TaskSource) -> usize {
+        app.tasks.iter().position(|t| t.source == source).unwrap()
+    }
+
+    /// Folding used to push the selection into the *other* group, and
+    /// Up/Down only walked unfolded rows — so the group the user had
+    /// just folded could never be selected again and Space could not
+    /// unfold it.
+    #[test]
+    fn a_folded_group_can_still_be_selected_and_unfolded() {
+        use crate::ui::modern::tasks::TaskSource;
+        let mut app = app_with_two_groups();
+        app.tasks_selected = first_of(&app, TaskSource::Subagent);
+        app.toggle_selected_group();
+
+        assert!(app.collapsed_groups.contains(&TaskSource::Subagent));
+        assert_eq!(
+            app.tasks[app.tasks_selected].source,
+            TaskSource::Subagent,
+            "selection left the group it folded"
+        );
+        assert!(
+            crate::ui::modern::tasks::is_folded_heading(
+                &app.tasks,
+                &app.collapsed_groups,
+                app.tasks_selected,
+            ),
+            "selection is not on the folded heading"
+        );
+        // Space unfolds it again without any intervening navigation.
+        app.toggle_selected_group();
+        assert!(
+            app.collapsed_groups.is_empty(),
+            "could not unfold the group that was just folded"
+        );
+    }
+
+    /// Moving away from a folded heading and back must return to it,
+    /// not skip the group entirely.
+    #[test]
+    fn navigation_returns_to_a_folded_heading() {
+        use crate::ui::modern::tasks::TaskSource;
+        let mut app = app_with_two_groups();
+        app.tasks_selected = first_of(&app, TaskSource::Subagent);
+        app.toggle_selected_group();
+        let heading = app.tasks_selected;
+
+        // Two selectable rows now: the folded heading and the one
+        // background row. Down then Down wraps back to the heading.
+        app.tasks_select(1);
+        assert_eq!(app.tasks[app.tasks_selected].source, TaskSource::Background);
+        app.tasks_select(1);
+        assert_eq!(
+            app.tasks_selected, heading,
+            "navigation skipped the folded heading"
+        );
+        app.tasks_select(-1);
+        assert_eq!(app.tasks[app.tasks_selected].source, TaskSource::Background);
+    }
+
+    /// The folded rows themselves stay unreachable.
+    #[test]
+    fn selection_steps_over_a_folded_groups_members() {
+        use crate::ui::modern::tasks::TaskSource;
+        let mut app = app_with_two_groups();
+        app.collapsed_groups.push(TaskSource::Subagent);
+        let hidden = first_of(&app, TaskSource::Subagent) + 1;
+        assert_eq!(app.tasks[hidden].source, TaskSource::Subagent);
+
+        app.tasks_selected = first_of(&app, TaskSource::Background);
+        for _ in 0..6 {
+            app.tasks_select(1);
+            assert_ne!(
+                app.tasks_selected, hidden,
+                "selection landed on a row that is folded away"
+            );
+        }
+    }
+
+    /// Enter on a folded heading must not open the output of the one
+    /// row hiding underneath it — the selection stands for the group.
+    #[test]
+    fn drill_in_on_a_folded_heading_unfolds_instead() {
+        use crate::ui::modern::tasks::TaskSource;
+        let mut app = app_with_two_groups();
+        app.tasks[0].task_id = Some("t-1".to_string());
+        app.tasks_selected = first_of(&app, TaskSource::Subagent);
+        app.toggle_selected_group();
+
+        app.drill_into_selected_task();
+        assert!(
+            app.pending_task_output.is_none(),
+            "drilled into a row the user cannot see"
+        );
+        assert!(
+            app.collapsed_groups.is_empty(),
+            "Enter on a folded heading should unfold the group"
+        );
+    }
+
+    /// A re-sort can move the selected task off its group's first row
+    /// while the group is folded; the selection has to snap back to the
+    /// heading rather than sit on a row with nothing on screen.
+    #[test]
+    fn a_resort_keeps_a_folded_selection_on_the_heading() {
+        use crate::ui::modern::tasks::TaskSource;
+        let mut app = app_with_two_groups();
+        app.tasks_selected = first_of(&app, TaskSource::Subagent);
+        app.toggle_selected_group();
+        let selected_id = app.tasks[app.tasks_selected].agent_id.clone();
+
+        // The selected agent finishes, so it sorts below its sibling.
+        app.apply_engine(EngineEvent::SubagentUpdate {
+            agent_id: selected_id,
+            state: "done".to_string(),
+            headline: "explore".to_string(),
+        });
+
+        assert!(
+            crate::ui::modern::tasks::is_folded_heading(
+                &app.tasks,
+                &app.collapsed_groups,
+                app.tasks_selected,
+            ),
+            "selection was left on a folded row with no row on screen"
+        );
+        assert_eq!(app.tasks[app.tasks_selected].source, TaskSource::Subagent);
+    }
+
+    #[test]
+    fn unfolding_restores_the_group() {
+        use crate::ui::modern::tasks::TaskSource;
+        let mut app = App::new("m", "/tmp", "s");
+        crate::ui::modern::tasks::upsert(&mut app.tasks, "a1", "working", "explore");
+        app.toggle_selected_group();
+        assert!(app.collapsed_groups.contains(&TaskSource::Subagent));
+        app.toggle_selected_group();
+        assert!(app.collapsed_groups.is_empty());
+    }
+
     #[test]
     fn task_selection_wraps_and_clamps() {
         let mut app = App::new("m", "/tmp", "s");
@@ -4574,6 +4814,7 @@ mod tests {
         ));
     }
 
+    #[test]
     fn copy_reports_no_assistant_when_empty() {
         let mut app = App::new("m", "/tmp", "s");
         app.copy_last_assistant();

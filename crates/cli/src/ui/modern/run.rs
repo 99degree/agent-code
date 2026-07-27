@@ -1477,7 +1477,13 @@ fn handle_key_inner(app: &mut App, key: KeyEvent) {
             // A platform-modified character (Cmd+X) is a chord, not the
             // vi command `x`; the wrapper drops any pending operator for
             // it, and it falls through to the chord dispatch below.
-            KeyCode::Char(c) if bare_char(&key) == Some(c) => {
+            // Space on an empty composer is the pane's fold key, like
+            // Backspace and Enter below. As a vi motion it moves right,
+            // which does nothing on an empty line, so falling through
+            // costs normal mode nothing.
+            KeyCode::Char(c)
+                if bare_char(&key) == Some(c) && !(c == ' ' && app.space_folds_group()) =>
+            {
                 app.vi_normal_key(c);
                 return;
             }
@@ -1582,6 +1588,15 @@ fn handle_key_inner(app: &mut App, key: KeyEvent) {
                 && app.input.is_empty() =>
         {
             app.tasks_select(1);
+        }
+        // Space folds/unfolds the selected group. Safe to claim here
+        // because this branch only runs with an empty composer, so it is
+        // not a space the user is trying to type. Gated on there being a
+        // group to fold: a pane showing only the model's checklist has
+        // none, and swallowing the key there would lose a keystroke the
+        // composer should have had.
+        (m, KeyCode::Char(' ')) if m.is_empty() && app.space_folds_group() => {
+            app.toggle_selected_group();
         }
         // Retained prompts win the empty Enter: after an aborted turn the
         // UI promises "press Enter to send", so drill-in only claims the
@@ -2106,6 +2121,12 @@ fn apply_mode_to_engine(
 
 #[cfg(test)]
 mod tests {
+    // The crate root allows dead code for its public API surface,
+    // which also silences a test that loses its `#[test]`. Opt back in:
+    // an unannotated test is unreachable, so the compiler should be the
+    // thing that notices.
+    #![deny(dead_code)]
+
     use super::*;
     use crate::ui::modern::app::Phase;
 
@@ -2134,6 +2155,89 @@ mod tests {
             app.status_message.contains("not produced output yet"),
             "pane did not act on Enter: {}",
             app.status_message
+        );
+    }
+
+    /// Vi normal mode owns bare characters, so it swallowed the fold
+    /// key: `vi_normal_key(' ')` is a no-op and returned before the
+    /// pane arm, leaving vi users a documented key that did nothing
+    /// while their arrows and Enter still drove the pane.
+    #[test]
+    fn vi_normal_mode_still_folds_with_space() {
+        use crate::ui::modern::app::ComposerMode;
+        use crate::ui::modern::tasks::TaskSource;
+        let mut app = App::new("m", "/tmp", "s");
+        app.show_tasks = true;
+        app.vi_mode = true;
+        app.composer_mode = ComposerMode::Normal;
+        crate::ui::modern::tasks::upsert(&mut app.tasks, "a1", "working", "explore");
+        assert!(app.in_normal_mode());
+
+        handle_key(&mut app, key(KeyCode::Char(' ')));
+        assert!(
+            app.collapsed_groups.contains(&TaskSource::Subagent),
+            "vi normal mode swallowed the fold key"
+        );
+        assert!(app.input.is_empty(), "the space leaked into the composer");
+
+        // And it still unfolds.
+        handle_key(&mut app, key(KeyCode::Char(' ')));
+        assert!(app.collapsed_groups.is_empty());
+    }
+
+    /// With text in the composer, Space is a vi motion again — the
+    /// fold binding only ever claimed the empty-composer case.
+    #[test]
+    fn vi_normal_mode_keeps_space_as_a_motion_with_text() {
+        use crate::ui::modern::app::ComposerMode;
+        let mut app = App::new("m", "/tmp", "s");
+        app.show_tasks = true;
+        app.vi_mode = true;
+        app.input = "hello".into();
+        app.composer_mode = ComposerMode::Normal;
+        crate::ui::modern::tasks::upsert(&mut app.tasks, "a1", "working", "explore");
+
+        handle_key(&mut app, key(KeyCode::Char(' ')));
+        assert!(
+            app.collapsed_groups.is_empty(),
+            "a vi motion folded the pane"
+        );
+        assert_eq!(app.input, "hello", "normal mode inserted text");
+    }
+
+    /// Space is the fold key, but a checklist-only pane has no group to
+    /// fold. The guard has to stand aside there like the arrows do, or
+    /// the keystroke is silently dropped instead of reaching the
+    /// composer.
+    #[test]
+    fn a_checklist_only_pane_passes_space_to_the_composer() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.show_tasks = true;
+        app.apply_engine(crate::ui::modern::sink::EngineEvent::TodoUpdate {
+            epoch: 0,
+            items: vec![("1".into(), "add the guard".into(), "in_progress".into())],
+        });
+        assert!(app.tasks_visible(), "the checklist should show the pane");
+        assert!(app.tasks.is_empty());
+
+        handle_key(&mut app, key(KeyCode::Char(' ')));
+        assert_eq!(
+            app.input, " ",
+            "the checklist-only pane swallowed the space"
+        );
+
+        // With a real task present Space is the pane's again.
+        app.input.clear();
+        crate::ui::modern::tasks::upsert(&mut app.tasks, "a1", "working", "explore");
+        handle_key(&mut app, key(KeyCode::Char(' ')));
+        assert!(
+            app.input.is_empty(),
+            "a selectable pane should still claim Space"
+        );
+        assert!(
+            app.collapsed_groups
+                .contains(&crate::ui::modern::tasks::TaskSource::Subagent),
+            "Space did not fold the group"
         );
     }
 
