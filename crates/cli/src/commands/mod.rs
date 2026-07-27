@@ -1794,6 +1794,51 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             if engine.state().plan_mode {
                 println!("Plan mode: ACTIVE (read-only tools only)");
             }
+            // Persisted "always allow" grants. Listed here rather than
+            // hidden in a file, because an approval the user cannot see
+            // is one they cannot revoke.
+            if let Some(store) = engine.persistent_grants_handle() {
+                let rt = tokio::runtime::Handle::current();
+                let clearing = args == Some("clear");
+                // Scratch thread for the same reason `/tasks` uses one:
+                // `execute` runs inside the REPL runtime, where a nested
+                // `block_on` would panic.
+                let report = std::thread::spawn(move || {
+                    rt.block_on(async move {
+                        let mut guard = store.lock().await;
+                        // Re-read the file so the listing (and the count
+                        // in the clear message) reflects what other live
+                        // sessions have saved or cleared since load.
+                        guard.refresh();
+                        if clearing {
+                            let n = guard.len();
+                            match guard.clear() {
+                                Ok(()) => format!("Cleared {n} always-allow grant(s)."),
+                                Err(e) => format!("Could not clear always-allow grants: {e}"),
+                            }
+                        } else if guard.is_empty() {
+                            "Always-allow grants: none".to_string()
+                        } else {
+                            // "Always-allow", not "Saved": the listing also
+                            // covers grants that could not be written to
+                            // disk and live only in this process. They
+                            // suppress prompts all the same, so the user
+                            // has to be able to see them.
+                            let mut out = format!(
+                                "Always-allow grants: {} — `/permissions clear` to forget them",
+                                guard.len()
+                            );
+                            for label in guard.labels() {
+                                out.push_str(&format!("\n  {label}"));
+                            }
+                            out
+                        }
+                    })
+                })
+                .join()
+                .unwrap_or_else(|_| "grant worker thread panicked".to_string());
+                println!("{report}");
+            }
             CommandResult::Handled
         }
         Some("theme") => {
@@ -3456,6 +3501,10 @@ fn execute_cd(args: Option<&str>, engine: &mut QueryEngine) {
     // Invalidate the system-prompt cache — the cwd is baked in and
     // the agent would otherwise keep believing it's in the old dir.
     engine.reset_system_prompt_cache();
+    // Persistent grants are per-project: re-scope so approvals from the
+    // old project stop suppressing prompts here, and new ones land in
+    // the new project's grant file.
+    engine.rescope_persistent_grants(&canonical);
 
     // Fire CwdChanged so file-indexer / repo-watcher hooks can retune
     // without re-polling state. Use block_on to bridge the sync
