@@ -233,6 +233,16 @@ pub(crate) fn try_expand_skill_slash_full(
 }
 
 /// One row in the scrollable transcript.
+/// Composer editing mode under vi bindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ComposerMode {
+    /// Ordinary typing. The only mode when vi bindings are off.
+    #[default]
+    Insert,
+    /// Vi normal mode: keys are motions and operators.
+    Normal,
+}
+
 #[derive(Debug, Clone, Hash)]
 pub enum TranscriptItem {
     User(String),
@@ -429,6 +439,12 @@ pub struct App {
     pub command_palette: Option<super::palette::CommandPalette>,
     /// Ctrl+M / `/model` in-TUI model picker.
     pub model_picker: Option<super::model_picker::ModelPicker>,
+    /// Whether `ui.edit_mode` asked for vi bindings.
+    pub vi_mode: bool,
+    /// Composer mode when `vi_mode` is on.
+    pub composer_mode: ComposerMode,
+    /// A `d` awaiting its motion.
+    pub vi_pending_d: bool,
     /// User keybindings. Construction installs the built-in defaults
     /// only; the run loop injects the registry loaded from
     /// `keybindings.json` at startup. Constructors must not read the
@@ -605,6 +621,9 @@ impl App {
             pending_task_output: None,
             command_palette: None,
             model_picker: None,
+            vi_mode: false,
+            composer_mode: ComposerMode::Insert,
+            vi_pending_d: false,
             keybindings: std::sync::Arc::new(
                 crate::ui::keybindings::KeybindingRegistry::defaults(),
             ),
@@ -1243,6 +1262,7 @@ impl App {
     }
 
     pub fn submit(&mut self) {
+        self.reset_vi_operator();
         let text = self.input.trim().to_string();
         if text.is_empty() {
             // Empty-Enter while idle sends the next queued prompt — after an
@@ -1974,6 +1994,7 @@ impl App {
     /// composer text — or the head of the queue when the composer is empty.
     /// Idle with text behaves like a normal submit.
     pub fn interject(&mut self) {
+        self.reset_vi_operator();
         let text = if !self.input.trim().is_empty() {
             let t = std::mem::take(&mut self.input);
             self.cursor = 0;
@@ -2070,6 +2091,7 @@ impl App {
 
     /// Clear the prompt editor (idle interrupt with non-empty input).
     pub fn clear_prompt(&mut self) {
+        self.reset_vi_operator();
         self.input.clear();
         self.cursor = 0;
     }
