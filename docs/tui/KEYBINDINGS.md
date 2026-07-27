@@ -191,3 +191,10 @@ double-press quit is still reachable. `/emacs` turns the vi bindings back
 off; the composer then behaves as it does everywhere else in this
 document. It does not add Emacs chords — the composer has none of its
 own, and `Ctrl+E` / `Ctrl+U` are the transcript controls listed above.
+
+## Images
+
+Mention an image the way you mention a file — `@screenshot.png` — and it is
+attached to the turn as an image rather than inlined as text. Supported:
+`png`, `jpg`/`jpeg`, `gif`, `webp`. Other binaries are still skipped with a
+reason.

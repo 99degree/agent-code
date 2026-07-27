@@ -339,6 +339,29 @@ pub(super) async fn event_loop(
     // back here, so a slow filesystem never blocks the event loop.
     let (task_out_tx, mut task_out_rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, Result<String, String>)>();
+    // Image attachments are read and encoded the same way: detached, with
+    // the result landing in a select arm. Awaiting the work inline would
+    // park this loop — the only one there is — so a workspace on a slow
+    // mount would stop redraws and Ctrl+C until the read finished.
+    #[allow(clippy::type_complexity)]
+    let (img_tx, mut img_rx) = tokio::sync::mpsc::unbounded_channel::<(
+        u64,
+        u64,
+        String,
+        Vec<agent_code_lib::llm::message::ContentBlock>,
+        Vec<String>,
+    )>();
+    // Identifies the encode in flight, if any: the turn it belongs to must
+    // not start without it, and a second one must not be queued behind it.
+    // A cancel forgets the id rather than waiting — the read cannot be
+    // stopped, so its result is recognised as stale when it lands and the
+    // staged turn is released immediately.
+    let mut encode_seq = 0u64;
+    let mut active_encode: Option<u64> = None;
+    // The conversation the loop last saw, so a `/clear`, `/resume` or
+    // `/rewind` can be noticed the moment it happens rather than when a
+    // read that may never finish comes back.
+    let mut seen_epoch = app.conversation_epoch;
     // Seed the pane once so tasks adopted from a previous process show
     // before the first turn arms the periodic poll.
     app.sync_background_tasks(manager_rows(&task_manager).await);
@@ -584,10 +607,61 @@ pub(super) async fn event_loop(
             }
         }
 
-        // Start a pending turn if idle.
+        // A replaced conversation invalidates a read in flight at once:
+        // waiting for it would hold every prompt in the new conversation
+        // behind an encode that belongs to a conversation nobody is
+        // looking at any more.
+        if app.conversation_epoch != seen_epoch {
+            seen_epoch = app.conversation_epoch;
+            if active_encode.take().is_some() {
+                app.abandon_staged_attachments();
+            }
+        }
+
+        // A prompt that was held aside for a turn that has since gone can
+        // send now, with the blocks it was already encoded with.
+        if turn.is_none() && active_encode.is_none() {
+            app.rearm_deferred_prompt();
+        }
+
+        // Hand a prompt's images to the blocking pool. The descriptors were
+        // opened when their mentions were validated, so nothing is resolved
+        // here; the result comes back through `img_rx` and re-arms the
+        // prompt, which keeps this loop free to redraw and to take a Ctrl+C
+        // while a slow mount is being read.
         if turn.is_none()
+            && active_encode.is_none()
+            && !app.pending_images.is_empty()
             && let Some(prompt) = app.pending_submit.take()
         {
+            let images = std::mem::take(&mut app.pending_images);
+            let tx = img_tx.clone();
+            encode_seq += 1;
+            let id = encode_seq;
+            active_encode = Some(id);
+            // Stamped with the conversation it was submitted in: the engine
+            // lock is free while this runs, so `/clear`, `/resume` or
+            // `/rewind` can replace the conversation underneath it.
+            let epoch = app.conversation_epoch;
+            tokio::task::spawn_blocking(move || {
+                let (blocks, notes) = super::mentions::encode_staged_images(images);
+                let _ = tx.send((id, epoch, prompt, blocks, notes));
+            });
+        }
+
+        // Start a pending turn if idle.
+        if turn.is_none()
+            && active_encode.is_none()
+            && let Some(prompt) = app.pending_submit.take()
+        {
+            let blocks = std::mem::take(&mut app.pending_attachments);
+            // Set unconditionally, awaiting the lock rather than skipping on
+            // contention: an empty set clears anything a previous attempt
+            // staged, so no turn can inherit another turn's attachment.
+            {
+                let engine = session.engine();
+                engine.lock().await.set_pending_attachments(blocks.clone());
+            }
             let sink = ChannelSink::new(eng_tx.clone(), app.conversation_epoch);
             match session.spawn_turn(prompt.clone(), sink).await {
                 Ok(handle) => {
@@ -596,8 +670,10 @@ pub(super) async fn event_loop(
                 }
                 Err(e) => {
                     // Should be rare: TUI serializes turns. Put the prompt
-                    // back so the next idle loop can retry.
+                    // and its attachments back so the next idle loop retries
+                    // them together.
                     app.pending_submit = Some(prompt);
+                    app.pending_attachments = blocks;
                     app.status_message = format!("turn busy: {e}");
                     app.dirty = true;
                 }
@@ -608,6 +684,17 @@ pub(super) async fn event_loop(
         if app.cancel_requested {
             if let Some(ref h) = turn {
                 h.cancel();
+            }
+            // Nothing may follow on its own after a cancel — including a
+            // prompt held aside behind the turn being cancelled. Interject
+            // is the exception and says so by having staged its own prompt.
+            app.cancel_pending_followups();
+            // A read already handed to the blocking pool cannot be stopped.
+            // Forget its id instead: the result is stale when it lands, and
+            // the staged turn is released now rather than after a read that
+            // may never finish.
+            if active_encode.take().is_some() {
+                app.abandon_staged_attachments();
             }
             app.cancel_requested = false;
         }
@@ -681,6 +768,12 @@ pub(super) async fn event_loop(
                     }
                 }
                 app.mark_turn_idle();
+
+                // A prompt held aside with its images was submitted before
+                // anything in the queue, so it goes first — and it goes now
+                // rather than waiting for whatever event next wakes the
+                // loop, since nothing else would arm it.
+                app.rearm_deferred_prompt();
 
                 // Queue handling (plan §M5): auto-send the head on a clean
                 // finish; on abort/error keep the queue and tell the user.
@@ -827,6 +920,29 @@ pub(super) async fn event_loop(
             }
             Some((id, out)) = task_out_rx.recv() => {
                 app.show_task_output(&id, out);
+            }
+            // Encoded image attachments coming back from the blocking pool.
+            // The prompt is re-armed with them so the turn starts on the
+            // next pass through the loop above.
+            Some((id, epoch, prompt, blocks, notes)) = img_rx.recv() => {
+                if active_encode != Some(id) {
+                    // Cancelled while this read was in flight: the state it
+                    // belonged to was released then, so the bytes are simply
+                    // dropped rather than sent with a turn nobody asked for.
+                } else if epoch != app.conversation_epoch {
+                    // The conversation it was submitted in has been cleared,
+                    // resumed or rewound. Starting it now would attach the
+                    // file to a thread the user never attached it to.
+                    active_encode = None;
+                    app.abandon_staged_attachments();
+                } else {
+                    active_encode = None;
+                    for note in notes {
+                        app.transcript.push(super::app::TranscriptItem::System(note));
+                    }
+                    app.accept_encoded_attachments(prompt, blocks);
+                }
+                app.dirty = true;
             }
             // Background-task rows (`&` shell jobs, workflows, monitors).
             // Gated on work that can still change: polling while any
