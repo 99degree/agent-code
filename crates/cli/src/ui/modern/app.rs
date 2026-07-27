@@ -941,6 +941,7 @@ impl App {
                 description,
                 origin,
                 input_preview,
+                suggested_prefix,
                 respond,
             } => {
                 // FIFO: concurrent asks (e.g. lead + background subagent)
@@ -950,6 +951,7 @@ impl App {
                     description,
                     origin,
                     input_preview,
+                    suggested_prefix,
                     respond,
                 }));
                 // HITL always wins: drop the Ctrl+P palette so keys reach
@@ -4570,6 +4572,7 @@ mod tests {
             description: "rm -rf build".into(),
             origin: None,
             input_preview: None,
+            suggested_prefix: None,
             respond,
         }
     }
@@ -4691,6 +4694,7 @@ mod tests {
             description: "d".into(),
             origin: None,
             input_preview: None,
+            suggested_prefix: None,
             respond,
         });
         assert_eq!(app.waiting_on, WaitingOn::UserInput);
@@ -4756,6 +4760,7 @@ mod tests {
             description: "Bash: run `cargo test`".into(),
             origin: Some("subagent-3".into()),
             input_preview: Some("{\"command\": \"cargo test\"}".into()),
+            suggested_prefix: None,
             respond,
         });
         assert_eq!(app.phase, Phase::Permission);
@@ -4852,6 +4857,7 @@ mod tests {
             description: "lead".into(),
             origin: None,
             input_preview: None,
+            suggested_prefix: None,
             respond: r1,
         });
         app.apply_engine(EngineEvent::PermissionAsk {
@@ -4859,6 +4865,7 @@ mod tests {
             description: "subagent".into(),
             origin: Some("subagent-1".into()),
             input_preview: None,
+            suggested_prefix: None,
             respond: r2,
         });
         // Both are queued; front is the first, badge shows 1 behind.
@@ -4887,6 +4894,7 @@ mod tests {
                 description: name.into(),
                 origin: None,
                 input_preview: None,
+                suggested_prefix: None,
                 respond,
             });
         }

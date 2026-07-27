@@ -596,6 +596,52 @@ fn key_hint_line(text: impl Into<String>) -> Line<'static> {
     ))
 }
 
+/// The plain text of a line, for measuring how tall it will render.
+fn line_text(line: &Line<'_>) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+/// Rows `text` occupies when word-wrapped into `width` columns, matching
+/// `Paragraph`'s greedy wrap: words move to the next row whole, and a
+/// word wider than the line is split across rows.
+///
+/// Measured in display columns, not characters. A CJK glyph or emoji
+/// occupies two cells, so counting characters underestimates the rows a
+/// line needs and the box would be sized too short — clipping the very
+/// text the user is answering about.
+fn wrapped_rows(text: &str, width: u16) -> u16 {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if width == 0 {
+        return 1;
+    }
+    let width = width as usize;
+    let mut rows = 1usize;
+    let mut col = 0usize;
+    for word in text.split_whitespace() {
+        let w = UnicodeWidthStr::width(word);
+        if col > 0 && col + 1 + w > width {
+            rows += 1;
+            col = 0;
+        }
+        if w > width {
+            // Split by columns, not by characters: a double-width glyph
+            // straddling the edge moves to the next row whole.
+            // The check above already emptied a partly-filled row.
+            for ch in word.chars() {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if col + cw > width {
+                    rows += 1;
+                    col = 0;
+                }
+                col += cw;
+            }
+        } else {
+            col = if col == 0 { w } else { col + 1 + w };
+        }
+    }
+    rows.try_into().unwrap_or(u16::MAX)
+}
+
 /// Shared centered modal box with a border + title and an optional sticky
 /// footer (key hints). The footer is laid out in its own row so wrapped body
 /// text cannot push it off-screen.
@@ -608,9 +654,26 @@ fn draw_modal_box(
     footer: Option<Line<'static>>,
 ) {
     let width = area.width.saturating_sub(6).clamp(40, 76);
-    let footer_h: u16 = u16::from(footer.is_some());
+    // The footer gets the rows its hints actually need. It used to be a
+    // single row whatever it held, so on a narrow terminal ratatui
+    // clipped the tail — and the tail is `[n] deny`, the one binding
+    // that must never be the one to disappear while its key stays live.
+    let footer_h: u16 = footer
+        .as_ref()
+        .map(|l| wrapped_rows(&line_text(l), width.saturating_sub(2)))
+        .unwrap_or(0);
+    // Size the body from the rows the text will actually occupy once
+    // wrapped, not from the number of `Line`s. A single long line —
+    // the permission modal's durable-grant row is the one that can run
+    // long — otherwise claimed one row and was clipped after the modal
+    // had already been sized, hiding content the user is answering
+    // about.
+    let body_rows: u16 = lines
+        .iter()
+        .map(|l| wrapped_rows(&line_text(l), width.saturating_sub(2)))
+        .fold(0u16, |a, b| a.saturating_add(b));
     // +2 border, +footer, +1 breathing room for wrap
-    let wanted = (lines.len() as u16)
+    let wanted = body_rows
         .saturating_add(2)
         .saturating_add(footer_h)
         .saturating_add(1);
@@ -630,7 +693,8 @@ fn draw_modal_box(
     frame.render_widget(block, rect);
 
     if let Some(footer_line) = footer {
-        let body_h = inner.height.saturating_sub(1);
+        let foot_h = footer_h.min(inner.height);
+        let body_h = inner.height.saturating_sub(foot_h);
         let body = Rect {
             x: inner.x,
             y: inner.y,
@@ -641,11 +705,12 @@ fn draw_modal_box(
             x: inner.x,
             y: inner.y.saturating_add(body_h),
             width: inner.width,
-            height: 1,
+            height: foot_h,
         };
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
-        // Fixed footer: key hints always land on the last inner row.
-        frame.render_widget(Paragraph::new(footer_line), foot);
+        // Sticky footer: key hints always land on the last inner rows,
+        // wrapping within them rather than being cut off.
+        frame.render_widget(Paragraph::new(footer_line).wrap(Wrap { trim: false }), foot);
     } else {
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
@@ -913,6 +978,24 @@ fn draw_permission_modal(
     scroll: usize,
 ) {
     let mut lines: Vec<Line<'static>> = Vec::new();
+    // The durable grant leads the body, not the footer. The footer is a
+    // single fixed row that cannot wrap, so a narrow terminal truncated
+    // the tail of the prefix while `[P]` stayed live — a durable grant
+    // whose full scope the user could not read. Here it wraps, and being
+    // the first row it survives however short the modal gets. Escaped
+    // like every other untrusted string in this modal: the prefix is
+    // derived from a model-supplied command, and a bidi or zero-width
+    // control in it would make the grant read as something other than
+    // the bytes to be persisted.
+    if let Some(ref prefix) = pending.suggested_prefix {
+        lines.push(Line::from(Span::styled(
+            format!("[P] always allow: {}", escape_deceptive(prefix)),
+            Style::default()
+                .fg(palette().warning)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+    }
     if pending_behind > 0 {
         lines.push(Line::from(Span::styled(
             format!("⚠ {pending_behind} more pending"),
@@ -988,7 +1071,13 @@ fn draw_permission_modal(
         // Keep ≤ 40 cols so min-width modals still show every binding —
         // the deny action must never be the one that gets clipped.
         // Esc denies too, and digits 1/2/4 mirror y/a/A; both in /help.
-        Some(key_hint_line("[y] once [a] session [A] always [n] deny")),
+        // The prefix itself is NOT named here: it is variable-length, and
+        // this row cannot wrap. The body row above carries the scope.
+        Some(key_hint_line(if pending.suggested_prefix.is_some() {
+            "[y] once [a] session [A] always [P] prefix [n] deny"
+        } else {
+            "[y] once [a] session [A] always [n] deny"
+        })),
     );
 }
 
@@ -1577,6 +1666,7 @@ mod tests {
                     description: format!("Bash: run `{attack}`"),
                     origin: None,
                     input_preview: Some(format!("{{\n  \"command\": \"{attack}\"\n}}")),
+                    suggested_prefix: None,
                     respond,
                 },
             ));
@@ -1587,6 +1677,237 @@ mod tests {
             "a bidi override reached the screen:\n{s}"
         );
         assert!(s.contains("<U+202E>"), "override not surfaced:\n{s}");
+    }
+
+    /// `[P]` approves a *durable* grant, so the prefix beside it has to
+    /// read as the bytes that will be persisted and later authorized. The
+    /// prefix is derived from the model-supplied command, so a bidi
+    /// override in it would make the footer advertise a different grant
+    /// from the one being made.
+    #[test]
+    fn permission_modal_reveals_a_bidi_override_in_the_offered_prefix() {
+        let backend = TestBackend::new(100, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut app = App::new("m", "/tmp", "s");
+        app.phase = Phase::Permission;
+        let (respond, _rx) = std::sync::mpsc::channel();
+        app.modals
+            .push_back(crate::ui::modern::app::Modal::Permission(
+                PendingPermission {
+                    name: "Bash".into(),
+                    description: "Bash: run a command".into(),
+                    origin: None,
+                    input_preview: None,
+                    suggested_prefix: Some("git\u{202e}sutats".into()),
+                    respond,
+                },
+            ));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = buffer_to_string(term.backend().buffer());
+        assert!(
+            !s.contains('\u{202e}'),
+            "a bidi override in the offered prefix reached the screen:\n{s}"
+        );
+        assert!(
+            s.contains("git<U+202E>sutats"),
+            "override in the offered prefix not surfaced:\n{s}"
+        );
+    }
+
+    /// `[P]` creates a *durable* grant, so its full scope has to be
+    /// readable before the key is live. The hint used to live in the
+    /// one-row footer, which cannot wrap: at 60 columns the prefix tail
+    /// was truncated while `[P]` still worked.
+    #[test]
+    fn permission_modal_shows_the_whole_prefix_on_a_narrow_terminal() {
+        // Long enough that no single row of a narrow modal could hold it.
+        let prefix = "/usr/local/bin/kubectl rollout-status-with-a-long-name";
+        for cols in [46u16, 60, 80, 120] {
+            let backend = TestBackend::new(cols, 24);
+            let mut term = Terminal::new(backend).unwrap();
+            let mut app = App::new("m", "/tmp", "s");
+            app.phase = Phase::Permission;
+            let (respond, _rx) = std::sync::mpsc::channel();
+            app.modals
+                .push_back(crate::ui::modern::app::Modal::Permission(
+                    PendingPermission {
+                        name: "Bash".into(),
+                        description: "Bash: run a command".into(),
+                        origin: None,
+                        input_preview: None,
+                        suggested_prefix: Some(prefix.into()),
+                        respond,
+                    },
+                ));
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            let s = buffer_to_string(term.backend().buffer());
+            // The body wraps, so the prefix may be split across rows —
+            // possibly mid-word. Dropping borders and every space
+            // reassembles it either way.
+            let flat = squeeze(&s);
+            assert!(
+                flat.contains(&squeeze(prefix)),
+                "the prefix was not fully visible at {cols} columns:\n{s}"
+            );
+            assert!(
+                s.contains("[P]"),
+                "the prefix binding vanished at {cols} columns:\n{s}"
+            );
+            // Every binding stays readable. `[n] deny` is the one that
+            // used to fall off the end of a one-row footer while its key
+            // stayed live.
+            for hint in ["[y]", "[a]", "[A]", "[P]", "[n]deny"] {
+                assert!(
+                    flat.contains(hint),
+                    "binding {hint} was clipped at {cols} columns:\n{s}"
+                );
+            }
+        }
+    }
+
+    /// The deny binding must survive the narrowest supported modal even
+    /// when no prefix is offered — the plain footer is 40 columns and the
+    /// inner width at a 46-column terminal is 38.
+    #[test]
+    fn permission_modal_keeps_every_binding_at_the_narrowest_width() {
+        for prefix in [None, Some("git status".to_string())] {
+            let backend = TestBackend::new(46, 24);
+            let mut term = Terminal::new(backend).unwrap();
+            let mut app = App::new("m", "/tmp", "s");
+            app.phase = Phase::Permission;
+            let (respond, _rx) = std::sync::mpsc::channel();
+            app.modals
+                .push_back(crate::ui::modern::app::Modal::Permission(
+                    PendingPermission {
+                        name: "Bash".into(),
+                        description: "Bash: run a command".into(),
+                        origin: None,
+                        input_preview: None,
+                        suggested_prefix: prefix.clone(),
+                        respond,
+                    },
+                ));
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            let s = buffer_to_string(term.backend().buffer());
+            let flat = squeeze(&s);
+            for hint in ["[y]once", "[a]session", "[A]always", "[n]deny"] {
+                assert!(
+                    flat.contains(hint),
+                    "binding {hint} was clipped with prefix={prefix:?}:\n{s}"
+                );
+            }
+        }
+    }
+
+    /// The modal is sized from the rows its text actually occupies. A
+    /// prefix long enough to wrap several times counted as one line, so
+    /// the box was sized too short and clipped the rest of it — while
+    /// `[P]` stayed live over a scope the user could not finish reading.
+    #[test]
+    fn permission_modal_grows_for_a_prefix_that_wraps_many_rows() {
+        let prefix = format!(
+            "/opt/{}/bin/kubectl rollout",
+            "very-long-directory".repeat(6)
+        );
+        for cols in [60u16, 80, 120] {
+            let backend = TestBackend::new(cols, 40);
+            let mut term = Terminal::new(backend).unwrap();
+            let mut app = App::new("m", "/tmp", "s");
+            app.phase = Phase::Permission;
+            let (respond, _rx) = std::sync::mpsc::channel();
+            app.modals
+                .push_back(crate::ui::modern::app::Modal::Permission(
+                    PendingPermission {
+                        name: "Bash".into(),
+                        description: "Bash: run a command".into(),
+                        origin: None,
+                        input_preview: None,
+                        suggested_prefix: Some(prefix.clone()),
+                        respond,
+                    },
+                ));
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            let s = buffer_to_string(term.backend().buffer());
+            let flat = squeeze(&s);
+            assert!(
+                flat.contains(&squeeze(&prefix)),
+                "a wrapping prefix was clipped at {cols} columns:\n{s}"
+            );
+            // The description it pushed down must survive too.
+            assert!(
+                flat.contains(&squeeze("Bash: run a command")),
+                "the modal body was clipped at {cols} columns:\n{s}"
+            );
+        }
+    }
+
+    /// Screen text with the box borders and all whitespace removed, so a
+    /// string that wrapped across rows — even mid-word — can still be
+    /// searched for as one piece.
+    fn squeeze(s: &str) -> String {
+        s.chars()
+            .filter(|c| !c.is_whitespace() && !"│┌┐└┘─".contains(*c))
+            .collect()
+    }
+
+    #[test]
+    fn wrapped_rows_counts_greedy_word_wrap() {
+        assert_eq!(wrapped_rows("", 10), 1);
+        assert_eq!(wrapped_rows("short", 10), 1);
+        // Wraps whole words to the next row.
+        assert_eq!(wrapped_rows("aaaa bbbb cccc", 10), 2);
+        // A word wider than the line is split across rows.
+        assert_eq!(wrapped_rows(&"x".repeat(25), 10), 3);
+        assert_eq!(wrapped_rows("ab", 0), 1);
+    }
+
+    /// Rows are display columns, not characters. A CJK glyph takes two
+    /// cells, so ten of them fill a 20-column line — counting characters
+    /// would call that one row and size the modal half as tall as it
+    /// needs to be.
+    #[test]
+    fn wrapped_rows_measures_display_width() {
+        let cjk = "日".repeat(10); // 10 chars, 20 columns
+        assert_eq!(wrapped_rows(&cjk, 20), 1);
+        assert_eq!(wrapped_rows(&cjk, 10), 2);
+        assert_eq!(wrapped_rows(&cjk, 6), 4);
+        // An odd width cannot split a double-width glyph, so the row
+        // ends one column early.
+        assert_eq!(wrapped_rows(&cjk, 5), 5);
+    }
+
+    /// The permission modal must grow for double-width text too, or the
+    /// durable-grant row is clipped exactly as it was for long prefixes.
+    #[test]
+    fn permission_modal_grows_for_double_width_text() {
+        let backend = TestBackend::new(60, 40);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut app = App::new("m", "/tmp", "s");
+        app.phase = Phase::Permission;
+        let (respond, _rx) = std::sync::mpsc::channel();
+        let description = format!("Bash: {}", "日本語".repeat(20));
+        app.modals
+            .push_back(crate::ui::modern::app::Modal::Permission(
+                PendingPermission {
+                    name: "Bash".into(),
+                    description: description.clone(),
+                    origin: None,
+                    input_preview: None,
+                    suggested_prefix: Some("git status".into()),
+                    respond,
+                },
+            ));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = buffer_to_string(term.backend().buffer());
+        let flat = squeeze(&s);
+        assert!(
+            flat.contains(&squeeze(&description)),
+            "double-width text was clipped:\n{s}"
+        );
+        assert!(
+            flat.contains(&squeeze("git status")),
+            "the durable-grant row was pushed out:\n{s}"
+        );
     }
 
     /// The modal title names the tool being approved. A plugin manifest or
@@ -1606,6 +1927,7 @@ mod tests {
                     description: "run plugin".into(),
                     origin: None,
                     input_preview: None,
+                    suggested_prefix: None,
                     respond,
                 },
             ));
@@ -2195,6 +2517,7 @@ mod tests {
                     description: "Bash: run `cargo publish`".into(),
                     origin: Some("subagent-2".into()),
                     input_preview: Some("{\n  \"command\": \"cargo publish\"\n}".into()),
+                    suggested_prefix: None,
                     respond,
                 },
             ));
@@ -2231,6 +2554,7 @@ mod tests {
                     description: "big input".into(),
                     origin: None,
                     input_preview: Some(preview),
+                    suggested_prefix: None,
                     respond,
                 },
             ));
@@ -2287,6 +2611,7 @@ mod tests {
                         "Bash: run a long pipeline that wraps across many columns and rows".into(),
                     origin: None,
                     input_preview: Some(preview),
+                    suggested_prefix: None,
                     respond,
                 },
             ));
@@ -2378,6 +2703,7 @@ mod tests {
                         description: format!("{name} ask"),
                         origin: None,
                         input_preview: None,
+                        suggested_prefix: None,
                         respond,
                     },
                 ));
