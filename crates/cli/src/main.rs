@@ -534,26 +534,31 @@ async fn async_main() -> anyhow::Result<()> {
         config.api.auth_mode = auth_mode;
     }
 
+    // Captured as its own layer, not just folded into `config`: a
+    // cross-project resume reloads the file and environment layers from
+    // the destination, and the operator's command line has to be applied
+    // on top of those too.
+    let mut cli_permissions = ui::modern::CliPermissionOverride::default();
     // Apply --no-sandbox before permission-mode handling so the bypass
     // gate applies uniformly.
     if cli.no_sandbox {
-        if config.security.disable_bypass_permissions {
-            tracing::warn!("--no-sandbox ignored: security.disable_bypass_permissions is set");
-            agent_code_lib::services::warnings::warn(
-                "--no-sandbox ignored: security.disable_bypass_permissions is set in config",
-            );
-        } else {
-            config.sandbox.enabled = false;
+        if record_no_sandbox(&mut config, &mut cli_permissions) {
             tracing::warn!("Process-level sandbox disabled for this session (--no-sandbox)");
             agent_code_lib::services::warnings::warn(
                 "Process-level sandbox disabled for this session (--no-sandbox). Tool \
                  calls are not isolated.",
+            );
+        } else {
+            tracing::warn!("--no-sandbox ignored: security.disable_bypass_permissions is set");
+            agent_code_lib::services::warnings::warn(
+                "--no-sandbox ignored: security.disable_bypass_permissions is set in config",
             );
         }
     }
 
     // Apply permission mode from CLI.
     if cli.dangerously_skip_permissions {
+        cli_permissions.default_mode = Some(agent_code_lib::config::PermissionMode::Allow);
         config.permissions.default_mode = agent_code_lib::config::PermissionMode::Allow;
         tracing::warn!("All permission checks disabled (--dangerously-skip-permissions)");
         agent_code_lib::services::warnings::warn(
@@ -563,7 +568,9 @@ async fn async_main() -> anyhow::Result<()> {
     } else if let Some(ref mode) = cli.permission_mode {
         // An unrecognised value used to fall through to `Ask`, so a typo
         // (`--permission-mode alow`) looked like it had been honoured.
-        config.permissions.default_mode = parse_permission_mode(mode)?;
+        let parsed = parse_permission_mode(mode)?;
+        cli_permissions.default_mode = Some(parsed);
+        config.permissions.default_mode = parsed;
     }
 
     // Apply --permissions-overlay. Parsed as a TOML document whose
@@ -585,6 +592,7 @@ async fn async_main() -> anyhow::Result<()> {
                                 .try_into::<agent_code_lib::config::PermissionsConfig>()
                             {
                                 Ok(perms) => {
+                                    cli_permissions.overlay = Some(perms.clone());
                                     // Compose with host permissions so project
                                     // rules survive typed-subagent visibility
                                     // overlays (do not wholesale replace).
@@ -1118,7 +1126,7 @@ async fn async_main() -> anyhow::Result<()> {
 
             // Modern TUI takes ownership of the engine via Session and
             // fires SessionStop itself on clean exit.
-            ui::modern::run_modern_tui(engine).await?;
+            ui::modern::run_modern_tui(engine, cli_permissions.clone()).await?;
 
             // Show update notification after session ends.
             if let Ok(Some(check)) = update_handle.await {
@@ -1308,10 +1316,74 @@ async fn handle_schedule_run(
     Ok(())
 }
 
+/// Fold `--no-sandbox` into the command-line override layer and the
+/// starting project's config. Returns whether it took effect *here*.
+///
+/// The flag is recorded on the override layer unconditionally, and that
+/// is the whole point of the split: `CliPermissionOverride` is the
+/// command line, which outlives the directory the process launched in,
+/// and a cross-project resume re-applies it against each destination's
+/// own lock. Recording it only where the starting project permitted
+/// bypasses let one locked directory disarm the operator's flag for
+/// every project the session later visited — the sandbox stayed on
+/// where they had asked for it off, with no second warning to say so.
+///
+/// The starting project's lock therefore decides only whether the
+/// sandbox is disabled in *this* project, never whether the flag was
+/// given.
+fn record_no_sandbox(
+    config: &mut agent_code_lib::config::Config,
+    cli_permissions: &mut ui::modern::CliPermissionOverride,
+) -> bool {
+    cli_permissions.no_sandbox = true;
+    if config.security.disable_bypass_permissions {
+        return false;
+    }
+    config.sandbox.enabled = false;
+    true
+}
+
 #[cfg(test)]
 mod permission_mode_flag_tests {
-    use super::parse_permission_mode;
+    use super::{parse_permission_mode, record_no_sandbox};
     use agent_code_lib::config::PermissionMode;
+
+    /// A project that forbids bypasses refuses `--no-sandbox` locally —
+    /// but the flag still has to be remembered, because the session can
+    /// resume into a project that permits it.
+    #[test]
+    fn a_locked_start_refuses_no_sandbox_without_forgetting_it() {
+        let mut config = agent_code_lib::config::Config::default();
+        config.security.disable_bypass_permissions = true;
+        config.sandbox.enabled = true;
+        let mut cli = crate::ui::modern::CliPermissionOverride::default();
+
+        let applied = record_no_sandbox(&mut config, &mut cli);
+
+        assert!(!applied, "a locked project let --no-sandbox take effect");
+        assert!(
+            config.sandbox.enabled,
+            "the sandbox was disabled in a project that forbids bypasses"
+        );
+        assert!(
+            cli.no_sandbox,
+            "the operator's flag was forgotten, so every later project \
+             silently keeps the sandbox on"
+        );
+    }
+
+    /// The ordinary case: an unlocked start both records and applies.
+    #[test]
+    fn an_unlocked_start_applies_no_sandbox_and_records_it() {
+        let mut config = agent_code_lib::config::Config::default();
+        config.security.disable_bypass_permissions = false;
+        config.sandbox.enabled = true;
+        let mut cli = crate::ui::modern::CliPermissionOverride::default();
+
+        assert!(record_no_sandbox(&mut config, &mut cli));
+        assert!(!config.sandbox.enabled);
+        assert!(cli.no_sandbox);
+    }
 
     #[test]
     fn every_documented_value_parses() {
