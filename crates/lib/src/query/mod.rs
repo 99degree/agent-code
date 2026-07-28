@@ -85,6 +85,18 @@ pub struct QueryEngine {
     question_asker: Option<Arc<dyn crate::tools::QuestionAsker>>,
     /// Cached system prompt (rebuilt only when inputs change).
     cached_system_prompt: Option<(u64, String)>, // (hash, prompt)
+    /// `disk_output_style` as it stood when the engine was built, i.e.
+    /// the startup/env-configured default. A session swap restores this
+    /// rather than `None`, so resetting an `/output-style` chosen in the
+    /// discarded conversation does not also discard the user's
+    /// configured default for the rest of the process.
+    initial_disk_output_style: Option<crate::output_styles::OutputStyle>,
+    /// `config.api.effort` as configured at startup. Reasoning effort is
+    /// chosen per conversation (`/effort`, the model picker) and is not
+    /// saved in a session, so a swap returns to this rather than
+    /// inheriting a level the restored session never selected — which
+    /// its model may not even support.
+    initial_effort: Option<String>,
     /// Publishes the current turn's [`TurnStatus`] to observers.
     turn_status: tokio::sync::watch::Sender<TurnStatus>,
     /// Sender side of the steering channel. Cloned out via
@@ -218,6 +230,10 @@ impl QueryEngine {
         let cancel = CancellationToken::new();
         let cancel_shared = Arc::new(std::sync::Mutex::new(cancel.clone()));
         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Snapshot before `state` is moved: these are the configured
+        // defaults a session swap restores to.
+        let initial_disk_output_style = state.disk_output_style.clone();
+        let initial_effort = state.config.api.effort.clone();
         let live_plan_mode = Arc::new(std::sync::atomic::AtomicBool::new(state.plan_mode));
         Self {
             llm,
@@ -240,6 +256,8 @@ impl QueryEngine {
                 crate::memory::extraction::ExtractionState::new(),
             )),
             session_allows: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+            initial_disk_output_style: initial_disk_output_style.clone(),
+            initial_effort: initial_effort.clone(),
             pending_attachments: Vec::new(),
             persistent_grants: None,
             permission_prompter: None,
@@ -260,6 +278,142 @@ impl QueryEngine {
     /// Live plan-mode flag (lock-free mid-turn updates).
     pub fn live_plan_mode_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
         self.live_plan_mode.clone()
+    }
+
+    /// Reset every piece of conversation-scoped state that a saved
+    /// session does not carry, before adopting a different conversation
+    /// into this live engine (`/resume`).
+    ///
+    /// A session swap reuses the engine and overwrites only what
+    /// `SessionData` stores. Everything else scoped to "the current
+    /// conversation" would otherwise survive into the restored session
+    /// and either describe it wrongly or, worse, authorise it: the
+    /// permission grants and `/add-dir` paths below are both things the
+    /// user allowed *somewhere else*.
+    ///
+    /// This is deliberately one call rather than a checklist at the call
+    /// site — a swap that forgets a field is exactly the bug this
+    /// prevents, and new session-local state should be added here.
+    /// Start a fresh cancellation scope.
+    ///
+    /// `cancel` stays cancelled after an aborted turn until the next
+    /// `begin_turn`, and everything that consults it — `run_hooks` above
+    /// all — refuses to start while it is. A session swap is a new scope
+    /// in its own right, so it renews the token rather than inheriting
+    /// the cancellation of the turn the user abandoned. Safe only with
+    /// no turn in flight, which is what the caller waits for.
+    pub fn renew_cancel_scope(&mut self) {
+        self.cancel = CancellationToken::new();
+        *self.cancel_shared.lock().unwrap() = self.cancel.clone();
+    }
+
+    pub async fn reset_for_session_swap(&mut self) {
+        // The executor consults this store *before* prompting, so a
+        // carried-over entry silently skips the ask.
+        self.session_allows.lock().await.clear();
+        // Keyed by a hash over model and cwd, neither of which need
+        // change across a resume — but the prompt embeds memories chosen
+        // from the recent messages, so the key is blind to the swap.
+        self.reset_system_prompt_cache();
+        // A cursor into the message vector we are replacing: left alone
+        // it either skips the restored session's messages or reprocesses
+        // an unrelated suffix of them.
+        //
+        // A *new* Arc, not a new value inside the old one. An extraction
+        // spawned by the previous conversation is fire-and-forget and
+        // holds its own clone; it releases the mutex across the provider
+        // call and writes the old transcript's cursor back when it
+        // returns. Detaching the Arc leaves that write landing somewhere
+        // nothing reads, instead of on top of the reset.
+        self.extraction_state = Arc::new(tokio::sync::Mutex::new(
+            crate::memory::extraction::ExtractionState::new(),
+        ));
+        // Denials recorded in the old conversation would otherwise fire
+        // hooks stamped with the restored session's id.
+        self.denial_tracker.lock().await.clear();
+        self.last_seen_denial_total = 0;
+
+        // Cumulative per-conversation cache statistics.
+        self.cache_tracker = crate::services::cache_tracking::CacheTracker::new();
+        // Steered text typed at the old conversation but never drained
+        // would be injected as a user message into the restored one.
+        while self.steer_rx.try_recv().is_ok() {}
+
+        let initial_style = self.initial_disk_output_style.clone();
+        let initial_effort = self.initial_effort.clone();
+        let state = &mut self.state;
+        // `/add-dir` tells the model it may read and edit these paths
+        // without re-asking. That permission was given to the previous
+        // conversation.
+        let dropped_dirs = !state.additional_dirs.is_empty();
+        state.additional_dirs.clear();
+        state.brief_mode = false;
+        state.response_style = crate::state::ResponseStyle::default();
+        // Back to the configured default, not to nothing.
+        state.disk_output_style = initial_style;
+        // Likewise for reasoning effort: chosen per conversation, absent
+        // from the session file, and not necessarily supported by the
+        // model the restored session uses.
+        state.config.api.effort = initial_effort;
+        // `/fast` restores this on its next toggle, but the restore takes
+        // the model from the session, so there is nothing to go back to.
+        state.pre_fast_model = None;
+        state.break_cache_next = false;
+        // Per-model breakdown behind `/cost`; the totals are restored
+        // from the session file, so a stale breakdown would not add up.
+        state.model_usage.clear();
+
+        // Narrowing the working set is a cwd change like `/add-dir
+        // --clear` is, and external watchers and indexers subscribe to
+        // it. Silently dropping the paths would leave them tracking
+        // directories this engine no longer has in scope.
+        let _ = dropped_dirs;
+    }
+
+    /// Tell watchers the `/add-dir` working set is back.
+    ///
+    /// Pairs with [`Self::notify_working_set_dropped`] when the swap it
+    /// announced does not happen: the drop was announced before the move
+    /// so watchers would stop indexing a project being left, and a move
+    /// that then fails leaves those directories still in use with every
+    /// watcher told to ignore them.
+    pub async fn notify_working_set_restored(&mut self) {
+        if self.state.additional_dirs.is_empty() {
+            return;
+        }
+        let cwd = self.state.cwd.clone();
+        let dirs = self.state.additional_dirs.clone();
+        let swap_cancel = CancellationToken::new();
+        self.run_cwd_changed_hooks_with(&cwd, "session-swap-aborted", &dirs, Some(&swap_cancel))
+            .await;
+    }
+
+    /// Tell watchers the `/add-dir` working set is going away.
+    ///
+    /// Separate from [`Self::reset_for_session_swap`] because the two
+    /// have opposite timing constraints: these are shell hooks, and they
+    /// inherit the process working directory, so they must run *before* a
+    /// resume moves it — otherwise the departing session's teardown fires
+    /// inside the project being entered. Clearing the state must happen
+    /// *after* the move succeeds, so a failed move leaves the session the
+    /// user keeps still intact.
+    pub async fn notify_working_set_dropped(&mut self) {
+        if self.state.additional_dirs.is_empty() {
+            return;
+        }
+        let cwd = self.state.cwd.clone();
+        // A scope of its own, never the turn's. A swap happens between
+        // turns, and after an aborted one `self.cancel` stays cancelled
+        // until the next `begin_turn` — passing it would have `run_hooks`
+        // reject every hook before it started, so watchers would silently
+        // never hear about the dropped directories.
+        let swap_cancel = CancellationToken::new();
+        // Empty, because that is what the working set *becomes*. The
+        // directories are still in state so a failed move can keep the
+        // session intact, but a watcher told to keep tracking them would
+        // hold indexes open on a project this session is leaving.
+        self.run_cwd_changed_hooks_with(&cwd, "session-swap", &[], Some(&swap_cancel))
+            .await;
     }
 
     /// Set plan mode for the next permission / executor check without
@@ -330,6 +484,81 @@ impl QueryEngine {
         self.persistent_grants.clone()
     }
 
+    /// Adopt `project_root` as this engine's project: grant store,
+    /// permission root, permission *rules*, and hooks.
+    ///
+    /// Every one of these is per-project and every one is consulted when
+    /// a tool runs, so moving a subset leaves part of the policy
+    /// answering for the project the process just left — the
+    /// destination's deny rules never apply, or the source's hooks keep
+    /// firing in a tree they were not written for. Resuming a session
+    /// from another project is the case that needs this.
+    ///
+    /// Takes an already-loaded config so the caller can read it *before*
+    /// anything is touched: a destination whose settings will not parse
+    /// must fail the resume while it is still cheap to refuse, not after
+    /// the session has moved.
+    ///
+    /// Only policy is taken from that config: the model, modes and the
+    /// rest of the runtime state belong to the session being restored,
+    /// not to the directory it lives in.
+    /// Returns how many MCP proxy tools were dropped, so the caller can
+    /// tell the user why a server they were using has gone.
+    /// `drop_mcp` is false when the project root has not actually
+    /// changed — a resume within the same repository keeps its servers.
+    pub fn adopt_project(
+        &mut self,
+        project_root: &std::path::Path,
+        cfg: crate::config::Config,
+        drop_mcp: bool,
+    ) -> usize {
+        self.rescope_persistent_grants(project_root);
+        self.permissions
+            .set_project_root(project_root.to_path_buf());
+        self.permissions.set_rules(cfg.permissions.rules.clone());
+        self.hooks.replace(cfg.hooks.clone());
+        // Tool visibility is policy too: `allowed_tools` /
+        // `disallowed_tools` decide what the model is even shown, and the
+        // filter installed at startup belongs to the project we left.
+        self.tools
+            .set_visibility(crate::tools::registry::ToolVisibilityFilter::new(
+                cfg.permissions.allowed_tools.clone(),
+                cfg.permissions.disallowed_tools.clone(),
+            ));
+        // Sandbox and bypass policy are read from `state.config` on every
+        // turn, so leaving the old project's values here would let a
+        // project that forbids bypassing permissions inherit one that
+        // allows it.
+        self.state.config.security = cfg.security;
+        self.state.config.sandbox = cfg.sandbox;
+        self.state.config.permissions.rules = cfg.permissions.rules;
+        self.state.config.permissions.allowed_tools = cfg.permissions.allowed_tools;
+        self.state.config.permissions.disallowed_tools = cfg.permissions.disallowed_tools;
+        self.state.config.hooks = cfg.hooks;
+        // Feature flags are read from `state.config` on the turn that
+        // uses them, not captured at startup, so leaving the departing
+        // project's values here means the destination's own settings are
+        // simply ignored. `extract_memories` is the one that matters
+        // most: a project that turns it off would still have its
+        // conversation mined after a resume, writing into *its* memory
+        // directory under a policy it never set.
+        self.state.config.features = cfg.features;
+        // The prompt describes the servers from config, so dropping the
+        // proxies without this told the model to call tools that no
+        // longer exist. The destination's own list takes its place —
+        // empty unless it configures servers, and its proxies are not
+        // connected either, so it stays empty until a restart.
+        if !drop_mcp {
+            return 0;
+        }
+        self.state.config.mcp_servers.clear();
+        // MCP proxies belong to the project that configured them. A
+        // visibility filter would only hide them; they would still be
+        // callable, so a model in the destination could reach servers the
+        // session just left.
+        self.tools.remove_mcp_tools()
+    }
+
     /// Re-scope persistent grants to a new project root. Must be called
     /// whenever the session cwd changes (`/cd`): grants are per-project,
     /// so an approval saved in the old project must not keep suppressing
@@ -390,8 +619,10 @@ impl QueryEngine {
 
     /// Run any configured `CwdChanged` hooks when the session's
     /// working-directory state mutates. `cause` is `"cd"` when the
-    /// primary cwd was replaced (e.g. via `/cd`) and `"add-dir"` when
-    /// the additional-dirs set changed (via `/add-dir`). Context
+    /// primary cwd was replaced (e.g. via `/cd`), `"add-dir"` when
+    /// the additional-dirs set changed (via `/add-dir`), and
+    /// `"session-swap"` when a resume dropped the previous
+    /// conversation's tracked directories. Context
     /// carries the previous and new cwd plus the current
     /// additional-dirs list so repo-watchers / file-indexers can
     /// retune their scope without re-polling state.
@@ -400,14 +631,46 @@ impl QueryEngine {
         previous_cwd: &str,
         cause: &str,
     ) -> Vec<crate::hooks::HookResult> {
+        self.run_cwd_changed_hooks(previous_cwd, cause, Some(&self.cancel))
+            .await
+    }
+
+    /// [`Self::fire_cwd_changed_hooks`] with an explicit cancellation
+    /// scope, for dispatches that do not belong to a turn.
+    async fn run_cwd_changed_hooks(
+        &self,
+        previous_cwd: &str,
+        cause: &str,
+        cancel: Option<&CancellationToken>,
+    ) -> Vec<crate::hooks::HookResult> {
+        self.run_cwd_changed_hooks_with(previous_cwd, cause, &self.state.additional_dirs, cancel)
+            .await
+    }
+
+    /// As [`Self::run_cwd_changed_hooks`], but stating the working set the
+    /// event should report rather than reading it from state.
+    ///
+    /// `additional_dirs` is documented as the working set *after* the
+    /// change, and a swap has to announce the drop while the state still
+    /// holds those directories — clearing first would leave nothing to
+    /// restore if the move then failed. Passing the set explicitly keeps
+    /// both true: state is untouched, and watchers are told the truth
+    /// about what they should be tracking afterwards.
+    async fn run_cwd_changed_hooks_with(
+        &self,
+        previous_cwd: &str,
+        cause: &str,
+        additional_dirs: &[String],
+        cancel: Option<&CancellationToken>,
+    ) -> Vec<crate::hooks::HookResult> {
         let ctx = serde_json::json!({
             "previous_cwd": previous_cwd,
             "new_cwd": self.state.cwd,
-            "additional_dirs": self.state.additional_dirs,
+            "additional_dirs": additional_dirs,
             "cause": cause,
         });
         self.hooks
-            .run_hooks(&HookEvent::CwdChanged, None, &ctx, Some(&self.cancel))
+            .run_hooks(&HookEvent::CwdChanged, None, &ctx, cancel)
             .await
     }
 
@@ -3293,6 +3556,41 @@ mod tests {
         }
     }
 
+    /// Everything project-scoped has to move together. Feature flags
+    /// are read from `state.config` on the turn that uses them rather
+    /// than captured at startup, so a destination that turns one off is
+    /// simply ignored unless adoption copies them.
+    ///
+    /// `extract_memories` is the one with teeth: a project that disables
+    /// it would still have its conversation mined after a resume, and
+    /// the extraction writes into *that* project's memory directory
+    /// under a policy it never set.
+    #[test]
+    fn adopting_a_project_takes_its_feature_flags() {
+        use crate::config::Config;
+
+        let mut engine = build_engine(Arc::new(CompletingProvider));
+        // The project being left mines memories and caches prompts.
+        engine.state.config.features.extract_memories = true;
+        engine.state.config.features.prompt_caching = true;
+
+        // The destination turns both off.
+        let mut destination = Config::default();
+        destination.features.extract_memories = false;
+        destination.features.prompt_caching = false;
+
+        engine.adopt_project(std::path::Path::new("/tmp"), destination, false);
+
+        assert!(
+            !engine.state.config.features.extract_memories,
+            "the destination's conversation would be mined under the departing project's policy"
+        );
+        assert!(
+            !engine.state.config.features.prompt_caching,
+            "the destination's feature settings were ignored after the move"
+        );
+    }
+
     fn build_engine(llm: Arc<dyn Provider>) -> QueryEngine {
         build_engine_with_max_turns(llm, 1)
     }
@@ -3694,6 +3992,199 @@ mod tests {
             "cancel latency {:?} exceeded {:?}",
             t0.elapsed(),
             budget
+        );
+    }
+
+    /// Everything scoped to the current conversation but absent from the
+    /// saved session must be dropped when a different conversation is
+    /// swapped into a live engine (`/resume`). The two that matter most
+    /// are authorisations the user granted somewhere else: session
+    /// permission allowances and `/add-dir` paths.
+    #[tokio::test]
+    async fn a_session_swap_drops_conversation_scoped_state() {
+        let mut engine = build_engine(Arc::new(CompletingProvider));
+        engine
+            .session_allows
+            .lock()
+            .await
+            .insert("Bash:rm -rf build".to_string());
+        engine.denial_tracker.lock().await.record(
+            "Bash",
+            "toolu_old",
+            "blocked",
+            &serde_json::json!({"command": "rm -rf /"}),
+        );
+        engine.last_seen_denial_total = 7;
+        engine.cached_system_prompt = Some((1234, "stale prompt".into()));
+        engine.state.additional_dirs.push("/srv/secrets".into());
+        engine.state.brief_mode = true;
+        engine.state.pre_fast_model = Some("slow-model".into());
+        engine.state.break_cache_next = true;
+        engine
+            .state
+            .model_usage
+            .insert("old-model".into(), Usage::default());
+
+        engine.reset_for_session_swap().await;
+
+        assert!(
+            engine.session_allows.lock().await.is_empty(),
+            "a permission grant survived into a conversation that never approved it"
+        );
+        assert!(
+            engine.state.additional_dirs.is_empty(),
+            "/add-dir access survived into a conversation that was never granted it"
+        );
+        assert_eq!(engine.denial_tracker.lock().await.total(), 0);
+        assert_eq!(engine.last_seen_denial_total, 0);
+        assert!(engine.cached_system_prompt.is_none());
+        assert!(!engine.state.brief_mode);
+        assert!(engine.state.pre_fast_model.is_none());
+        assert!(!engine.state.break_cache_next);
+        assert!(engine.state.model_usage.is_empty());
+    }
+
+    /// The memory-extraction cursor is an absolute index into the
+    /// message vector being replaced. Carried over, it either skips the
+    /// restored session's messages or mines an unrelated suffix.
+    #[tokio::test]
+    async fn a_session_swap_rewinds_the_memory_extraction_cursor() {
+        let mut engine = build_engine(Arc::new(CompletingProvider));
+        engine
+            .extraction_state
+            .lock()
+            .await
+            .set_last_processed_index(400);
+
+        engine.reset_for_session_swap().await;
+
+        assert_eq!(
+            engine.extraction_state.lock().await.last_processed_index(),
+            0,
+            "the cursor still points into the discarded conversation"
+        );
+    }
+
+    /// The previous conversation's extraction task holds its own clone
+    /// of the Arc and writes its cursor back after the swap. Replacing
+    /// the value inside the shared Arc would let that write land on top
+    /// of the reset; replacing the Arc leaves it landing nowhere.
+    #[tokio::test]
+    async fn a_session_swap_detaches_the_extraction_state_arc() {
+        let mut engine = build_engine(Arc::new(CompletingProvider));
+        // Stand in for the in-flight background task.
+        let in_flight = engine.extraction_state.clone();
+
+        engine.reset_for_session_swap().await;
+
+        assert!(
+            !Arc::ptr_eq(&in_flight, &engine.extraction_state),
+            "the old extraction task can still write into the live state"
+        );
+        in_flight.lock().await.set_last_processed_index(400);
+        assert_eq!(
+            engine.extraction_state.lock().await.last_processed_index(),
+            0,
+            "a late write from the previous conversation reached the reset state"
+        );
+    }
+
+    /// A swap happens between turns, and after an aborted turn
+    /// `self.cancel` stays cancelled until the next `begin_turn` — so
+    /// dispatching the cwd-change event on the turn's token had
+    /// `run_hooks` reject it before it started, and watchers were never
+    /// told the tracked directories had gone.
+    // Spawns a real shell hook, and hooks run through `bash -c`, which
+    // Windows CI has no usable bash for (the same reason `hooks::tests`
+    // is `#[cfg(all(test, unix))]`). Gated rather than rewritten: the
+    // point of the test is that a real hook process actually runs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_session_swap_notifies_cwd_hooks_after_an_aborted_turn() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::fs::write(&path, "").unwrap();
+
+        let mut engine = build_engine(Arc::new(CompletingProvider));
+        engine.hooks.register(crate::hooks::HookDefinition {
+            event: HookEvent::CwdChanged,
+            tool_name: None,
+            action: crate::hooks::HookAction::Shell {
+                command: format!("echo fired >> {path:?}"),
+            },
+        });
+        engine.state.additional_dirs.push("/srv/scratch".into());
+        // The previous turn was cancelled and no new one has begun.
+        engine.cancel.cancel();
+
+        // The notification is its own step now — it must run before a
+        // resume moves the process, while the state clearing must run
+        // after it. The guarantee here is unchanged: watchers hear about
+        // the dropped directories even after an aborted turn.
+        engine.notify_working_set_dropped().await;
+        engine.reset_for_session_swap().await;
+
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("fired"),
+            "the cwd hook never ran, so watchers still track the dropped directories"
+        );
+    }
+
+    /// Steered text queued against the old conversation would otherwise
+    /// be drained into the restored one as a user message.
+    #[tokio::test]
+    async fn a_session_swap_drops_undelivered_steering() {
+        let mut engine = build_engine(Arc::new(CompletingProvider));
+        let _ = engine
+            .steer_sender()
+            .send("meant for the old session".to_string());
+
+        engine.reset_for_session_swap().await;
+
+        assert!(
+            engine.steer_rx.try_recv().is_err(),
+            "steered text leaked into the resumed conversation"
+        );
+    }
+
+    /// An `/output-style` chosen in the discarded conversation must go,
+    /// but a startup-configured default must survive.
+    #[tokio::test]
+    async fn a_session_swap_returns_to_the_configured_output_style() {
+        let mut engine = build_engine(Arc::new(CompletingProvider));
+        assert!(engine.initial_disk_output_style.is_none());
+        engine.state.disk_output_style = Some(crate::output_styles::OutputStyle {
+            name: "chosen-in-the-old-session".into(),
+            description: String::new(),
+            body: String::new(),
+            applies_to: Vec::new(),
+            source: crate::output_styles::OutputStyleSource::User,
+            source_path: None,
+            content_hash: [0u8; 12],
+        });
+
+        engine.reset_for_session_swap().await;
+
+        assert!(
+            engine.state.disk_output_style.is_none(),
+            "an in-conversation output style survived the swap"
+        );
+    }
+
+    /// Reasoning effort is chosen per conversation (`/effort`, the model
+    /// picker), is not saved in a session, and may not even be supported
+    /// by the restored session's model.
+    #[tokio::test]
+    async fn a_session_swap_returns_to_the_configured_effort() {
+        let mut engine = build_engine(Arc::new(CompletingProvider));
+        let configured = engine.state.config.api.effort.clone();
+        engine.state.config.api.effort = Some("high".into());
+
+        engine.reset_for_session_swap().await;
+
+        assert_eq!(
+            engine.state.config.api.effort, configured,
+            "the resumed session inherited an effort it never selected"
         );
     }
 

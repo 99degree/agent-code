@@ -129,7 +129,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
 
     // Palette / model picker / help never draw over HITL.
-    if app.model_picker_open() && app.phase != Phase::Permission {
+    if app.session_picker_open() && app.phase != Phase::Permission {
+        draw_session_picker(frame, area, app);
+    } else if app.model_picker_open() && app.phase != Phase::Permission {
         draw_model_picker(frame, area, app);
     } else if app.theme_picker_open() && app.phase != Phase::Permission {
         draw_theme_picker(frame, area, app);
@@ -378,6 +380,95 @@ fn draw_theme_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
         palette().accent,
         Some(key_hint_line(
             "[\u{2191}\u{2193}] preview   [Enter] keep   [Esc] revert",
+        )),
+    );
+}
+
+fn draw_session_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    use super::session_picker::summary_line;
+    let Some(p) = app.session_picker.as_ref() else {
+        return;
+    };
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("filter: {}", p.query),
+        Style::default()
+            .fg(palette().accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    // Roster summary: how many sessions there are and how many you have
+    // been in. Answers "where am I in all this" before you read a row.
+    let visited_here = p
+        .entries
+        .iter()
+        .filter(|s| app.session_views.is_visited(&s.id) || s.id == app.session_id)
+        .count();
+    lines.push(Line::from(Span::styled(
+        format!(
+            "{} session(s) · {visited_here} open here   ● current  ◆ visited",
+            p.entries.len()
+        ),
+        Style::default().fg(palette().muted),
+    )));
+    lines.push(Line::from(""));
+
+    let filtered = p.filtered();
+    const MAX_ROWS: usize = 12;
+    if filtered.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no matching sessions",
+            Style::default().fg(palette().muted),
+        )));
+    } else {
+        let start = p
+            .selected
+            .saturating_sub(MAX_ROWS.saturating_sub(1).min(p.selected));
+        let end = (start + MAX_ROWS).min(filtered.len());
+        for (i, (_, s)) in filtered.iter().enumerate().take(end).skip(start) {
+            let is_sel = i == p.selected;
+            let marker = if is_sel { "\u{276f}" } else { " " };
+            let style = if is_sel {
+                Style::default()
+                    .fg(palette().accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette().text)
+            };
+            // Roster markers: `●` is the session you are in, `◆` one you
+            // have already visited and can return to without a rebuild.
+            // Without these the list cannot answer "which of these am I
+            // in", which is the first thing you ask of it.
+            // Read live, not from a snapshot taken when the picker
+            // opened: a resume started before this one can land while
+            // the list is still up, and a frozen id left the session
+            // just departed wearing the `●`.
+            let badge = if s.id == app.session_id {
+                "● "
+            } else if app.session_views.is_visited(&s.id) {
+                "◆ "
+            } else {
+                "  "
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{marker} {badge}{}", summary_line(s)),
+                style,
+            )));
+        }
+        if filtered.len() > MAX_ROWS {
+            lines.push(Line::from(Span::styled(
+                format!("  \u{2026} {} more", filtered.len() - MAX_ROWS),
+                Style::default().fg(palette().muted),
+            )));
+        }
+    }
+    draw_modal_box(
+        frame,
+        area,
+        lines,
+        " resume session ",
+        palette().accent,
+        Some(key_hint_line(
+            "[\u{2191}\u{2193}] move   [Enter] resume   [Esc] cancel",
         )),
     );
 }
@@ -2563,6 +2654,44 @@ mod tests {
     }
 
     #[test]
+    fn session_picker_lists_sessions_with_their_labels() {
+        use agent_code_lib::services::session::SessionSummary;
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut app = App::new("m", "/tmp", "s");
+        app.open_session_picker(vec![
+            SessionSummary {
+                id: "aaa11111-2222".into(),
+                cwd: "/home/u/api".into(),
+                model: "test-model".into(),
+                turn_count: 3,
+                message_count: 6,
+                updated_at: "2026-07-25T10:00:00Z".into(),
+                label: Some("auth work".into()),
+                tags: Vec::new(),
+            },
+            SessionSummary {
+                id: "bbb22222-3333".into(),
+                cwd: "/home/u/webapp".into(),
+                model: "test-model".into(),
+                turn_count: 1,
+                message_count: 2,
+                updated_at: "2026-07-24T09:00:00Z".into(),
+                label: None,
+                tags: Vec::new(),
+            },
+        ]);
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = buffer_to_string(term.backend().buffer());
+        assert!(s.contains("resume session"), "buffer:\n{s}");
+        assert!(s.contains("auth work"), "label missing:\n{s}");
+        // Unlabelled sessions fall back to the directory name, which is
+        // the next most recognisable thing about them.
+        assert!(s.contains("webapp"), "cwd fallback missing:\n{s}");
+        assert!(s.contains("aaa11111"), "short id missing:\n{s}");
+    }
+
+    #[test]
     fn a_folded_group_hides_its_rows_and_shows_its_size() {
         use crate::ui::modern::tasks::TaskSource;
         let backend = TestBackend::new(80, 24);
@@ -2612,6 +2741,69 @@ mod tests {
         assert!(
             normal.contains("▪ hello"),
             "normal mode is indistinguishable from insert:\n{normal}"
+        );
+    }
+
+    /// The roster's whole job: say which session you are in and which
+    /// you can go back to. A list that cannot answer that is just a list.
+    #[test]
+    fn the_session_picker_marks_current_and_visited_sessions() {
+        use agent_code_lib::services::session::SessionSummary;
+        let mk = |id: &str, label: &str| SessionSummary {
+            id: id.to_string(),
+            cwd: "/home/u/api".into(),
+            model: "test-model".into(),
+            turn_count: 1,
+            message_count: 2,
+            updated_at: "2026-07-27T10:00:00Z".into(),
+            label: Some(label.to_string()),
+            tags: Vec::new(),
+        };
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut app = App::new("m", "/tmp", "sess-current");
+        // A session visited earlier in this process.
+        app.session_views.save(
+            "sess-visited",
+            crate::ui::modern::session_views::SessionView {
+                transcript: vec![TranscriptItem::User("earlier".into())],
+                scroll: Default::default(),
+                expanded: Default::default(),
+                selected_item: None,
+            },
+            1,
+        );
+        app.open_session_picker(vec![
+            mk("sess-current", "the one I am in"),
+            mk("sess-visited", "been here"),
+            mk("sess-fresh", "never opened"),
+        ]);
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = buffer_to_string(term.backend().buffer());
+
+        assert!(s.contains("3 session(s)"), "buffer:\n{s}");
+        assert!(
+            s.contains("2 open here"),
+            "current + visited should count as open here:\n{s}"
+        );
+        // The glyphs must reach the rows, not just the legend.
+        let current_row = s
+            .lines()
+            .find(|l| l.contains("the one I am in"))
+            .unwrap_or("");
+        assert!(
+            current_row.contains('●'),
+            "no current marker: {current_row}"
+        );
+        let visited_row = s.lines().find(|l| l.contains("been here")).unwrap_or("");
+        assert!(
+            visited_row.contains('◆'),
+            "no visited marker: {visited_row}"
+        );
+        let fresh_row = s.lines().find(|l| l.contains("never opened")).unwrap_or("");
+        assert!(
+            !fresh_row.contains('●') && !fresh_row.contains('◆'),
+            "an unvisited session was marked: {fresh_row}"
         );
     }
 
@@ -3180,6 +3372,12 @@ mod tests {
     #[test]
     fn context_meter_red_at_high_usage() {
         // 95% → the "ctx 95%" cells should use the theme error color.
+        //
+        // The palette is process-global and the theme tests mutate it
+        // while they run, so this compares a colour drawn under one
+        // palette against `palette().error` read under another and fails
+        // at random. Hold the same lock they do.
+        let _g = crate::ui::theme::test_lock();
         let backend = TestBackend::new(100, 24);
         let mut term = Terminal::new(backend).unwrap();
         let mut app = App::new("m", "/tmp", "s");

@@ -16,9 +16,13 @@ mod mode;
 mod model_picker;
 mod palette;
 mod render;
+pub mod resume_state;
 mod run;
 mod scroll;
 mod search;
+mod session_picker;
+mod session_views;
+pub mod session_work;
 mod sink;
 #[cfg(test)]
 mod snapshot;
@@ -29,7 +33,7 @@ pub mod theme_picker;
 mod toolcard;
 mod vi;
 
-pub use run::run_modern_tui;
+pub use run::{CliPermissionOverride, run_modern_tui};
 
 /// Why the interactive TUI cannot start, or `None` when it can.
 ///

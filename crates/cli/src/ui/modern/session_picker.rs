@@ -1,0 +1,2627 @@
+//! In-TUI session picker (`/resume`).
+//!
+//! `/resume <id>` already worked, but bare `/resume` printed a usage
+//! line while the command's own description advertised "Interactively
+//! pick a recent session to resume". This is that picker.
+//!
+//! Picking a session does two things, and the second is the one that
+//! matters: it loads the messages into the engine *and* rebuilds the
+//! visible transcript from them. Restoring only the engine would leave
+//! the model with full context in front of an empty screen — the user
+//! would have no idea what they had resumed.
+
+use agent_code_lib::services::session::SessionSummary;
+
+use super::app::{App, Phase, TranscriptItem};
+use super::mode::SessionMode;
+
+/// Overlay state for the session picker.
+#[derive(Debug, Clone)]
+pub struct SessionPicker {
+    /// The session the user is in right now. Marked in the list so
+    /// "resume" never looks like it might land somewhere else.
+    /// Sessions with a cached view — returning to one of these keeps
+    /// where you were instead of rebuilding from the conversation.
+    /// Filter over id, label, cwd and model.
+    pub query: String,
+    /// Highlighted row into the filtered list.
+    pub selected: usize,
+    /// Sessions offered, newest first.
+    pub entries: Vec<SessionSummary>,
+}
+
+impl SessionPicker {
+    /// Rows matching `query`, case-insensitively.
+    pub fn filtered(&self) -> Vec<(usize, &SessionSummary)> {
+        let q = self.query.to_ascii_lowercase();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                if q.is_empty() {
+                    return true;
+                }
+                let label = s.label.as_deref().unwrap_or("");
+                s.id.to_ascii_lowercase().contains(&q)
+                    || label.to_ascii_lowercase().contains(&q)
+                    || s.cwd.to_ascii_lowercase().contains(&q)
+                    || s.model.to_ascii_lowercase().contains(&q)
+            })
+            .collect()
+    }
+
+    /// Id under the highlight, if the filter matched anything.
+    pub fn highlighted_id(&self) -> Option<String> {
+        self.filtered()
+            .get(self.selected)
+            .map(|(_, s)| s.id.clone())
+    }
+}
+
+/// Longest restored user row rendered in full.
+///
+/// A saved user message is the *engine* payload: a skill invocation is
+/// stored as the whole skill body. Nothing clamps user rows on the way
+/// to the screen, so a resumed session would otherwise open with one
+/// enormous block where the user remembers a one-line prompt.
+const MAX_RESTORED_USER_CHARS: usize = 4000;
+
+/// Recover something close to what the user actually typed from a saved
+/// user message.
+///
+/// `enqueue_turn` keeps the typed line and the engine payload separate
+/// and only the payload is persisted, so this reverses what it can:
+/// `@mention` inlining is cut at its envelope exactly, and anything
+/// still far too long to be a typed line (skill bodies, which the
+/// payload gives no way to reverse) is clamped with a visible marker
+/// rather than dumped into the transcript.
+fn display_form(text: &str) -> String {
+    let typed = match text.find(super::mentions::MENTION_ENVELOPE) {
+        Some(at) => &text[..at],
+        None => text,
+    };
+    if typed.chars().count() <= MAX_RESTORED_USER_CHARS {
+        return typed.to_string();
+    }
+    let head: String = typed.chars().take(MAX_RESTORED_USER_CHARS).collect();
+    format!("{head}\n… (expanded prompt — truncated for display)")
+}
+
+/// First eight *characters* of a session id, for compact display.
+///
+/// Character-safe, not byte-safe: ids come from session filenames, and
+/// an imported or hand-renamed file can carry non-ASCII, where slicing
+/// at byte 8 can land mid-character and panic the whole TUI.
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// One display row: what the picker shows for a session.
+///
+/// Sizes the session by turn count rather than message count: the picker
+/// is fed by the cached summary-only listing, which deliberately does not
+/// deserialize transcripts, so `message_count` is not populated there.
+pub fn summary_line(s: &SessionSummary) -> String {
+    let label = s.label.clone().unwrap_or_else(|| {
+        // No label: the working directory is the next most recognisable
+        // thing about a session.
+        std::path::Path::new(&s.cwd)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| s.cwd.clone())
+    });
+    let short_id = short_id(&s.id);
+    let turns = s.turn_count;
+    let plural = if turns == 1 { "" } else { "s" };
+    // Every dynamic field is escaped: a label, a directory name or an
+    // imported session id can carry a bidi override or a zero-width
+    // character, and this row is the thing a user reads before pressing
+    // Enter — which changes directory and runs lifecycle hooks. One row
+    // impersonating another is the whole attack.
+    let escape = crate::ui::text_safety::escape_deceptive;
+    format!(
+        "{}  {}  ·  {turns} turn{plural}  ·  {}",
+        escape(&short_id),
+        escape(&label),
+        escape(&s.updated_at)
+    )
+}
+
+/// Engine-side values a restored session carries, lifted out so the App
+/// mirrors can be updated in one place (and tested without an engine).
+#[derive(Debug, Clone, Default)]
+pub struct RestoredState {
+    pub id: String,
+    pub model: String,
+    pub turn_count: usize,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub cost_usd: f64,
+    pub plan_mode: bool,
+    /// Reasoning effort *after* the engine reset — the configured
+    /// startup value, not the discarded conversation's choice.
+    pub effort: Option<String>,
+}
+
+/// Rebuild transcript items from a restored conversation.
+///
+/// Tool calls are matched to their results by `tool_use_id` so a resumed
+/// session shows the same cards it did live, rather than a wall of raw
+/// blocks. Meta messages (tool results, context injection) are skipped:
+/// they are conversation plumbing the user never saw the first time.
+///
+/// `show_thinking` mirrors `App::show_thinking_blocks` so stored
+/// reasoning is reconstructed on exactly the same terms it was streamed
+/// live — restoring a session must not turn thinking blocks on for a
+/// user who has them off, nor drop them for a user who has them on.
+pub fn transcript_from_messages(
+    messages: &[agent_code_lib::llm::message::Message],
+    show_thinking: bool,
+) -> Vec<TranscriptItem> {
+    use agent_code_lib::llm::message::{ContentBlock, Message};
+    use std::collections::HashMap;
+
+    // First pass: collect tool results so a card can be built whole.
+    let mut results: HashMap<String, (String, bool)> = HashMap::new();
+    for m in messages {
+        if let Message::User(u) = m {
+            for block in &u.content {
+                if let ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                    ..
+                } = block
+                {
+                    results.insert(tool_use_id.clone(), (content.clone(), *is_error));
+                }
+            }
+        }
+    }
+
+    let mut items = Vec::new();
+    for m in messages {
+        match m {
+            Message::User(u) => {
+                let text: String = u
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                // A compacted session keeps its removed history *only*
+                // inside this summary. It rides in as a meta user message,
+                // so the blanket meta skip below would drop it and the
+                // resumed conversation would appear to start mid-thought
+                // while the engine still reasons from the hidden text.
+                if u.is_compact_summary {
+                    if !text.trim().is_empty() {
+                        items.push(TranscriptItem::System(format!("compacted context\n{text}")));
+                    }
+                    continue;
+                }
+                if u.is_meta {
+                    continue;
+                }
+                if !text.trim().is_empty() {
+                    items.push(TranscriptItem::User(display_form(&text)));
+                }
+            }
+            Message::Assistant(a) => {
+                for block in &a.content {
+                    match block {
+                        ContentBlock::Text { text } if !text.trim().is_empty() => {
+                            items.push(TranscriptItem::Assistant(text.clone()));
+                        }
+                        // Reasoning was on screen live via
+                        // `EngineEvent::Thinking`; the stored messages
+                        // still carry it, so a resumed transcript that
+                        // dropped it would be missing content the user
+                        // had already seen. No duration is recorded on
+                        // disk, hence `None` (renders un-timed).
+                        ContentBlock::Thinking { thinking, .. }
+                            if show_thinking && !thinking.trim().is_empty() =>
+                        {
+                            items.push(TranscriptItem::Thinking {
+                                text: thinking.clone(),
+                                duration_ms: None,
+                            });
+                        }
+                        ContentBlock::ToolUse { id, name, input } => {
+                            let (result, is_error) = results
+                                .get(id)
+                                .map(|(c, e)| (Some(c.clone()), *e))
+                                .unwrap_or((None, false));
+                            items.push(TranscriptItem::Tool {
+                                call_id: id.clone(),
+                                name: name.clone(),
+                                detail: tool_detail(input),
+                                result,
+                                is_error,
+                                live: None,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // System messages are engine bookkeeping, not screen content.
+            Message::System(_) => {}
+        }
+    }
+    items
+}
+
+/// A one-line description of a tool call, matching what the live cards
+/// show: the most identifying argument rather than the whole input.
+fn tool_detail(input: &serde_json::Value) -> String {
+    for key in [
+        "command",
+        "file_path",
+        "path",
+        "pattern",
+        "url",
+        "description",
+    ] {
+        if let Some(v) = input.get(key).and_then(|v| v.as_str()) {
+            return v.chars().take(120).collect();
+        }
+    }
+    String::new()
+}
+
+/// What `/resume` shows while its scan runs.
+///
+/// Shared so the code that clears it cannot drift from the code that
+/// sets it: they are one fact, and comparing against a copied literal
+/// is how a later reword leaves the status uncleared.
+pub const SESSION_SCAN_STATUS: &str = "loading sessions…";
+
+impl App {
+    /// Open the session picker (`/resume` with no argument).
+    /// Take a completed session scan, or drop it and say nothing.
+    ///
+    /// The generation check belongs to the run loop, which owns the
+    /// counter; what to *do* with a result that survives it belongs
+    /// here, next to the overlays the decision is about.
+    ///
+    /// Dropping has to clear the status: `open_session_picker` would
+    /// have replaced "loading sessions…", nothing else does, and no
+    /// retry is coming — so it would sit there until something unrelated
+    /// wrote over it, reporting a scan that finished long ago.
+    pub fn accept_session_scan(&mut self, rows: Vec<SessionSummary>) {
+        if self.session_picker_would_displace_an_overlay() {
+            // Only if it is still the scan's own line. Ctrl+F, the model
+            // and theme pickers and the palette each write their own
+            // instructions when they open, and clearing unconditionally
+            // erased the guidance of the overlay that is still in front.
+            // The shortcuts overlay writes nothing, which is the case
+            // that needs clearing.
+            if self.status_message == SESSION_SCAN_STATUS {
+                self.status_message.clear();
+                self.dirty = true;
+            }
+            return;
+        }
+        self.show_session_picker(rows);
+    }
+
+    /// Whether an overlay that [`Self::open_session_picker`] would
+    /// displace is in front right now.
+    ///
+    /// The session scan runs off-thread, so its rows can arrive after
+    /// the user has opened Ctrl+F, `/model`, `/theme` or the palette.
+    /// Showing the picker then takes the keyboard away from the thing
+    /// they just opened, to answer a request they have visibly moved on
+    /// from — a second `/resume` is not the only way to supersede one.
+    ///
+    /// Deliberately adjacent to `open_session_picker`, and listing the
+    /// same overlays it closes: these are one list, and keeping them
+    /// apart is how one grows an entry the other forgets.
+    pub fn session_picker_would_displace_an_overlay(&self) -> bool {
+        self.search_open()
+            || self.model_picker.is_some()
+            || self.theme_picker.is_some()
+            || self.command_palette.is_some()
+            || self.show_shortcuts
+    }
+
+    pub fn open_session_picker(&mut self, entries: Vec<SessionSummary>) {
+        if self.front_modal().is_some() {
+            return;
+        }
+        // Every other overlay that owns the keyboard has to go first.
+        // `handle_key` routes to search *before* the picker, so rows that
+        // arrive after the user opened Ctrl+F would draw a picker that
+        // silently ignored every keystroke; the model and theme pickers
+        // are routed after, so they would instead be left open and
+        // unreachable. These are mutually exclusive overlays.
+        self.cancel_search();
+        self.model_picker = None;
+        // Cancel, not drop: the theme picker previews live, so discarding
+        // it would strand the global palette on a theme the user never
+        // accepted while the config still names the original.
+        self.theme_picker_cancel();
+        self.command_palette = None;
+        self.show_shortcuts = false;
+        self.session_picker = Some(SessionPicker {
+            query: String::new(),
+            selected: 0,
+            entries,
+        });
+        self.status_message = "resume · type to filter · Enter resume · Esc cancel".into();
+        self.dirty = true;
+    }
+
+    /// Result of the run loop's off-thread session scan.
+    pub fn show_session_picker(&mut self, entries: Vec<SessionSummary>) {
+        if entries.is_empty() {
+            self.status_message.clear();
+            self.transcript
+                .push(TranscriptItem::System("no saved sessions found".into()));
+            self.dirty = true;
+            return;
+        }
+        // A permission / question modal owns the screen, and
+        // `open_session_picker` refuses to draw over one. Dropping the rows
+        // here would strand the request: no picker, no retry, and the
+        // status stuck on "loading sessions…" forever. Hold them until the
+        // modal clears (`retry_session_picker`).
+        if self.front_modal().is_some() {
+            self.status_message = "session list ready — answer the prompt first".into();
+            self.deferred_sessions = Some(entries);
+            self.dirty = true;
+            return;
+        }
+        self.open_session_picker(entries);
+    }
+
+    /// Remove the transcript row a staged submission already drew.
+    ///
+    /// `submit` echoes the line the moment it is accepted, so a
+    /// submission cancelled or handed back during a resume would
+    /// otherwise stay on screen looking like it had been sent.
+    fn remove_staged_row(&mut self, display: &str) {
+        let Some(idx) = self
+            .transcript
+            .iter()
+            .rposition(|i| matches!(i, TranscriptItem::User(t) if t == display))
+        else {
+            return;
+        };
+        // `@mentions:` notes are drawn immediately after the row.
+        if matches!(
+            self.transcript.get(idx + 1),
+            Some(TranscriptItem::System(t)) if t.starts_with("@mentions:")
+        ) {
+            self.transcript.remove(idx + 1);
+        }
+        self.transcript.remove(idx);
+        self.expanded.clear();
+        self.selected_item = None;
+        self.layout.invalidate();
+        self.dirty = true;
+    }
+
+    /// The visible half of `/clear`.
+    ///
+    /// Split out because a `/clear` held back for a resume has to run it
+    /// *twice*: once when submitted, and again when the deferred engine
+    /// clear finally lands — by then the restore has repainted the
+    /// screen, and skipping this would leave the restored history on
+    /// display in front of an empty conversation.
+    pub fn clear_transcript_view(&mut self) {
+        // Replaced, not `clear`ed: clearing drops the rows but keeps the
+        // buffer a long transcript grew, and that buffer then travels
+        // into the session-view cache on the next switch. Releasing it
+        // here keeps what `/clear` frees and what the cache is charged
+        // for the same number — see `session_views::view_bytes`.
+        self.transcript = Vec::new();
+        self.expanded = std::collections::HashSet::new();
+        self.selected_item = None;
+        self.layout.invalidate();
+        self.ctx_meter = None;
+        self.dirty = true;
+    }
+
+    /// A resume failed, so the session all that deferred work was meant
+    /// for never arrived. None of it may run against the conversation the
+    /// user was trying to leave — a prompt or `!cmd` would take real tool
+    /// and filesystem side effects there — so it is cancelled and shown.
+    pub fn cancel_deferred_resume_work(&mut self, header: &str) {
+        // Notices carried from the accept are already on the transcript,
+        // and the swap they were waiting for is never going to happen.
+        // Left here they would surface again — stale and attributed to
+        // the wrong resume — the next time one succeeds.
+        self.resume_notices.clear();
+        // Terminal path: no restore follows, so nothing needs to survive
+        // a transcript swap that will not happen.
+        //
+        // The header is the caller's, because the *reason* differs and
+        // the user is reading it: a load that failed and a resume the
+        // user chose to abandon both end here, and reporting the second
+        // as the first blames a session that was never unhealthy.
+        self.cancel_pending_session_work(header, false);
+    }
+
+    /// Session-scoped work staged against a conversation that is being
+    /// left behind.
+    ///
+    /// It cannot run where it was written (that conversation is going
+    /// away) and must not run anywhere else, so it is cancelled — but
+    /// reproduced verbatim, never reduced to a count. The submitted
+    /// prompt goes back to the composer when the composer is free.
+    /// `carry` keeps a copy for [`App::restore_transcript`] to re-emit:
+    /// a successful resume replaces the whole transcript, which would
+    /// otherwise wipe the report before the user ever read it.
+    fn cancel_pending_session_work(&mut self, why: &str, carry: bool) {
+        let mut cancelled: Vec<String> = Vec::new();
+        if self.work.discard_clear() {
+            cancelled.push("/clear".into());
+        }
+        if self.work.discard_model() {
+            cancelled.push("/model".into());
+        }
+        if let Some(slash) = self.work.discard_slash() {
+            cancelled.push(slash);
+        }
+        if let Some(cmd) = self.work.discard_shell() {
+            let row = format!("!{cmd}");
+            self.remove_staged_row(&row);
+            cancelled.push(row);
+        }
+        self.reclaim_staged_prompts("not sent:", &mut cancelled);
+        if !cancelled.is_empty() {
+            let body = cancelled.join("\n");
+            let note = format!("{why}\n{body}");
+            if carry {
+                self.resume_notices.push(note.clone());
+            }
+            self.transcript.push(TranscriptItem::System(note));
+            self.scroll_to_bottom();
+            self.dirty = true;
+        }
+    }
+
+    /// Take back prompts staged against the conversation being left.
+    ///
+    /// The composer gets the submitted prompt when it is free; anything
+    /// else is appended to `spill` for the caller to display verbatim.
+    /// Nothing is reduced to a count — these are the user's own words.
+    fn reclaim_staged_prompts(&mut self, header: &str, spill: &mut Vec<String>) {
+        let mut carried: Vec<String> = self.queue.drain(..).collect();
+        self.queue_selected = 0;
+        // Prompts whose images finished encoding while another
+        // submission held the work slot. `new_conversation` clears them
+        // on a successful restore — correctly, they belong to the
+        // conversation being replaced — so without reclaiming them here
+        // they and their attachments vanish with no notice at all, which
+        // is the one outcome this function exists to prevent.
+        for (submission, _blocks) in std::mem::take(&mut self.deferred_prompts) {
+            // The typed line, not the engine payload: a prompt naming an
+            // image *and* a text file has that file's contents inlined
+            // into the payload, so reporting it would print the file into
+            // the notice — and `remove_staged_row` would miss, because the
+            // row on screen shows what the user typed.
+            let text = submission.user_text();
+            self.remove_staged_row(&text);
+            carried.push(text);
+        }
+        // A prompt whose images are still being encoded is inside the
+        // blocking task, not in `pending_submit`, so nothing else here
+        // can reach it — and the restore bumps the epoch, which makes
+        // the eventual result be discarded. Without this it disappeared
+        // silently, which is the one thing this function exists to
+        // prevent.
+        if let Some(text) = self.encoding_display.take() {
+            // Reporting the text is only half of it: the encode is still
+            // running, and its result must not re-arm the prompt we have
+            // just told the user was not sent — which is what happened
+            // when a restore failed, or when the encode won the race.
+            self.encode_abandoned = true;
+            self.remove_staged_row(&text);
+            carried.push(text);
+        }
+        if let Some(submission) = self.work.discard_submit() {
+            // Its images go back with it. The descriptors and any bytes
+            // already read from them belong to *this* prompt, and the
+            // text returned to the composer still carries the `@path`
+            // mention, so resubmitting re-stages them. Leaving them here
+            // would bind them to whatever the user types next and send a
+            // file they did not mean to attach — the same hazard
+            // `enqueue_turn` and `new_conversation` clear for.
+            self.pending_images.clear();
+            self.pending_attachments.clear();
+            // The line the user typed, not the engine payload: that has
+            // `@path` mentions and skill bodies already inlined, and
+            // handing it back would drop a whole file into the composer
+            // and expand the mention a second time on resubmission.
+            let text = submission.user_text();
+            // The row `submit` drew is a claim this was sent. It never
+            // ran, so it goes with the prompt.
+            self.remove_staged_row(&text);
+            if self.input.trim().is_empty() {
+                self.cursor = text.len();
+                self.input = text;
+            } else {
+                // A draft already occupies the composer and must not be
+                // clobbered, so this one is displayed instead.
+                carried.insert(0, text);
+            }
+        }
+        if !carried.is_empty() {
+            spill.push(format!("{header}\n{}", carried.join("\n")));
+        }
+        // Submitting during the resume window moved the phase to
+        // Streaming, but the gate stopped any turn from spawning, so
+        // nothing will ever reap it back to Idle — and a stuck Streaming
+        // phase makes every later Enter queue instead of send.
+        //
+        // Only when no turn is actually live. Accepting the picker
+        // mid-stream reaches here with a real `TurnHandle` still owned by
+        // the event loop: forcing Idle there would send Ctrl+C down the
+        // quit path instead of cancelling the turn. A HITL modal likewise
+        // keeps the phase it owns.
+        if !self.turn_live && self.modals.is_empty() && self.phase != Phase::Idle {
+            self.phase = Phase::Idle;
+            self.dirty = true;
+        }
+    }
+
+    /// Open a picker whose rows arrived while a HITL modal was up.
+    /// Called by the run loop once the modal queue drains.
+    pub fn retry_session_picker(&mut self) {
+        if self.front_modal().is_some() {
+            return;
+        }
+        if let Some(entries) = self.deferred_sessions.take() {
+            self.open_session_picker(entries);
+        }
+    }
+
+    pub fn session_picker_open(&self) -> bool {
+        self.session_picker.is_some()
+    }
+
+    pub fn close_session_picker(&mut self) {
+        if self.session_picker.take().is_some() {
+            self.status_message.clear();
+            self.dirty = true;
+        }
+    }
+
+    pub fn session_picker_move(&mut self, delta: i32) {
+        let Some(p) = self.session_picker.as_mut() else {
+            return;
+        };
+        let n = p.filtered().len() as i32;
+        if n == 0 {
+            p.selected = 0;
+        } else {
+            p.selected = (p.selected as i32 + delta).rem_euclid(n) as usize;
+        }
+        self.dirty = true;
+    }
+
+    /// Pasted text goes to the picker's filter while it is open — it
+    /// owns typed input, so it owns pasted input too. Otherwise the
+    /// paste silently edits the composer hidden behind it and the draft
+    /// resurfaces after the picker closes.
+    pub fn session_picker_insert_str(&mut self, text: &str) {
+        let Some(p) = self.session_picker.as_mut() else {
+            return;
+        };
+        // A filter is one line; newlines and control characters in a
+        // pasted id or label are noise.
+        p.query.extend(text.chars().filter(|c| !c.is_control()));
+        p.selected = 0;
+        self.dirty = true;
+    }
+
+    pub fn session_picker_insert_char(&mut self, c: char) {
+        let Some(p) = self.session_picker.as_mut() else {
+            return;
+        };
+        if c.is_control() {
+            return;
+        }
+        p.query.push(c);
+        p.selected = 0;
+        self.dirty = true;
+    }
+
+    pub fn session_picker_backspace(&mut self) {
+        let Some(p) = self.session_picker.as_mut() else {
+            return;
+        };
+        p.query.pop();
+        p.selected = 0;
+        self.dirty = true;
+    }
+
+    /// Accept the highlighted session; the run loop performs the load.
+    pub fn session_picker_accept(&mut self) {
+        let Some(id) = self
+            .session_picker
+            .as_ref()
+            .and_then(|p| p.highlighted_id())
+        else {
+            // Nothing matched: treat Enter as a cancel rather than a
+            // silent no-op the user cannot distinguish from a hang.
+            self.close_session_picker();
+            return;
+        };
+        self.close_session_picker();
+        // Selecting the session you are already in is a no-op, not a
+        // reload. Going through the resume path would cancel pending
+        // work and rebuild the transcript to arrive exactly where it
+        // started — the user would lose queued prompts for nothing.
+        if id == self.session_id {
+            // Choosing to stay must also *stop* a resume already in
+            // flight. `/resume` can be reopened while an earlier
+            // selection is still loading, and returning without clearing
+            // it left the run loop free to apply that earlier
+            // destination — while this message claimed nothing happened.
+            self.status_message = if self.resume.settle().is_some() {
+                // Taking the gate is not enough: work staged against the
+                // session that was loading is held *because* a resume is
+                // outstanding, so releasing the gate without releasing
+                // that work lets the run loop apply a `/clear` meant for
+                // a session we are no longer going to.
+                self.cancel_deferred_resume_work("cancelled — held for the resume you cancelled:");
+                "already in this session — cancelled the resume in progress".to_string()
+            } else {
+                "already in this session".to_string()
+            };
+            self.dirty = true;
+            return;
+        }
+        // Work already staged against the conversation we are leaving is
+        // resolved here, at the moment of the decision. Left alone the
+        // resume gates would merely *hold* it, and it would then land on
+        // the restored session — a `/clear` issued against the old
+        // conversation would clear the new one.
+        self.cancel_pending_session_work(
+            "cancelled — issued before you resumed another session:",
+            true,
+        );
+        self.resume.begin(id.clone());
+        self.status_message = format!("resuming {}…", short_id(&id));
+        self.dirty = true;
+    }
+
+    /// Adopt the restored conversation's checklist.
+    ///
+    /// A resume rewrites history exactly as `/rewind` and `/snip` do, so
+    /// it uses the same seam: bump the epoch, which disowns anything the
+    /// previous conversation still has in flight, then rebuild the pane
+    /// from the messages actually restored. Skipping it leaves the pane
+    /// showing the discarded session's work.
+    pub fn adopt_restored_todos(&mut self, messages: &[agent_code_lib::llm::message::Message]) {
+        self.new_conversation();
+        self.todos = super::tasks::todos_from_messages(messages);
+        // Subagent rows and their captured output are conversation
+        // state, and `sync_background_tasks` deliberately carries every
+        // one of them across a refresh — the event stream is their only
+        // source, so a row dropped there is gone. That is right within a
+        // conversation and wrong across a swap: left alone, the restored
+        // session's pane keeps listing agents from the session it
+        // replaced, and drill-in still opens their results. The captured
+        // bodies live on the rows, so dropping the rows drops those too.
+        self.tasks
+            .retain(|t| t.source != super::tasks::TaskSource::Subagent);
+        self.tasks_selected = 0;
+    }
+
+    /// Replace the visible transcript with a restored conversation.
+    pub fn restore_transcript(
+        &mut self,
+        items: Vec<TranscriptItem>,
+        id: &str,
+        turns: usize,
+        messages: usize,
+        outgoing: usize,
+    ) {
+        // Remember the session being left, so switching back lands where
+        // it was rather than at the bottom of a rebuilt transcript.
+        self.stash_current_view(outgoing);
+
+        // Returning to a session visited earlier: restore what was on
+        // screen instead of the rebuild. The engine reloaded the
+        // conversation either way; this only decides what is shown.
+        if let Some(view) = self.session_views.take(id, messages) {
+            self.transcript = view.transcript;
+            self.expanded = view.expanded;
+            self.selected_item = view.selected_item;
+            self.layout.invalidate();
+            self.scroll = view.scroll;
+            for note in std::mem::take(&mut self.resume_notices) {
+                self.transcript.push(TranscriptItem::System(note));
+            }
+            self.status_message.clear();
+            self.dirty = true;
+            return;
+        }
+
+        self.transcript = items;
+        self.expanded.clear();
+        self.selected_item = None;
+        self.layout.invalidate();
+        self.transcript.push(TranscriptItem::System(format!(
+            "resumed session {} · {} turns",
+            short_id(id),
+            turns
+        )));
+        // Re-emit anything reported before the swap: it was pushed onto
+        // the transcript we just replaced, so without this the promised
+        // verbatim report of cancelled work never reaches the user.
+        for note in std::mem::take(&mut self.resume_notices) {
+            self.transcript.push(TranscriptItem::System(note));
+        }
+        self.scroll_to_bottom();
+        self.status_message.clear();
+        self.dirty = true;
+    }
+
+    /// Snapshot the outgoing session's view before switching away,
+    /// *consuming* what is on screen.
+    ///
+    /// Called only from [`Self::restore_transcript`], which overwrites
+    /// the transcript and the expansion set on every path immediately
+    /// afterwards — so the outgoing state is moved, not copied. Copying
+    /// would matter: resume deliberately supports conversations that run
+    /// to megabytes of strings, and duplicating one on the event-loop
+    /// thread stalls input and repaint for as long as the copy takes,
+    /// putting back the pause that loading off-thread removed.
+    ///
+    /// A session with nothing on screen is not stored — see
+    /// [`super::session_views::SessionViews::save`].
+    pub fn stash_current_view(&mut self, messages: usize) {
+        let id = self.session_id.clone();
+        let view = super::session_views::SessionView {
+            transcript: std::mem::take(&mut self.transcript),
+            scroll: self.scroll,
+            expanded: std::mem::take(&mut self.expanded),
+            selected_item: self.selected_item,
+        };
+        self.session_views.save(&id, view, messages);
+    }
+
+    /// Point every App mirror at the session just restored.
+    ///
+    /// The engine is only half the story: the header, the mode badge and
+    /// `/cost` all read App's own copies. Leaving them behind makes the
+    /// UI describe the session the user just left — a NORMAL badge over a
+    /// read-only plan-mode context, the old model name, the old spend.
+    ///
+    /// Returns the [`SessionMode`] the caller must push into the *live*
+    /// engine handles (plan atomic + permission-checker default); App
+    /// deliberately holds no engine Arc, so it cannot do that itself.
+    pub fn adopt_restored_session(&mut self, s: &RestoredState) -> SessionMode {
+        self.session_id = s.id.clone();
+        if !s.model.is_empty() {
+            self.model = s.model.clone();
+        }
+        self.turn_count = s.turn_count;
+        self.tokens_in = s.tokens_in;
+        self.tokens_out = s.tokens_out;
+        self.cost_usd = s.cost_usd;
+        self.effort = s.effort.clone();
+        // Belongs to the conversation that was just replaced; the next
+        // turn re-reports it for the restored one.
+        self.ctx_meter = None;
+        self.mode = if s.plan_mode {
+            SessionMode::Plan
+        } else {
+            SessionMode::Normal
+        };
+
+        // Prompts staged against the previous conversation must not be
+        // auto-dispatched into the session that replaced it — but they
+        // are the user's own words, so none of them is dropped silently.
+        // A prompt submitted while the session was still loading never
+        // ran (turn spawning is blocked for exactly that window), so it
+        // goes back to the composer; anything that cannot is reproduced
+        // verbatim, where it can still be read and copied.
+        let mut spill = Vec::new();
+        self.reclaim_staged_prompts("not sent — written for the previous session:", &mut spill);
+        for line in spill {
+            self.transcript.push(TranscriptItem::System(line));
+            self.scroll_to_bottom();
+        }
+        self.dirty = true;
+        self.mode
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ui::modern::resume_state::WorkScope;
+    /// Picking the session you are already in must do nothing. Routing
+    /// it through the resume path would cancel queued work and rebuild
+    /// the transcript to land exactly where it started.
+    #[test]
+    fn resuming_the_current_session_is_a_no_op() {
+        let mut app = App::new("m", "/tmp", "sess-a");
+        app.queue.push_back("a queued prompt".into());
+        app.open_session_picker(vec![summary("sess-a", Some("current"), "/a")]);
+        app.session_picker_accept();
+
+        assert!(
+            app.resume.allows(WorkScope::Session),
+            "scheduled a resume of the session already in front"
+        );
+        assert_eq!(
+            app.queue.len(),
+            1,
+            "queued work was cancelled for a no-op resume"
+        );
+        assert!(app.status_message.contains("already in this session"));
+    }
+
+    /// Switching away and back must land where you left. Rebuilding is
+    /// correct but loses position and expansions, which makes moving
+    /// between sessions cost more than it saves.
+    #[test]
+    fn returning_to_a_session_restores_where_you_were() {
+        let mut app = App::new("m", "/tmp", "session-a");
+        app.transcript
+            .push(TranscriptItem::User("work in a".into()));
+        // A holds the conversation the reload below reports for it. The
+        // cache is only reused while those agree, so leaving this at the
+        // default would read as "the session moved while we were away".
+        app.scroll = crate::ui::modern::scroll::ScrollState::Free { top_line: 7 };
+        app.expanded.insert(0);
+
+        // Switch to B: A's view is stashed, B is rebuilt from messages.
+        app.session_id = "session-a".into();
+        app.restore_transcript(
+            vec![TranscriptItem::User("work in b".into())],
+            "session-b",
+            1,
+            1,
+            1,
+        );
+        assert!(
+            app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::User(t) if t == "work in b")),
+            "did not switch to B"
+        );
+
+        // Back to A: the stashed view wins over the rebuild, so the
+        // rebuilt items passed here must NOT be what is shown.
+        app.session_id = "session-b".into();
+        app.restore_transcript(
+            vec![TranscriptItem::User("rebuilt from disk".into())],
+            "session-a",
+            1,
+            1,
+            1,
+        );
+        assert!(
+            app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::User(t) if t == "work in a")),
+            "A's view was not restored: {:?}",
+            app.transcript
+        );
+        assert!(
+            !app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::User(t) if t == "rebuilt from disk")),
+            "the rebuild replaced a cached view"
+        );
+        assert_eq!(
+            app.scroll,
+            crate::ui::modern::scroll::ScrollState::Free { top_line: 7 },
+            "scroll position was not restored"
+        );
+        assert!(app.expanded.contains(&0), "expansions were not restored");
+    }
+
+    /// A session never visited has no cached view, so it must be built
+    /// from the conversation rather than showing someone else's.
+    #[test]
+    fn a_first_visit_uses_the_rebuilt_transcript() {
+        let mut app = App::new("m", "/tmp", "session-a");
+        app.transcript.push(TranscriptItem::User("in a".into()));
+        app.restore_transcript(
+            vec![TranscriptItem::User("fresh from disk".into())],
+            "never-seen",
+            2,
+            2,
+            2,
+        );
+        assert!(
+            app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::User(t) if t == "fresh from disk"))
+        );
+        assert!(
+            !app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::User(t) if t == "in a"))
+        );
+    }
+
+    use super::*;
+    use agent_code_lib::llm::message::{AssistantMessage, ContentBlock, Message, UserMessage};
+    use agent_code_lib::tools::PermissionResponse;
+    use uuid::Uuid;
+
+    fn summary(id: &str, label: Option<&str>, cwd: &str) -> SessionSummary {
+        SessionSummary {
+            id: id.to_string(),
+            cwd: cwd.to_string(),
+            model: "test-model".into(),
+            turn_count: 3,
+            message_count: 6,
+            updated_at: "2026-07-25T10:00:00Z".into(),
+            label: label.map(|s| s.to_string()),
+            tags: Vec::new(),
+        }
+    }
+
+    fn user(text: &str) -> Message {
+        Message::User(UserMessage {
+            uuid: Uuid::new_v4(),
+            timestamp: String::new(),
+            content: vec![ContentBlock::Text { text: text.into() }],
+            is_meta: false,
+            is_compact_summary: false,
+        })
+    }
+
+    #[test]
+    fn filtering_matches_id_label_cwd_and_model() {
+        let picker = SessionPicker {
+            query: String::new(),
+            selected: 0,
+            entries: vec![
+                summary("aaa11111", Some("auth work"), "/home/u/api"),
+                summary("bbb22222", None, "/home/u/webapp"),
+            ],
+        };
+        for (q, expected) in [
+            ("auth", 1),
+            ("webapp", 1),
+            ("bbb", 1),
+            ("test-model", 2),
+            ("nothing", 0),
+        ] {
+            let p = SessionPicker {
+                query: q.to_string(),
+                ..picker.clone()
+            };
+            assert_eq!(p.filtered().len(), expected, "query {q}");
+        }
+    }
+
+    #[test]
+    fn accepting_requests_the_highlighted_session() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.open_session_picker(vec![
+            summary("aaa11111", None, "/a"),
+            summary("bbb22222", None, "/b"),
+        ]);
+        app.session_picker_move(1);
+        app.session_picker_accept();
+        assert!(!app.session_picker_open());
+        assert_eq!(app.resume.loading_id(), Some("bbb22222"));
+    }
+
+    /// Enter with an empty result set must not resume something the user
+    /// never selected.
+    #[test]
+    fn accepting_with_no_match_cancels() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.open_session_picker(vec![summary("aaa11111", None, "/a")]);
+        for c in "zzzz".chars() {
+            app.session_picker_insert_char(c);
+        }
+        app.session_picker_accept();
+        assert!(!app.session_picker_open());
+        assert!(
+            app.resume.allows(WorkScope::Session),
+            "resumed an unselected session"
+        );
+    }
+
+    /// The point of the feature: a resumed session has to be *visible*,
+    /// not just present in the engine.
+    #[test]
+    fn a_conversation_rebuilds_into_transcript_items() {
+        let messages = vec![
+            user("add a null check"),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![
+                    ContentBlock::Text {
+                        text: "On it.".into(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "FileEdit".into(),
+                        input: serde_json::json!({"file_path": "src/auth.rs"}),
+                    },
+                ],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "1 edit applied".into(),
+                    is_error: false,
+                    extra_content: Vec::new(),
+                }],
+                is_meta: true,
+                is_compact_summary: false,
+            }),
+        ];
+
+        let items = transcript_from_messages(&messages, true);
+        assert_eq!(items.len(), 3, "got {items:?}");
+        assert!(matches!(&items[0], TranscriptItem::User(t) if t == "add a null check"));
+        assert!(matches!(&items[1], TranscriptItem::Assistant(t) if t == "On it."));
+        match &items[2] {
+            TranscriptItem::Tool {
+                name,
+                detail,
+                result,
+                ..
+            } => {
+                assert_eq!(name, "FileEdit");
+                assert_eq!(detail, "src/auth.rs");
+                assert_eq!(
+                    result.as_deref(),
+                    Some("1 edit applied"),
+                    "the tool result was not paired back to its call"
+                );
+            }
+            other => panic!("expected a tool card, got {other:?}"),
+        }
+    }
+
+    /// Tool results arrive as `is_meta` user messages. Rendering them as
+    /// user turns would show the transcript talking to itself.
+    #[test]
+    fn meta_messages_do_not_become_user_turns() {
+        let messages = vec![Message::User(UserMessage {
+            uuid: Uuid::new_v4(),
+            timestamp: String::new(),
+            content: vec![ContentBlock::Text {
+                text: "injected context".into(),
+            }],
+            is_meta: true,
+            is_compact_summary: false,
+        })];
+        assert!(transcript_from_messages(&messages, true).is_empty());
+    }
+
+    /// `/resume` must not scan the sessions directory on the thread that
+    /// draws frames and reads keys — it only raises a request.
+    #[test]
+    fn resume_only_requests_the_session_list() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.input = "/resume".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert!(
+            app.pending_session_list,
+            "the run loop was never asked for the session list"
+        );
+        assert!(
+            !app.session_picker_open(),
+            "the picker opened before the list was fetched — the scan ran inline"
+        );
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn an_empty_session_list_reports_instead_of_opening_the_picker() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.show_session_picker(Vec::new());
+        assert!(!app.session_picker_open());
+        assert!(
+            app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::System(t) if t.contains("no saved sessions"))),
+        );
+    }
+
+    #[test]
+    fn a_returned_session_list_opens_the_picker() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.show_session_picker(vec![summary("aaa11111", None, "/a")]);
+        assert!(app.session_picker_open());
+    }
+
+    /// The picker is fed by the index-cached summary listing, which does
+    /// not deserialize transcripts — so rows must not be sized by a
+    /// `message_count` that path never populates.
+    #[test]
+    fn rows_are_sized_by_turns_not_unpopulated_message_counts() {
+        let mut s = summary("aaa11111", Some("auth work"), "/home/u/api");
+        s.message_count = 0;
+        s.turn_count = 3;
+        let line = summary_line(&s);
+        assert!(line.contains("3 turns"), "got {line}");
+        assert!(
+            !line.contains("0 msg"),
+            "row reports a count it never read: {line}"
+        );
+
+        s.turn_count = 1;
+        assert!(summary_line(&s).contains("1 turn "), "{}", summary_line(&s));
+    }
+
+    /// A compacted session's earlier turns survive only inside the
+    /// compact summary. Dropping it with the rest of the meta plumbing
+    /// leaves the resumed conversation starting mid-thought while the
+    /// engine still reasons from the hidden text.
+    #[test]
+    fn a_compact_summary_survives_into_the_restored_transcript() {
+        let messages = vec![
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::Text {
+                    text: "earlier we refactored the auth module".into(),
+                }],
+                is_meta: true,
+                is_compact_summary: true,
+            }),
+            user("now add tests"),
+        ];
+        let items = transcript_from_messages(&messages, true);
+        assert_eq!(items.len(), 2, "got {items:?}");
+        assert!(
+            matches!(&items[0], TranscriptItem::System(t) if t.contains("refactored the auth module")),
+            "the compact summary was dropped: {items:?}"
+        );
+        assert!(matches!(&items[1], TranscriptItem::User(t) if t == "now add tests"));
+    }
+
+    fn thinking_turn() -> Vec<Message> {
+        vec![Message::Assistant(AssistantMessage {
+            uuid: Uuid::new_v4(),
+            timestamp: String::new(),
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "the null check belongs in the caller".into(),
+                    signature: None,
+                },
+                ContentBlock::Text {
+                    text: "Adding it now.".into(),
+                },
+            ],
+            model: None,
+            usage: None,
+            stop_reason: None,
+            request_id: None,
+        })]
+    }
+
+    /// Reasoning was on screen live; the stored messages still carry it,
+    /// so a resumed transcript that drops it is missing content the user
+    /// had already read.
+    #[test]
+    fn stored_thinking_is_restored_when_thinking_blocks_are_shown() {
+        let items = transcript_from_messages(&thinking_turn(), true);
+        assert_eq!(items.len(), 2, "got {items:?}");
+        assert!(
+            matches!(&items[0], TranscriptItem::Thinking { text, duration_ms }
+                if text.contains("belongs in the caller") && duration_ms.is_none()),
+            "stored reasoning was dropped: {items:?}"
+        );
+        assert!(matches!(&items[1], TranscriptItem::Assistant(t) if t == "Adding it now."));
+    }
+
+    /// ...and restoring must not switch thinking blocks *on* for a user
+    /// who keeps them off.
+    #[test]
+    fn stored_thinking_is_omitted_when_thinking_blocks_are_hidden() {
+        let items = transcript_from_messages(&thinking_turn(), false);
+        assert_eq!(items.len(), 1, "got {items:?}");
+        assert!(matches!(&items[0], TranscriptItem::Assistant(_)));
+    }
+
+    /// Rendering hides the picker behind a HITL modal, so leaving it
+    /// *open* handed y/a/n, Esc and Enter to an invisible overlay: the
+    /// visible modal looked unresponsive, and Enter could schedule a
+    /// resume the user never saw themselves choose.
+    #[test]
+    fn a_permission_ask_closes_an_open_session_picker() {
+        use super::super::sink::EngineEvent;
+        let mut app = App::new("m", "/tmp", "s");
+        app.open_session_picker(vec![summary("aaa11111", None, "/a")]);
+        assert!(app.session_picker_open());
+
+        let (tx, _rx) = std::sync::mpsc::channel::<PermissionResponse>();
+        app.apply_engine(EngineEvent::PermissionAsk {
+            name: "Bash".into(),
+            description: "run".into(),
+            origin: None,
+            input_preview: None,
+            suggested_prefix: None,
+            respond: tx,
+        });
+
+        assert!(
+            !app.session_picker_open(),
+            "picker kept the keyboard under a HITL modal"
+        );
+        assert!(
+            app.resume.allows(WorkScope::Session),
+            "a resume was scheduled"
+        );
+    }
+
+    /// A `/clear` held back for a resume lands after the restore has
+    /// repainted the screen, so the visual clear has to run again — or
+    /// the restored history sits in front of an empty conversation.
+    #[test]
+    fn the_visual_clear_can_be_reapplied_after_a_restore() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.input = "/clear".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert!(app.work.clear_staged(), "engine clear was not deferred");
+        assert!(app.transcript.is_empty());
+
+        // The restore repopulates the screen while the engine clear is
+        // still pending.
+        app.restore_transcript(
+            vec![TranscriptItem::User("restored".into())],
+            "abcdef123456",
+            2,
+            2,
+            2,
+        );
+        assert!(!app.transcript.is_empty());
+
+        // Applying the deferred clear must take the view with it.
+        app.clear_transcript_view();
+        assert!(
+            app.transcript.is_empty(),
+            "restored history survived the deferred /clear: {:?}",
+            app.transcript
+        );
+        assert!(app.ctx_meter.is_none());
+    }
+
+    /// `/clear` frees the transcript's memory, not just its rows.
+    ///
+    /// `Vec::clear` would leave the buffer a long conversation grew still
+    /// allocated, and the next session switch moves that buffer into the
+    /// view cache — where it is correctly charged its real size and so
+    /// evicts other sessions' places to pay for rows nobody can see.
+    #[test]
+    fn clearing_the_view_releases_the_transcript_allocation() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.transcript = (0..4096)
+            .map(|i| TranscriptItem::User(format!("row {i}")))
+            .collect();
+        app.expanded = (0..4096).collect();
+
+        app.clear_transcript_view();
+
+        assert_eq!(
+            app.transcript.capacity(),
+            0,
+            "a cleared transcript kept its buffer"
+        );
+        assert_eq!(
+            app.expanded.capacity(),
+            0,
+            "a cleared expansion set kept its buffer"
+        );
+    }
+
+    /// A failed resume must not release work that was deferred *for* the
+    /// session that never arrived: a prompt or `!cmd` would take real
+    /// side effects in the conversation the user was trying to leave.
+    #[test]
+    fn a_failed_resume_cancels_the_work_it_deferred() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.resume.begin("abcdef123456");
+        app.work.stage_clear();
+        app.work.stage_slash("/cost".into());
+        app.work.stage_shell("rm -rf build".into());
+        app.work.stage_submit("keep going".into(), None);
+
+        app.cancel_deferred_resume_work("cancelled — held for the session that failed to load:");
+
+        assert!(
+            !app.work.clear_staged(),
+            "/clear would run on the old session"
+        );
+        assert!(
+            app.work.slash_staged().is_none(),
+            "slash command would run on the old session"
+        );
+        assert!(
+            app.work.shell_staged().is_none(),
+            "shell command would run on the old session"
+        );
+        assert!(
+            !app.work.submit_staged(),
+            "prompt would start a turn on the old session"
+        );
+        // Nothing vanishes: the prompt returns to the composer and the
+        // rest is named in full.
+        assert_eq!(app.input, "keep going");
+        let said = app
+            .transcript
+            .iter()
+            .filter_map(|i| match i {
+                TranscriptItem::System(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in ["/clear", "/cost", "!rm -rf build"] {
+            assert!(
+                said.contains(expected),
+                "{expected} was cancelled silently: {said}"
+            );
+        }
+    }
+
+    /// `handle_key` routes to search before the picker, so a picker
+    /// opened while search is up would ignore every keystroke.
+    #[test]
+    fn opening_the_picker_closes_the_overlays_that_would_eat_its_keys() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.open_search();
+        assert!(app.search_open());
+        app.open_session_picker(vec![summary("aaa11111", None, "/a")]);
+        assert!(app.session_picker_open());
+        assert!(
+            !app.search_open(),
+            "search still owns the keyboard under a visible picker"
+        );
+        assert!(app.model_picker.is_none());
+        assert!(app.theme_picker.is_none());
+        assert!(app.command_palette.is_none());
+    }
+
+    /// The theme picker previews live, so dropping it would strand the
+    /// global palette on a theme the user never accepted. Mutates the
+    /// process-global theme, hence the shared test lock.
+    #[test]
+    fn opening_the_picker_reverts_a_theme_preview_rather_than_dropping_it() {
+        let _g = crate::ui::theme::test_lock();
+        let mut app = App::new("m", "/tmp", "s");
+        app.set_theme("one-dark");
+        app.pending_theme = None;
+
+        app.open_theme_picker();
+        // Browsing previews the candidate globally without committing.
+        app.theme_picker_move(1);
+        app.theme_picker_move(1);
+
+        app.open_session_picker(vec![summary("aaa11111", None, "/a")]);
+
+        assert!(app.session_picker_open());
+        assert!(app.theme_picker.is_none());
+        assert_eq!(app.theme_name, "one-dark");
+        assert!(
+            app.pending_theme.is_none(),
+            "an unaccepted preview was queued for persistence"
+        );
+        assert_eq!(
+            crate::ui::theme::current().accent,
+            crate::ui::theme::Theme::from_name("one-dark").accent,
+            "an unaccepted preview survived opening the resume picker"
+        );
+    }
+
+    /// Rows that arrive late must clear search too — the user has had a
+    /// whole scan's worth of time to press Ctrl+F.
+    #[test]
+    fn late_rows_also_close_search() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.pending_session_list = true;
+        app.open_search();
+        app.show_session_picker(vec![summary("aaa11111", None, "/a")]);
+        assert!(app.session_picker_open());
+        assert!(!app.search_open());
+    }
+
+    /// Put a permission modal in front. The receiver is returned so the
+    /// caller keeps the channel alive for the length of the test.
+    fn a_modal(app: &mut App) -> std::sync::mpsc::Receiver<PermissionResponse> {
+        use super::super::app::{Modal, PendingPermission, Phase};
+        let (tx, rx) = std::sync::mpsc::channel::<PermissionResponse>();
+        app.modals.push_back(Modal::Permission(PendingPermission {
+            name: "Bash".into(),
+            description: "run".into(),
+            origin: None,
+            input_preview: None,
+            suggested_prefix: None,
+            respond: tx,
+        }));
+        app.phase = Phase::Permission;
+        rx
+    }
+
+    /// Rows that arrive while a permission modal owns the screen must not
+    /// be dropped: the picker would never open, nothing would retry, and
+    /// the status bar would read "loading sessions…" forever.
+    #[test]
+    fn picker_rows_arriving_under_a_modal_are_held_not_dropped() {
+        let mut app = App::new("m", "/tmp", "s");
+        let _rx = a_modal(&mut app);
+        app.show_session_picker(vec![summary("aaa11111", None, "/a")]);
+        assert!(!app.session_picker_open(), "picker drew over a HITL modal");
+        assert!(
+            app.deferred_sessions.is_some(),
+            "the session list was dropped on the floor"
+        );
+
+        // Still blocked while the modal is up.
+        app.retry_session_picker();
+        assert!(!app.session_picker_open());
+
+        // Modal answered: the held rows open the picker.
+        app.modals.pop_front();
+        app.retry_session_picker();
+        assert!(
+            app.session_picker_open(),
+            "held session list never opened the picker"
+        );
+        assert!(app.deferred_sessions.is_none());
+    }
+
+    #[test]
+    fn retrying_without_held_rows_is_a_noop() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.retry_session_picker();
+        assert!(!app.session_picker_open());
+    }
+
+    fn restored() -> RestoredState {
+        RestoredState {
+            id: "abcdef123456".into(),
+            model: "restored-model".into(),
+            turn_count: 7,
+            tokens_in: 1234,
+            tokens_out: 567,
+            cost_usd: 4.25,
+            plan_mode: true,
+            effort: None,
+        }
+    }
+
+    /// The engine is only half a resume: the header, the badge and
+    /// `/cost` all read App's own copies of this state.
+    #[test]
+    fn restored_state_is_mirrored_into_the_app() {
+        let mut app = App::new("old-model", "/tmp", "old-session");
+        app.mode = SessionMode::Normal;
+        app.turn_count = 99;
+        app.tokens_in = 1;
+        app.tokens_out = 2;
+        app.cost_usd = 99.0;
+        app.ctx_meter = Some((10, 20));
+
+        let mode = app.adopt_restored_session(&restored());
+
+        assert_eq!(mode, SessionMode::Plan, "caller cannot apply the live mode");
+        assert_eq!(
+            app.mode,
+            SessionMode::Plan,
+            "badge still shows the old mode"
+        );
+        assert_eq!(app.model, "restored-model");
+        assert_eq!(app.session_id, "abcdef123456");
+        assert_eq!(app.turn_count, 7);
+        assert_eq!(app.tokens_in, 1234);
+        assert_eq!(app.tokens_out, 567);
+        assert_eq!(app.cost_usd, 4.25);
+        assert!(
+            app.ctx_meter.is_none(),
+            "context meter still describes the discarded conversation"
+        );
+    }
+
+    /// A non-plan session must clear a plan badge inherited from the
+    /// session being replaced, not just fail to set one.
+    #[test]
+    fn restoring_a_non_plan_session_leaves_plan_mode() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.mode = SessionMode::Plan;
+        let mode = app.adopt_restored_session(&RestoredState {
+            plan_mode: false,
+            ..restored()
+        });
+        assert_eq!(mode, SessionMode::Normal);
+        assert_eq!(app.mode, SessionMode::Normal);
+    }
+
+    /// An empty stored model must not blank the header.
+    #[test]
+    fn an_empty_restored_model_keeps_the_current_one() {
+        let mut app = App::new("current-model", "/tmp", "s");
+        app.adopt_restored_session(&RestoredState {
+            model: String::new(),
+            ..restored()
+        });
+        assert_eq!(app.model, "current-model");
+    }
+
+    /// Prompts typed against the previous conversation must not be fired
+    /// at the session that replaced it.
+    #[test]
+    fn resuming_drops_prompts_staged_for_the_previous_session() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.work.stage_submit("for the old session".into(), None);
+        app.queue.push_back("also for the old session".into());
+        app.adopt_restored_session(&restored());
+        assert!(!app.work.submit_staged(), "old prompt survived the resume");
+        assert!(app.queue.is_empty(), "old queue survived the resume");
+        // The staged prompt goes back to the (empty) composer; the queued
+        // one is reproduced verbatim rather than reduced to a count.
+        assert_eq!(app.input, "for the old session");
+        assert!(
+            app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::System(t)
+                    if t.contains("also for the old session"))),
+            "a queued prompt was eaten: {:?}",
+            app.transcript
+        );
+    }
+
+    /// Work staged *before* the picker was accepted belongs to the
+    /// conversation being left. Merely gating it would hold it until the
+    /// restore, at which point a `/clear` issued against the old session
+    /// would clear the newly restored one.
+    #[test]
+    fn accepting_cancels_work_staged_against_the_old_session() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.work.stage_clear();
+        app.work.stage_slash("/cost".into());
+        app.work.stage_shell("make clean".into());
+        app.open_session_picker(vec![summary("aaa11111", None, "/a")]);
+
+        app.session_picker_accept();
+
+        assert_eq!(app.resume.loading_id(), Some("aaa11111"));
+        assert!(
+            !app.work.clear_staged(),
+            "/clear would have cleared the restored session"
+        );
+        assert!(app.work.slash_staged().is_none());
+        assert!(app.work.shell_staged().is_none());
+        let said = app
+            .transcript
+            .iter()
+            .filter_map(|i| match i {
+                TranscriptItem::System(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in ["/clear", "/cost", "!make clean"] {
+            assert!(
+                said.contains(expected),
+                "{expected} was cancelled silently: {said}"
+            );
+        }
+    }
+
+    /// The cancellation report is pushed onto the transcript that the
+    /// restore then replaces wholesale, so it has to be re-emitted or
+    /// the user never sees what was cancelled on their behalf.
+    #[test]
+    fn the_cancellation_report_survives_the_transcript_swap() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.work.stage_shell("make clean".into());
+        app.open_session_picker(vec![summary("aaa11111", None, "/a")]);
+        app.session_picker_accept();
+
+        // The restore replaces everything that was on screen.
+        app.restore_transcript(
+            vec![TranscriptItem::User("restored".into())],
+            "aaa11111",
+            2,
+            2,
+            2,
+        );
+
+        let said = app
+            .transcript
+            .iter()
+            .filter_map(|i| match i {
+                TranscriptItem::System(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            said.contains("!make clean"),
+            "the cancellation report was wiped by the resume: {said}"
+        );
+        assert!(
+            app.resume_notices.is_empty(),
+            "notices must not be re-emitted a second time"
+        );
+    }
+
+    /// A resume that fails after cancelling work must not leave its
+    /// report queued: the next successful resume would replay it,
+    /// stale and against the wrong session.
+    #[test]
+    fn a_failed_resume_does_not_leave_its_report_for_the_next_one() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.work.stage_shell("make clean".into());
+        app.open_session_picker(vec![summary("aaa11111", None, "/a")]);
+        app.session_picker_accept();
+        assert!(!app.resume_notices.is_empty(), "nothing was carried");
+
+        // The chosen session turns out to be missing or corrupt.
+        app.cancel_deferred_resume_work("cancelled — held for the session that failed to load:");
+        assert!(app.resume_notices.is_empty());
+
+        // A later, unrelated resume must not replay it.
+        app.restore_transcript(
+            vec![TranscriptItem::User("a different session".into())],
+            "bbb22222",
+            1,
+            1,
+            1,
+        );
+        let said = app
+            .transcript
+            .iter()
+            .filter_map(|i| match i {
+                TranscriptItem::System(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !said.contains("make clean"),
+            "a stale report resurfaced on an unrelated resume: {said}"
+        );
+    }
+
+    /// A prompt whose images finished encoding while another submission
+    /// held the work slot waits in `deferred_prompts`. A successful
+    /// restore calls `new_conversation`, which clears them — correctly,
+    /// they belong to the conversation being replaced — so if the
+    /// reclamation misses them they disappear with no notice at all.
+    /// Silent loss of the user's own words is the one outcome this path
+    /// exists to prevent.
+    #[test]
+    fn a_held_image_prompt_is_reported_rather_than_vanishing() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.deferred_prompts.push_back((
+            crate::ui::modern::session_work::Submission::verbatim("look at @shot.png please"),
+            Vec::new(),
+        ));
+
+        app.open_session_picker(vec![summary("aaa11111", None, "/a")]);
+        app.session_picker_accept();
+
+        let said = app
+            .transcript
+            .iter()
+            .filter_map(|i| match i {
+                TranscriptItem::System(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            said.contains("look at @shot.png please"),
+            "a held image prompt was dropped without a word: {said}"
+        );
+        assert!(
+            app.deferred_prompts.is_empty(),
+            "the held prompt was reported but left staged for the new session"
+        );
+    }
+
+    /// A prompt naming an image *and* a text file has that file's
+    /// contents inlined into its engine payload. Reporting the payload
+    /// would print the file into the cancellation notice, and
+    /// `remove_staged_row` would miss too — the row on screen shows what
+    /// the user typed. The typed line therefore travels with the payload.
+    #[test]
+    fn a_reclaimed_image_prompt_reports_the_typed_line_not_the_inlined_file() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.deferred_prompts.push_back((
+            crate::ui::modern::session_work::Submission {
+                payload: "compare @shot.png with @src/main.rs\n                          <file path=\"src/main.rs\">fn main() { secret_helper(); }</file>"
+                    .into(),
+                display: Some("compare @shot.png with @src/main.rs".into()),
+            },
+            Vec::new(),
+        ));
+
+        app.open_session_picker(vec![summary("aaa11111", None, "/a")]);
+        app.session_picker_accept();
+
+        let said = app
+            .transcript
+            .iter()
+            .filter_map(|i| match i {
+                TranscriptItem::System(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            said.contains("compare @shot.png with @src/main.rs"),
+            "the typed line was not reported: {said}"
+        );
+        assert!(
+            !said.contains("secret_helper"),
+            "an inlined file body was printed into the cancellation notice"
+        );
+    }
+
+    /// Subagent rows are conversation state, and `sync_background_tasks`
+    /// carries every one of them across a refresh because the event
+    /// stream is their only source. Right within a conversation, wrong
+    /// across a swap: the restored session would keep listing agents
+    /// from the session it replaced, with their captured output still
+    /// open to drill-in.
+    #[test]
+    fn subagent_rows_do_not_survive_into_a_restored_session() {
+        use super::super::tasks::{CapturedOutput, TaskEntry, TaskSource, TaskState};
+        let mut app = App::new("m", "/tmp", "s");
+        app.tasks.push(TaskEntry {
+            agent_id: "agent-1".into(),
+            state: TaskState::Done,
+            headline: "explored the parser".into(),
+            source: TaskSource::Subagent,
+            task_id: None,
+            outputs: vec![CapturedOutput {
+                call_id: "call-1".into(),
+                body: "findings from the old session".into(),
+            }],
+        });
+
+        app.adopt_restored_todos(&[]);
+
+        assert!(
+            !app.tasks.iter().any(|t| t.source == TaskSource::Subagent),
+            "the previous conversation's subagents stayed in the pane"
+        );
+    }
+
+    /// A dropped scan has to take its status with it. `/resume` sets
+    /// "loading sessions…", and if the result is discarded in favour of
+    /// an overlay the user opened since, nothing else clears it and no
+    /// retry is coming — so the UI would report a scan still running
+    /// long after it finished.
+    ///
+    /// Uses the shortcuts overlay deliberately. `toggle_shortcuts` only
+    /// flips a flag, so the stale status really does survive; Ctrl+F
+    /// would have written its own banner over it and the test would
+    /// have passed for the wrong reason.
+    #[test]
+    fn a_dropped_scan_does_not_leave_its_status_behind() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.status_message = SESSION_SCAN_STATUS.into();
+        app.toggle_shortcuts();
+        assert_eq!(
+            app.status_message, SESSION_SCAN_STATUS,
+            "precondition: this overlay does not write its own status"
+        );
+
+        app.accept_session_scan(vec![summary("aaa11111", None, "/a")]);
+
+        assert!(
+            app.session_picker.is_none(),
+            "the picker stole focus from the overlay"
+        );
+        assert!(
+            app.status_message.is_empty(),
+            "the UI still claims a finished scan is running: {:?}",
+            app.status_message
+        );
+        assert!(app.show_shortcuts, "the user's overlay was closed anyway");
+    }
+
+    /// An overlay that writes its own instructions keeps them. Ctrl+F,
+    /// the model and theme pickers and the palette all replace the
+    /// status line when they open, so the scan's line is already gone —
+    /// clearing regardless erased the guidance for the overlay the user
+    /// is actually looking at.
+    #[test]
+    fn a_dropped_scan_leaves_an_active_overlays_own_status_alone() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.status_message = SESSION_SCAN_STATUS.into();
+        app.open_search();
+        let banner = app.status_message.clone();
+        assert_ne!(
+            banner, SESSION_SCAN_STATUS,
+            "precondition: this overlay writes its own status"
+        );
+
+        app.accept_session_scan(vec![summary("aaa11111", None, "/a")]);
+
+        assert_eq!(
+            app.status_message, banner,
+            "the search overlay lost its instructions to a scan it had already superseded"
+        );
+        assert!(app.search_open());
+    }
+
+    /// The ordinary path is unchanged: with nothing in the way the rows
+    /// open the picker, and the status goes with it.
+    #[test]
+    fn an_accepted_scan_opens_the_picker() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.status_message = SESSION_SCAN_STATUS.into();
+
+        app.accept_session_scan(vec![summary("aaa11111", None, "/a")]);
+
+        assert!(
+            app.session_picker.is_some(),
+            "the rows never reached the picker"
+        );
+        assert!(!app.status_message.contains("loading sessions"));
+    }
+
+    /// A scan that lands after the user opened something else is
+    /// answering a request they have moved on from. Every overlay the
+    /// picker would close counts, not just a second `/resume`.
+    #[test]
+    fn a_scan_result_yields_to_whatever_the_user_opened_since() {
+        let mut app = App::new("m", "/tmp", "s");
+        assert!(
+            !app.session_picker_would_displace_an_overlay(),
+            "nothing is open, so nothing would be displaced"
+        );
+
+        app.open_search();
+        assert!(
+            app.session_picker_would_displace_an_overlay(),
+            "a scan landing now would take the keyboard from Ctrl+F"
+        );
+        app.cancel_search();
+
+        app.command_palette = Some(Default::default());
+        assert!(app.session_picker_would_displace_an_overlay());
+        app.command_palette = None;
+
+        app.show_shortcuts = true;
+        assert!(app.session_picker_would_displace_an_overlay());
+        app.show_shortcuts = false;
+
+        app.open_model_picker("m", vec![("m".into(), "reason".into())]);
+        assert!(
+            app.session_picker_would_displace_an_overlay(),
+            "the model picker is routed after the session picker, so it \
+             would be left open and unreachable"
+        );
+    }
+
+    /// The list has to match what `open_session_picker` actually closes.
+    /// If it drifts, a scan silently steals focus from the overlay the
+    /// predicate forgot — so this pins them together.
+    #[test]
+    fn every_overlay_the_picker_closes_is_one_it_yields_to() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.open_search();
+        app.command_palette = Some(Default::default());
+        app.show_shortcuts = true;
+
+        app.open_session_picker(vec![summary("aaa11111", None, "/a")]);
+
+        // Everything it closed is now shut, which is only consistent if
+        // the predicate above named that same set.
+        assert!(!app.search_open());
+        assert!(app.command_palette.is_none());
+        assert!(!app.show_shortcuts);
+        assert!(app.model_picker.is_none());
+        assert!(app.theme_picker.is_none());
+    }
+
+    /// Switching away and back is the whole point of the view cache, so
+    /// the remembered transcript must come back when nothing moved.
+    ///
+    /// The run loop calls `restore_transcript` first — stashing under the
+    /// id still in front — and only then `adopt_restored_session`, which
+    /// moves the identity. These tests mirror that order; skipping the
+    /// second half stashes the arriving session under the departing id
+    /// and proves nothing.
+    ///
+    /// The last two arguments are the conversations on either side of the
+    /// swap: what the arriving session holds, and what the departing one
+    /// held. Both are read from the engine at the swap in the real
+    /// caller, which is what stops either from going stale.
+    #[test]
+    fn switching_back_to_an_untouched_session_restores_the_remembered_view() {
+        let mut app = App::new("m", "/tmp", "aaa11111");
+        app.transcript
+            .push(TranscriptItem::User("what I was reading".into()));
+
+        // Away to another session; A held 8 messages when we left it.
+        app.restore_transcript(
+            vec![TranscriptItem::User("elsewhere".into())],
+            "bbb22222",
+            1,
+            1,
+            8,
+        );
+        app.session_id = "bbb22222".into();
+
+        // Back to it, still holding the 8 we left.
+        app.restore_transcript(
+            vec![TranscriptItem::User("rebuilt".into())],
+            "aaa11111",
+            4,
+            8,
+            1,
+        );
+
+        assert!(
+            app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::User(t) if t == "what I was reading")),
+            "the remembered view was discarded for an unchanged session"
+        );
+    }
+
+    /// Another agent process can advance a session while it sits in the
+    /// background here. The resume reloads *its* messages into the
+    /// engine, so replaying the remembered view would leave the user
+    /// reading a transcript the model has already moved past — and the
+    /// gap is silent, because each half looks internally consistent.
+    #[test]
+    fn a_session_advanced_by_another_process_is_rebuilt_not_replayed() {
+        let mut app = App::new("m", "/tmp", "aaa11111");
+        app.transcript
+            .push(TranscriptItem::User("what I was reading".into()));
+
+        app.restore_transcript(
+            vec![TranscriptItem::User("elsewhere".into())],
+            "bbb22222",
+            1,
+            1,
+            8,
+        );
+        app.session_id = "bbb22222".into();
+
+        // Back to it — but the conversation has grown since.
+        app.restore_transcript(
+            vec![TranscriptItem::User("newer history from disk".into())],
+            "aaa11111",
+            9,
+            14,
+            1,
+        );
+
+        assert!(
+            app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::User(t) if t == "newer history from disk")),
+            "the rebuild was replaced by a view from before the session moved on"
+        );
+        assert!(
+            !app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::User(t) if t == "what I was reading")),
+            "stale history survived alongside the reload"
+        );
+    }
+
+    /// `/rewind` and `/snip` rewrite `messages` without touching
+    /// `turn_count`, so a session can come back reporting the very same
+    /// turns while holding a shorter conversation. Stamping on turns
+    /// would call that unchanged and replay a transcript containing the
+    /// messages the rewind removed.
+    #[test]
+    fn a_session_rewound_elsewhere_is_rebuilt_though_its_turn_count_is_unchanged() {
+        let mut app = App::new("m", "/tmp", "aaa11111");
+        app.turn_count = 4;
+        app.transcript
+            .push(TranscriptItem::User("a message since rewound away".into()));
+
+        app.restore_transcript(
+            vec![TranscriptItem::User("elsewhere".into())],
+            "bbb22222",
+            1,
+            1,
+            8,
+        );
+        app.session_id = "bbb22222".into();
+
+        // Same turn count, shorter conversation: a rewind happened while
+        // this session sat in the background.
+        app.restore_transcript(
+            vec![TranscriptItem::User("history after the rewind".into())],
+            "aaa11111",
+            4,
+            5,
+            1,
+        );
+
+        assert!(
+            !app.transcript.iter().any(
+                |i| matches!(i, TranscriptItem::User(t) if t == "a message since rewound away")
+            ),
+            "a rewound-away message was replayed because the turn count matched"
+        );
+    }
+
+    /// Reasoning effort is chosen per conversation and not saved, so the
+    /// resumed session must show what the engine actually reset to.
+    #[test]
+    fn the_effort_mirror_follows_the_restored_session() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.effort = Some("high".into());
+        app.adopt_restored_session(&RestoredState {
+            effort: None,
+            ..restored()
+        });
+        assert!(
+            app.effort.is_none(),
+            "the badge still claims an effort the restored session never chose"
+        );
+    }
+
+    /// A resume rewrites history, so the checklist pane must follow the
+    /// restored conversation rather than keep describing the discarded
+    /// one. Same seam `/rewind` and `/snip` use.
+    #[test]
+    fn resuming_rebuilds_the_checklist_from_the_restored_conversation() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.todos = super::super::tasks::todos_from_messages(&[
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "old".into(),
+                    name: "TodoWrite".into(),
+                    input: serde_json::json!({
+                        "todos": [{ "id": "1", "content": "the discarded plan", "status": "in_progress" }]
+                    }),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "old".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                    extra_content: Vec::new(),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ]);
+        assert_eq!(app.todos.len(), 1, "fixture did not build a checklist");
+        let epoch_before = app.conversation_epoch;
+
+        // The restored session never called TodoWrite.
+        app.adopt_restored_todos(&[user("just a question")]);
+
+        assert!(
+            app.todos.is_empty(),
+            "the pane still shows the discarded session's checklist: {:?}",
+            app.todos
+        );
+        assert_ne!(
+            app.conversation_epoch, epoch_before,
+            "in-flight work from the old conversation was not disowned"
+        );
+    }
+
+    /// A saved user message is the engine payload, so a turn sent with
+    /// an `@path` mention stores the inlined file. Rebuilding it
+    /// verbatim shows the whole file as something the user typed.
+    #[test]
+    fn a_restored_mention_turn_shows_the_typed_line_not_the_inlined_file() {
+        let payload = format!(
+            "look at @src/main.rs{}\n<file path=\"src/main.rs\">\nfn main() {{}}\n</file>\n",
+            super::super::mentions::MENTION_ENVELOPE
+        );
+        let items = transcript_from_messages(&[user(&payload)], true);
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            TranscriptItem::User(t) => {
+                assert_eq!(t, "look at @src/main.rs");
+                assert!(
+                    !t.contains("fn main"),
+                    "the inlined file leaked into the row"
+                );
+            }
+            other => panic!("expected a user row, got {other:?}"),
+        }
+    }
+
+    /// A skill invocation is stored as the whole skill body and cannot be
+    /// reversed from the payload, so it is clamped rather than dumped —
+    /// nothing clamps user rows on the way to the screen.
+    #[test]
+    fn an_enormous_restored_user_turn_is_clamped() {
+        let huge = "x".repeat(MAX_RESTORED_USER_CHARS * 2);
+        let items = transcript_from_messages(&[user(&huge)], true);
+        match &items[0] {
+            TranscriptItem::User(t) => {
+                assert!(
+                    t.chars().count() < huge.chars().count(),
+                    "the whole payload was rendered as one user row"
+                );
+                assert!(
+                    t.contains("truncated for display"),
+                    "clamped without saying so"
+                );
+            }
+            other => panic!("expected a user row, got {other:?}"),
+        }
+    }
+
+    /// One slot each: a second submission before the loop drains the
+    /// first silently discarded it while its row claimed it had run.
+    #[test]
+    fn a_second_shell_submission_does_not_discard_the_first() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.resume.begin("abcdef123456");
+
+        app.input = "!one".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert_eq!(app.work.shell_staged(), Some("one"));
+
+        app.input = "!two".into();
+        app.cursor = app.input.len();
+        app.submit();
+
+        assert_eq!(
+            app.work.shell_staged(),
+            Some("one"),
+            "the queued command was overwritten and never ran"
+        );
+        assert_eq!(app.input, "!two", "the refused text was lost");
+        assert!(app.status_message.contains("still pending"));
+    }
+
+    /// `/clear` submitted during a load must not blank the screen: the
+    /// engine clear is deferred and is cancelled if the load fails,
+    /// which would leave an empty transcript in front of a conversation
+    /// that is still there.
+    #[test]
+    fn clear_during_a_resume_holds_its_visible_half() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.transcript.push(TranscriptItem::User("earlier".into()));
+        app.resume.begin("abcdef123456");
+
+        app.input = "/clear".into();
+        app.cursor = app.input.len();
+        app.submit();
+
+        assert!(app.work.clear_staged(), "the engine clear was not staged");
+        assert!(
+            !app.transcript.is_empty(),
+            "the screen was blanked before the resume was known to succeed"
+        );
+
+        // The load fails: the clear is cancelled and the history stands.
+        app.cancel_deferred_resume_work("cancelled — held for the session that failed to load:");
+        assert!(!app.work.clear_staged());
+        assert!(
+            app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::User(t) if t == "earlier")),
+            "history was lost to a clear that never ran"
+        );
+    }
+
+    /// `submit` echoes the line immediately; a prompt handed back during
+    /// a resume never ran, so the row must not stay on screen claiming
+    /// it was sent.
+    #[test]
+    fn reclaiming_removes_the_row_the_submission_drew() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.resume.begin("abcdef123456");
+        app.input = "check the parser".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert!(
+            app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::User(t) if t == "check the parser")),
+            "fixture did not draw the row"
+        );
+
+        app.adopt_restored_session(&restored());
+
+        assert_eq!(
+            app.input, "check the parser",
+            "the prompt was not handed back"
+        );
+        assert!(
+            !app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::User(t) if t == "check the parser")),
+            "the row still claims the prompt was sent: {:?}",
+            app.transcript
+        );
+    }
+
+    /// `pending_submit` holds the engine payload, with `@path` mentions
+    /// and skill bodies inlined. Handing *that* back would drop a whole
+    /// file into the composer and expand the mention again on resend.
+    #[test]
+    fn reclaiming_returns_the_typed_line_not_the_expanded_payload() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.work.stage_submit(
+            "look at @src/main.rs\n<file>…thousands of lines…</file>".into(),
+            Some("look at @src/main.rs".into()),
+        );
+
+        app.adopt_restored_session(&restored());
+
+        assert_eq!(
+            app.input, "look at @src/main.rs",
+            "the expanded payload was pasted into the composer"
+        );
+        assert!(app.work.submit_display().is_none());
+    }
+
+    /// Ids come from session filenames, so an imported or hand-renamed
+    /// file can carry non-ASCII. Slicing at byte 8 lands mid-character
+    /// and takes the whole TUI down.
+    #[test]
+    fn a_non_ascii_session_id_does_not_panic() {
+        let id = "日本語のセッション";
+        let mut app = App::new("m", "/tmp", "s");
+        app.open_session_picker(vec![summary(id, None, "/a")]);
+
+        // Rendering the row, accepting it, and reporting the restore all
+        // truncate the id.
+        let _ = summary_line(&summary(id, None, "/a"));
+        app.session_picker_accept();
+        assert_eq!(app.resume.loading_id(), Some(id));
+        app.restore_transcript(vec![], id, 1, 1, 1);
+
+        assert!(
+            app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::System(t) if t.contains("日本語のセ"))),
+            "the restore note did not name the session: {:?}",
+            app.transcript
+        );
+    }
+
+    /// The picker captures typed keys, so it must capture pasted text
+    /// too — otherwise the paste edits an invisible composer draft.
+    #[test]
+    fn pasting_filters_the_picker_instead_of_the_hidden_composer() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.open_session_picker(vec![
+            summary("aaa11111", Some("auth work"), "/a"),
+            summary("bbb22222", None, "/b"),
+        ]);
+
+        app.session_picker_insert_str(
+            "auth
+work",
+        );
+
+        let p = app.session_picker.as_ref().unwrap();
+        assert_eq!(
+            p.query, "authwork",
+            "newlines leaked into a one-line filter"
+        );
+        assert!(
+            app.input.is_empty(),
+            "the paste edited the composer behind the picker: {:?}",
+            app.input
+        );
+    }
+
+    /// A prompt submitted while the session was still loading never ran
+    /// (turn spawning is blocked for that window), so it must come back
+    /// to the composer rather than be eaten or fired at the old session.
+    #[test]
+    fn a_prompt_submitted_during_the_load_returns_to_the_composer() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.work.stage_submit("check the parser".into(), None);
+        app.adopt_restored_session(&restored());
+        assert!(!app.work.submit_staged(), "prompt would still start a turn");
+        assert_eq!(app.input, "check the parser", "the typed prompt was lost");
+        assert_eq!(app.cursor, "check the parser".len());
+    }
+
+    /// Submitting during the load moves the phase to Streaming, but the
+    /// gate stops any turn spawning, so nothing reaps it — leaving every
+    /// later Enter queueing instead of sending.
+    #[test]
+    fn reclaiming_a_load_time_prompt_returns_the_app_to_idle() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.resume.begin("abcdef123456");
+        app.input = "check the parser".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert_eq!(app.phase, Phase::Streaming, "submit did not stage a turn");
+
+        app.adopt_restored_session(&restored());
+
+        assert_eq!(
+            app.phase,
+            Phase::Idle,
+            "the app is stuck mid-turn with no turn to end it"
+        );
+    }
+
+    /// Accepting the picker mid-stream reaches the reclaim path with a
+    /// real turn still owned by the event loop. Forcing Idle there would
+    /// send Ctrl+C down the quit path instead of cancelling the turn.
+    #[test]
+    fn reclaiming_does_not_unstick_a_genuinely_live_turn() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.mark_turn_started();
+        assert!(app.turn_live, "fixture did not start a turn");
+        app.work.stage_submit("staged".into(), None);
+
+        app.adopt_restored_session(&restored());
+
+        assert!(app.turn_live, "a live turn was marked dead");
+        assert_ne!(
+            app.phase,
+            Phase::Idle,
+            "Ctrl+C would now quit instead of cancelling the running turn"
+        );
+    }
+
+    /// ...but a HITL modal still owns the phase.
+    #[test]
+    fn reclaiming_does_not_steal_the_phase_from_a_modal() {
+        let mut app = App::new("m", "/tmp", "s");
+        let _rx = a_modal(&mut app);
+        app.work.stage_submit("staged".into(), None);
+        app.adopt_restored_session(&restored());
+        assert_eq!(app.phase, Phase::Permission, "the modal lost its phase");
+    }
+
+    /// ...unless the composer already holds a draft, which must not be
+    /// clobbered — report the staged prompt instead.
+    #[test]
+    fn a_staged_prompt_is_reported_when_the_composer_is_busy() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.input = "half-written draft".into();
+        app.work.stage_submit("check the parser".into(), None);
+        app.adopt_restored_session(&restored());
+        assert_eq!(app.input, "half-written draft", "draft was clobbered");
+        assert!(
+            app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::System(t) if t.contains("check the parser"))),
+            "the staged prompt was reduced to a count and its text lost: {:?}",
+            app.transcript
+        );
+    }
+
+    /// The resume waits for the live turn to be reaped; the reaper's
+    /// clean-finish path must not send the old queue in the meantime.
+    #[test]
+    fn a_pending_resume_suppresses_queue_auto_dispatch() {
+        use super::super::app::Phase;
+        let mut app = App::new("m", "/tmp", "s");
+        app.phase = Phase::Streaming;
+        app.queue.push_back("old conversation prompt".into());
+        app.resume.begin("abcdef123456");
+        app.mark_turn_idle();
+        app.dispatch_queue_head();
+        assert!(
+            !app.work.submit_staged(),
+            "queued prompt was dispatched into the session being resumed"
+        );
+        assert_eq!(app.queue.len(), 1, "the prompt should still be queued");
+    }
+
+    #[test]
+    fn restoring_replaces_the_transcript_and_notes_the_session() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.transcript.push(TranscriptItem::User("stale".into()));
+        app.restore_transcript(
+            vec![TranscriptItem::User("fresh".into())],
+            "abcdef123456",
+            4,
+            4,
+            4,
+        );
+        assert!(
+            !app.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::User(t) if t == "stale")),
+            "the previous transcript survived a resume"
+        );
+        assert!(matches!(&app.transcript[0], TranscriptItem::User(t) if t == "fresh"));
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptItem::System(t)) if t.contains("abcdef12")
+        ));
+    }
+
+    /// `/resume` can be reopened while an earlier selection is still
+    /// loading. Choosing the session you are already in must stop that
+    /// earlier resume too — otherwise the run loop applies it while the
+    /// status line claims nothing happened.
+    #[test]
+    fn staying_put_cancels_a_resume_already_in_flight() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.session_id = "current-session".to_string();
+        app.resume.begin("other-session".to_string());
+        app.open_session_picker(vec![summary("current-session", None, "/a")]);
+
+        app.session_picker_accept();
+
+        assert!(
+            app.resume.allows(WorkScope::Session),
+            "the in-flight resume survived the decision to stay"
+        );
+        assert!(
+            app.status_message.contains("already in this session"),
+            "status: {}",
+            app.status_message
+        );
+    }
+
+    /// Work staged against the session that was loading is held
+    /// *because* a resume is outstanding. Releasing the gate without
+    /// releasing that work let the run loop apply a `/clear` meant for a
+    /// session the user just decided not to go to.
+    #[test]
+    fn staying_put_also_releases_work_held_for_the_abandoned_resume() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.session_id = "current-session".to_string();
+        app.resume.begin("other-session".to_string());
+        app.work.stage_clear();
+        app.resume_notices.push("stale notice".into());
+        app.open_session_picker(vec![summary("current-session", None, "/a")]);
+
+        app.session_picker_accept();
+
+        assert!(app.resume.allows(WorkScope::Session), "gate not released");
+        assert!(
+            !app.work.clear_staged(),
+            "a /clear staged for the abandoned resume would land on this session"
+        );
+        assert!(
+            app.resume_notices.is_empty(),
+            "notices for a swap that never happens would resurface on the next one"
+        );
+        // The user cancelled; the session they were heading to may be
+        // perfectly healthy. Blaming it for a load failure is a lie
+        // about why their /clear did not run.
+        let reported = app
+            .transcript
+            .iter()
+            .filter_map(|i| match i {
+                TranscriptItem::System(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !reported.contains("failed to load"),
+            "a user-cancelled resume was reported as a load failure: {reported}"
+        );
+        assert!(
+            reported.contains("resume you cancelled"),
+            "the cancellation was not attributed to the user: {reported}"
+        );
+    }
+
+    /// A prompt submitted while the selected session is still loading is
+    /// handed back to the composer. Its images must not stay staged: the
+    /// user edits or replaces that draft, and the run loop would bind the
+    /// descriptor left behind to the *new* prompt and send a local file
+    /// they never meant to attach. The returned text still carries the
+    /// `@path` mention, so resubmitting re-stages the image and nothing
+    /// is lost by clearing.
+    #[test]
+    fn reclaiming_a_resume_time_prompt_unstages_its_images() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut app = App::new("m", "/tmp", "s");
+        app.work.stage_submit(
+            "look at @shot.png please".into(),
+            Some("look at @shot.png please".into()),
+        );
+        app.pending_images = vec![super::super::mentions::StagedImage {
+            path: tmp.path().to_path_buf(),
+            file: std::sync::Arc::new(std::fs::File::open(tmp.path()).unwrap()),
+        }];
+        app.pending_attachments = vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "iVBORw==".into(),
+        }];
+
+        let mut spill = Vec::new();
+        app.reclaim_staged_prompts("not sent:", &mut spill);
+
+        assert_eq!(
+            app.input, "look at @shot.png please",
+            "the prompt should come back to the composer"
+        );
+        assert!(
+            app.pending_images.is_empty(),
+            "a descriptor stayed staged and would attach to the next prompt"
+        );
+        assert!(
+            app.pending_attachments.is_empty(),
+            "encoded bytes stayed staged and would attach to the next prompt"
+        );
+    }
+
+    /// A prompt whose images are still encoding lives inside the
+    /// blocking task, not in `pending_submit`. The restore bumps the
+    /// conversation epoch, so the encode result is discarded when it
+    /// lands — without reclaiming the text here the user's typed words
+    /// vanish with it, which is exactly what this path exists to stop.
+    #[test]
+    fn a_prompt_still_encoding_is_reported_not_lost() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.encoding_display = Some("look at @shot.png please".into());
+
+        let mut spill = Vec::new();
+        app.reclaim_staged_prompts("not sent:", &mut spill);
+
+        assert!(
+            spill.iter().any(|s| s.contains("look at @shot.png please")),
+            "the in-flight prompt was not reported back: {spill:?}"
+        );
+        assert!(
+            app.encoding_display.is_none(),
+            "the stash must be consumed, or it would be reported twice"
+        );
+        assert!(
+            app.encode_abandoned,
+            "the encode must be invalidated too, or its result re-arms a \
+             prompt the user was told was not sent"
+        );
+    }
+
+    /// A row is what the user reads before pressing Enter — which changes
+    /// directory and runs lifecycle hooks. A label or id carrying a bidi
+    /// override or zero-width character could make one session look like
+    /// another, so every dynamic field is escaped.
+    #[test]
+    fn picker_rows_escape_deceptive_text() {
+        let mut s = summary("aaa11111-2222", Some("safe\u{202e}gnp.exe"), "/a");
+        s.updated_at = "2026-07-27\u{200b}T10:00:00Z".into();
+
+        let row = summary_line(&s);
+
+        assert!(
+            !row.contains('\u{202e}'),
+            "a bidi override reached the row: {row:?}"
+        );
+        assert!(
+            !row.contains('\u{200b}'),
+            "a zero-width character reached the row: {row:?}"
+        );
+        assert!(
+            row.contains("<U+202E>"),
+            "the override should be shown, not dropped: {row:?}"
+        );
+    }
+}
