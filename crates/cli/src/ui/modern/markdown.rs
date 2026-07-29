@@ -7,7 +7,13 @@
 //! theme sets are loaded once via `OnceLock`. Rendering is memoized per
 //! block by the layout cache's content-hash keying, so a streaming block
 //! only re-parses on its own flushes.
+//!
+//! Within a streaming fenced code block the highlighter state is kept
+//! across flushes so only newly-appended lines run through syntect
+//! (D3-26): a growing block no longer re-highlights every previous line
+//! on every ~10 Hz flush.
 
+use std::cell::RefCell;
 use std::ops::Range;
 use std::sync::OnceLock;
 
@@ -382,8 +388,6 @@ impl Builder {
     fn emit_code_block(&mut self, lang: &str, content: &str) {
         let accent = palette().accent;
         let muted = palette().muted;
-        let gutter = Style::default().fg(muted);
-        let body_bg = palette().code_bg;
         let tag = if lang.is_empty() {
             "code".to_string()
         } else {
@@ -412,55 +416,206 @@ impl Builder {
             ),
         ]));
 
-        let ss = syntax_set();
-        let syntax = ss
-            .find_syntax_by_token(lang)
-            .or_else(|| ss.find_syntax_by_extension(lang))
-            .unwrap_or_else(|| ss.find_syntax_plain_text());
-        let mut hl = HighlightLines::new(syntax, code_theme());
-
-        for (i, line) in LinesWithEndings::from(content).enumerate() {
-            let mut spans = vec![
-                Span::styled("│ ", Style::default().fg(accent)),
-                Span::styled(
-                    format!("{:>width$} ", i + 1, width = num_w),
-                    gutter.add_modifier(Modifier::DIM),
-                ),
-            ];
-            match hl.highlight_line(line, ss) {
-                Ok(ranges) => {
-                    let mut any = false;
-                    for (sty, text) in ranges {
-                        let t = text.trim_end_matches('\n');
-                        if t.is_empty() {
-                            continue;
-                        }
-                        any = true;
-                        let c = sty.foreground;
-                        spans.push(Span::styled(
-                            t.to_string(),
-                            Style::default()
-                                .fg(super::colors::syntax_color(c.r, c.g, c.b))
-                                .bg(body_bg),
-                        ));
-                        self.spans_emitted += 1;
-                    }
-                    if !any {
-                        spans.push(Span::styled(" ", Style::default().bg(body_bg)));
-                    }
-                }
-                Err(_) => spans.push(Span::styled(
-                    line.trim_end_matches('\n').to_string(),
-                    Style::default().fg(palette().inactive).bg(body_bg),
-                )),
-            }
-            self.lines.push(Line::from(spans));
-        }
+        let body = highlight_code_body(lang, content, num_w);
+        self.spans_emitted = self
+            .spans_emitted
+            .saturating_add(body.len().saturating_mul(4));
+        self.lines.extend(body);
 
         // Footer rule.
         self.lines
             .push(Line::from(Span::styled("╰─", Style::default().fg(accent))));
     }
+}
+
+/// Incremental syntect state for a streaming fenced block.
+///
+/// Layout re-renders the streaming assistant block on every flush; without
+/// this, every previously highlighted line is paid for again. When the
+/// fence content grows by pure append, only the new lines run through
+/// `highlight_line`. A language change, non-prefix edit, gutter-width
+/// change, or theme polarity change resets (cached spans bake in the
+/// code-theme and `code_bg` of the paint that produced them).
+struct CodeHlStream {
+    lang: String,
+    /// Content already fed to `hl` (and covered by `body`).
+    content: String,
+    body: Vec<Line<'static>>,
+    num_w: usize,
+    /// Theme polarity at last paint — light and dark ship different
+    /// syntect themes, and `code_bg` moves with the product theme.
+    dark: bool,
+    /// `None` after a reset; recreated on the next append.
+    hl: Option<HighlightLines<'static>>,
+}
+
+impl CodeHlStream {
+    fn reset(&mut self, lang: &str, num_w: usize, dark: bool) {
+        self.lang = lang.to_string();
+        self.content.clear();
+        self.body.clear();
+        self.num_w = num_w;
+        self.dark = dark;
+        self.hl = None;
+    }
+
+    fn ensure_hl(&mut self, lang: &str) {
+        if self.hl.is_some() {
+            return;
+        }
+        let ss = syntax_set();
+        let syntax = ss
+            .find_syntax_by_token(lang)
+            .or_else(|| ss.find_syntax_by_extension(lang))
+            .unwrap_or_else(|| ss.find_syntax_plain_text());
+        // SyntaxSet / Theme are process-static; HighlightLines can be 'static.
+        self.hl = Some(HighlightLines::new(syntax, code_theme()));
+    }
+}
+
+thread_local! {
+    static CODE_HL_STREAM: RefCell<CodeHlStream> = const {
+        RefCell::new(CodeHlStream {
+            lang: String::new(),
+            content: String::new(),
+            body: Vec::new(),
+            num_w: 2,
+            dark: true,
+            hl: None,
+        })
+    };
+}
+
+/// Split into newline-terminated prefix (safe to cache) and optional
+/// incomplete final line (re-highlighted every flush).
+fn complete_and_tail(content: &str) -> (&str, &str) {
+    match content.rfind('\n') {
+        Some(i) => (&content[..=i], &content[i + 1..]),
+        None => ("", content),
+    }
+}
+
+fn highlight_one_line(
+    hl: &mut HighlightLines<'static>,
+    line: &str,
+    line_no: usize,
+    num_w: usize,
+) -> Line<'static> {
+    let ss = syntax_set();
+    let accent = palette().accent;
+    let muted = palette().muted;
+    let gutter = Style::default().fg(muted);
+    let body_bg = palette().code_bg;
+    // syntect wants a trailing newline for line-oriented state.
+    let fed = if line.ends_with('\n') {
+        line.to_string()
+    } else {
+        format!("{line}\n")
+    };
+    let mut spans = vec![
+        Span::styled("│ ", Style::default().fg(accent)),
+        Span::styled(
+            format!("{:>width$} ", line_no, width = num_w),
+            gutter.add_modifier(Modifier::DIM),
+        ),
+    ];
+    match hl.highlight_line(&fed, ss) {
+        Ok(ranges) => {
+            let mut any = false;
+            for (sty, text) in ranges {
+                let t = text.trim_end_matches('\n');
+                if t.is_empty() {
+                    continue;
+                }
+                any = true;
+                let c = sty.foreground;
+                spans.push(Span::styled(
+                    t.to_string(),
+                    Style::default()
+                        .fg(super::colors::syntax_color(c.r, c.g, c.b))
+                        .bg(body_bg),
+                ));
+            }
+            if !any {
+                spans.push(Span::styled(" ", Style::default().bg(body_bg)));
+            }
+        }
+        Err(_) => spans.push(Span::styled(
+            line.trim_end_matches('\n').to_string(),
+            Style::default().fg(palette().inactive).bg(body_bg),
+        )),
+    }
+    Line::from(spans)
+}
+
+/// Highlight the body of a fenced code block, reusing work when the
+/// newline-terminated prefix is a pure append of the previous call.
+///
+/// Incomplete final lines (common while streaming) are re-highlighted
+/// each flush without poisoning the cached highlighter state: only
+/// complete lines are fed into the persistent `HighlightLines`.
+fn highlight_code_body(lang: &str, content: &str, num_w: usize) -> Vec<Line<'static>> {
+    let (complete, tail) = complete_and_tail(content);
+    let dark = crate::ui::theme::current().is_dark;
+
+    CODE_HL_STREAM.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        let can_extend = cache.lang == lang
+            && cache.num_w == num_w
+            && cache.dark == dark
+            && complete.starts_with(&cache.content)
+            && (cache.hl.is_some() || cache.content.is_empty());
+
+        if !can_extend {
+            cache.reset(lang, num_w, dark);
+        }
+
+        if complete.len() > cache.content.len() {
+            cache.ensure_hl(lang);
+            let mut hl = cache.hl.take().expect("ensure_hl");
+            let already = cache.content.len();
+            let suffix = &complete[already..];
+            let start_idx = cache.body.len();
+            for (offset, line) in LinesWithEndings::from(suffix).enumerate() {
+                let i = start_idx + offset;
+                cache
+                    .body
+                    .push(highlight_one_line(&mut hl, line, i + 1, num_w));
+            }
+            cache.hl = Some(hl);
+            cache.content = complete.to_string();
+        }
+
+        let mut out = cache.body.clone();
+        if !tail.is_empty() {
+            // Incomplete last line: highlight in isolation with a fresh
+            // highlighter. Multi-line context is approximate until the
+            // line terminates and is absorbed into the cached stream —
+            // that is intentional so a growing tail stays O(1) per flush.
+            let ss = syntax_set();
+            let syntax = ss
+                .find_syntax_by_token(lang)
+                .or_else(|| ss.find_syntax_by_extension(lang))
+                .unwrap_or_else(|| ss.find_syntax_plain_text());
+            let mut hl = HighlightLines::new(syntax, code_theme());
+            let line_no = out.len() + 1;
+            out.push(highlight_one_line(&mut hl, tail, line_no, num_w));
+        }
+        out
+    })
+}
+
+/// Drop the stream highlight cache so fenced-block memory is released
+/// (e.g. on `/clear`) and tests do not leak state into each other.
+pub(super) fn reset_code_hl_stream() {
+    CODE_HL_STREAM.with(|cell| {
+        cell.borrow_mut().reset("", 2, true);
+    });
+}
+
+#[cfg(test)]
+fn clear_code_hl_stream() {
+    reset_code_hl_stream();
 }
 
 #[cfg(test)]
@@ -481,6 +636,27 @@ mod tests {
             .join("\n")
     }
 
+    #[test]
+    fn streaming_code_block_reuses_highlight_on_append() {
+        clear_code_hl_stream();
+        // Incomplete last line while streaming.
+        let a = highlight_code_body("rust", "fn mai", 2);
+        assert_eq!(a.len(), 1, "incomplete tail is one line");
+        // Line completes and more lines arrive.
+        let b = highlight_code_body("rust", "fn main() {\n    let x = 1;\n", 2);
+        assert_eq!(b.len(), 2);
+        // Pure complete-line append.
+        let c = highlight_code_body("rust", "fn main() {\n    let x = 1;\n}\n", 2);
+        assert_eq!(c.len(), 3, "append extends body without full reset");
+        // Identical content is a cache hit.
+        let d = highlight_code_body("rust", "fn main() {\n    let x = 1;\n}\n", 2);
+        assert_eq!(d.len(), 3);
+        // Language change must reset.
+        let e = highlight_code_body("python", "print(1)\n", 2);
+        assert_eq!(e.len(), 1);
+        clear_code_hl_stream();
+    }
+
     /// Markdown was the last part of the transcript still painting
     /// hardcoded RGB: the inline-code chip, the code-block background,
     /// and syntect's own highlight palette. None of those reach
@@ -492,6 +668,7 @@ mod tests {
         let _g = crate::ui::theme::test_lock();
         crate::ui::theme::init("one-dark");
         let _mode = pin_mode(EmitMode::Mono);
+        clear_code_hl_stream();
 
         let md = render_markdown("uses `run()` here\n\n```rust\nfn main() { let x = 1; }\n```\n");
         let mut offenders = Vec::new();
@@ -525,6 +702,7 @@ mod tests {
         use super::super::colors::{contrast, luminance};
         let _g = crate::ui::theme::test_lock();
         for name in ["one-dark", "solarized-light"] {
+            clear_code_hl_stream();
             crate::ui::theme::init(name);
             let bg = palette().code_bg;
             let bg_l = luminance(bg).expect("code_bg is rgb on these themes");
@@ -549,6 +727,40 @@ mod tests {
             }
             assert!(checked > 0, "{name}: no highlighted runs were checked");
         }
+        crate::ui::theme::init("one-dark");
+    }
+
+    /// one-dark → solarized-light must invalidate the stream cache: cached
+    /// spans bake in the dark `code_bg` / syntect theme and would paint
+    /// unreadable light-on-light if reused after a polarity flip.
+    #[test]
+    fn theme_polarity_change_resets_stream_cache() {
+        let _g = crate::ui::theme::test_lock();
+        clear_code_hl_stream();
+        crate::ui::theme::init("one-dark");
+        let dark_bg = palette().code_bg;
+        let a = highlight_code_body("rust", "fn main() {}\n", 2);
+        assert!(
+            a.iter()
+                .any(|l| l.spans.iter().any(|s| s.style.bg == Some(dark_bg))),
+            "dark theme should paint against dark code_bg"
+        );
+
+        crate::ui::theme::init("solarized-light");
+        let light_bg = palette().code_bg;
+        assert_ne!(dark_bg, light_bg, "fixture themes must differ in code_bg");
+        let b = highlight_code_body("rust", "fn main() {}\n", 2);
+        assert!(
+            b.iter()
+                .any(|l| l.spans.iter().any(|s| s.style.bg == Some(light_bg))),
+            "polarity flip must re-highlight against light code_bg"
+        );
+        assert!(
+            !b.iter()
+                .any(|l| l.spans.iter().any(|s| s.style.bg == Some(dark_bg))),
+            "must not reuse dark-theme cached spans after light theme"
+        );
+        clear_code_hl_stream();
         crate::ui::theme::init("one-dark");
     }
 
