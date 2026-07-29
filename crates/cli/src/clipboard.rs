@@ -78,6 +78,10 @@ pub fn describe_routes() -> Vec<String> {
         native_candidate_names().join(", ")
     ));
     out.push(format!(
+        "primary candidates: {}",
+        primary_candidate_names().join(", ")
+    ));
+    out.push(format!(
         "tmux buffer       : {}",
         if in_tmux() { "yes ($TMUX)" } else { "no" }
     ));
@@ -94,6 +98,76 @@ pub fn describe_routes() -> Vec<String> {
         if is_ssh() { "yes" } else { "no" }
     ));
     out
+}
+
+/// Read the X11/Wayland **PRIMARY** selection (middle-click paste).
+///
+/// Linux only — returns `Err` on macOS/Windows where PRIMARY does not exist.
+/// Caps payload size so a huge selection cannot freeze the TUI.
+pub fn paste_primary() -> Result<(String, &'static str), String> {
+    const MAX: usize = 256 * 1024;
+    let mut last_err: Option<String> = None;
+    for (cmd, args) in primary_candidates() {
+        match std::process::Command::new(cmd)
+            .args(*args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+                if text.len() > MAX {
+                    // Truncate on a char boundary.
+                    let mut end = MAX;
+                    while end > 0 && !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    text.truncate(end);
+                    text.push_str("\n…[truncated]");
+                }
+                return Ok((text, cmd));
+            }
+            Ok(out) => {
+                last_err = Some(format!("{cmd} exited with {}", out.status));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                last_err = Some(format!("{cmd}: {e}"));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        if cfg!(target_os = "linux") {
+            "no PRIMARY reader on PATH (install xclip, xsel, or wl-paste)".into()
+        } else {
+            "PRIMARY selection is not available on this platform".into()
+        }
+    }))
+}
+
+fn primary_candidate_names() -> Vec<&'static str> {
+    primary_candidates().iter().map(|(n, _)| *n).collect()
+}
+
+fn primary_candidates() -> &'static [(&'static str, &'static [&'static str])] {
+    // PRIMARY is an X11/Wayland concept; skip on macOS/Windows.
+    if cfg!(target_os = "macos") || cfg!(target_os = "windows") {
+        return &[];
+    }
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        &[
+            ("wl-paste", &["--primary", "--no-newline"]),
+            ("xclip", &["-selection", "primary", "-o"]),
+            ("xsel", &["--primary", "--output"]),
+        ]
+    } else {
+        &[
+            ("xclip", &["-selection", "primary", "-o"]),
+            ("xsel", &["--primary", "--output"]),
+            ("wl-paste", &["--primary", "--no-newline"]),
+        ]
+    }
 }
 
 fn native_candidate_names() -> Vec<&'static str> {
@@ -298,47 +372,37 @@ mod tests {
         let d = describe_routes();
         assert!(d.iter().any(|l| l.contains("native")));
         assert!(d.iter().any(|l| l.contains("osc52")));
+        assert!(d.iter().any(|l| l.contains("primary")));
     }
 
     #[test]
-    #[cfg(not(target_os = "windows"))]
-    fn copy_errors_with_empty_path_when_no_tmux() {
-        // Same contract as the old commands::copy_to_clipboard test: with an
-        // empty PATH and no TMUX, native fails. OSC 52 may still succeed by
-        // writing to stdout — so only assert we get *some* Result that is
-        // either Ok(osc52) or Err. Prefer: clear TMUX too.
-        let prev_path = std::env::var_os("PATH");
-        let prev_tmux = std::env::var_os("TMUX");
-        // SAFETY: single-threaded test, restored before exit.
-        unsafe {
-            std::env::set_var("PATH", "");
-            std::env::remove_var("TMUX");
-            std::env::remove_var("SSH_CONNECTION");
-            std::env::remove_var("SSH_TTY");
-            std::env::remove_var("SSH_CLIENT");
-            // Force local display so we don't prefer osc52 solely for ssh/no-display
-            // — still may fire osc52 on native failure.
-            std::env::set_var("DISPLAY", ":0");
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn paste_primary_errors_on_non_linux() {
+        let err = paste_primary().unwrap_err();
+        assert!(
+            err.contains("not available") || err.contains("PRIMARY"),
+            "unexpected err: {err}"
+        );
+    }
+
+    #[test]
+    fn primary_candidates_match_platform() {
+        // Do not clear PATH here — env mutation races with parallel tests
+        // (e.g. which_in_path). Inspect the static candidate table instead.
+        if cfg!(target_os = "linux") {
+            assert!(
+                !primary_candidates().is_empty(),
+                "linux should advertise a PRIMARY reader"
+            );
+        } else {
+            assert!(primary_candidates().is_empty(), "PRIMARY is Linux-only");
         }
-        let result = copy_text("hello");
-        unsafe {
-            match prev_path {
-                Some(v) => std::env::set_var("PATH", v),
-                None => std::env::remove_var("PATH"),
-            }
-            match prev_tmux {
-                Some(v) => std::env::set_var("TMUX", v),
-                None => std::env::remove_var("TMUX"),
-            }
-        }
-        // With empty PATH, native fails; OSC 52 write to stdout should still work.
-        match result {
-            Ok(r) => assert!(
-                r.routes.contains(&"osc52"),
-                "expected osc52 fallback, got {:?}",
-                r.routes
-            ),
-            Err(e) => panic!("expected osc52 success on empty PATH, got err: {e}"),
-        }
+    }
+
+    #[test]
+    fn osc52_route_writes_without_touching_path() {
+        // Hermetic: does not mutate PATH/TMUX (those races parallel tests
+        // that resolve binaries). Asserts the always-available OSC 52 path.
+        try_osc52("hello").expect("osc52 should write to stdout");
     }
 }
