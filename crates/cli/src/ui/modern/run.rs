@@ -679,6 +679,10 @@ static KEYBOARD_ENHANCEMENT_WANTED: AtomicBool = AtomicBool::new(false);
 /// consults this so we pop exactly as many times as we pushed. A leaked
 /// keyboard mode makes the user's shell unusable.
 static KEYBOARD_ENHANCEMENT_PUSHED: AtomicBool = AtomicBool::new(false);
+/// Whether the user wants mouse capture on. Default true so line selection
+/// works; `/mouse` turns it off for native terminal click-drag copy.
+/// Shared with `with_main_screen` so re-entry respects the choice.
+static MOUSE_CAPTURE_WANTED: AtomicBool = AtomicBool::new(true);
 
 fn push_keyboard_enhancement(out: &mut impl Write) {
     if !KEYBOARD_ENHANCEMENT_WANTED.load(Ordering::Relaxed)
@@ -703,13 +707,23 @@ fn pop_keyboard_enhancement(out: &mut impl Write) {
     let _ = execute!(out, PopKeyboardEnhancementFlags);
 }
 
+fn apply_mouse_capture(out: &mut impl Write, want: bool) {
+    MOUSE_CAPTURE_WANTED.store(want, Ordering::Relaxed);
+    if want {
+        let _ = execute!(out, EnableMouseCapture);
+    } else {
+        let _ = execute!(out, DisableMouseCapture);
+    }
+}
+
 fn setup_terminal() -> anyhow::Result<Term> {
     enable_raw_mode()?;
     let mut out = stdout();
     // Enter alt screen and enable focus + bracketed paste + mouse capture.
     // All are consumed by the loop and disabled on exit so no `^[[I`/`^[[O`
     // (focus), paste brackets, or mouse tracking leak into the shell
-    // (plan §M7/§M9).
+    // (plan §M7/§M9). Mouse capture starts on; the user can drop it with
+    // `/mouse` for native terminal selection.
     if let Err(e) = execute!(
         out,
         EnterAlternateScreen,
@@ -720,6 +734,7 @@ fn setup_terminal() -> anyhow::Result<Term> {
         let _ = disable_raw_mode();
         return Err(e.into());
     }
+    MOUSE_CAPTURE_WANTED.store(true, Ordering::Relaxed);
     // Pushed last, so it is popped first on every restore path.
     push_keyboard_enhancement(&mut out);
     let backend = CrosstermBackend::new(out);
@@ -772,14 +787,17 @@ fn with_main_screen<R>(f: impl FnOnce() -> R) -> R {
     // Best-effort re-enter; draw path will recover on the next frame.
     let _ = enable_raw_mode();
     let mut out = stdout();
+    let want_mouse = MOUSE_CAPTURE_WANTED.load(Ordering::Relaxed);
     let _ = execute!(
         out,
         EnterAlternateScreen,
         EnableFocusChange,
         EnableBracketedPaste,
-        EnableMouseCapture,
         crossterm::cursor::Hide,
     );
+    if want_mouse {
+        let _ = execute!(out, EnableMouseCapture);
+    }
     // `restore_stdout_modes` popped the flags for the interactive command;
     // put them back last so the teardown order stays the same.
     push_keyboard_enhancement(&mut out);
@@ -1015,6 +1033,18 @@ pub(super) async fn event_loop(
                     }
                 }
                 Err(_) => app.pending_theme = Some(theme_id),
+            }
+        }
+
+        // Apply a `/mouse` toggle: Enable/Disable must hit the live
+        // backend. The event loop has no terminal handle — write the
+        // mode switch to stdout, which is the same stream crossterm
+        // already owns for the alt screen.
+        {
+            let want = app.mouse_capture;
+            if want != MOUSE_CAPTURE_WANTED.load(Ordering::Relaxed) {
+                apply_mouse_capture(&mut stdout(), want);
+                app.dirty = true;
             }
         }
 
@@ -3087,6 +3117,19 @@ fn handle_key_inner(app: &mut App, key: KeyEvent) {
         {
             app.copy_selection_or_last();
         }
+        // Toggle mouse capture without clobbering the composer draft.
+        // Ctrl+Alt+M works on legacy terminals (Alt is reported without
+        // kitty). Ctrl+Shift+M only fires when keyboard enhancement is
+        // actually enabled — otherwise Shift is dropped and Ctrl+M is
+        // Enter / the model picker, so advertising it would be a dead
+        // shortcut on denylisted hosts.
+        (m, KeyCode::Char('m') | KeyCode::Char('M'))
+            if m.contains(KeyModifiers::CONTROL)
+                && (m.contains(KeyModifiers::ALT)
+                    || (m.contains(KeyModifiers::SHIFT) && app.caps.kitty_keyboard_safe)) =>
+        {
+            app.toggle_mouse_capture();
+        }
         // Queue pane toggle (Ctrl+; / Ctrl+').
         (m, KeyCode::Char(';') | KeyCode::Char('\'')) if m.contains(KeyModifiers::CONTROL) => {
             app.toggle_queue_pane();
@@ -3205,7 +3248,13 @@ fn handle_key_inner(app: &mut App, key: KeyEvent) {
         }
         // Ctrl+M: Grok-style — model picker when composer empty / block
         // selected (scrollback); multiline toggle when drafting.
-        (m, KeyCode::Char('m') | KeyCode::Char('M')) if m.contains(KeyModifiers::CONTROL) => {
+        // Exclude Alt/Shift so Ctrl+Alt+M (mouse) and Ctrl+Shift+M do not
+        // steal this arm.
+        (m, KeyCode::Char('m') | KeyCode::Char('M'))
+            if m.contains(KeyModifiers::CONTROL)
+                && !m.contains(KeyModifiers::ALT)
+                && !m.contains(KeyModifiers::SHIFT) =>
+        {
             if app.input.is_empty() || app.selected_item.is_some() {
                 app.request_model_picker();
             } else {
@@ -4532,6 +4581,60 @@ mod tests {
         app.phase = Phase::Streaming;
         handle_key(&mut app, ctrl('C'));
         assert!(app.cancel_requested, "Ctrl+C (uppercase) must cancel");
+    }
+
+    #[test]
+    fn ctrl_alt_m_toggles_mouse_without_clobbering_draft() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.input = "unsent draft".into();
+        app.cursor = app.input.len();
+        assert!(app.mouse_capture);
+        handle_key(
+            &mut app,
+            KeyEvent::new(
+                KeyCode::Char('m'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+        );
+        assert!(!app.mouse_capture, "Ctrl+Alt+M should toggle capture off");
+        assert_eq!(app.input, "unsent draft", "draft must survive the toggle");
+        assert_eq!(app.cursor, "unsent draft".len());
+    }
+
+    #[test]
+    fn ctrl_shift_m_only_when_kitty_keyboard_safe() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.caps.kitty_keyboard_safe = false;
+        app.input = "keep me".into();
+        // Without safe enhancement, Ctrl+Shift+M must not toggle (Shift may
+        // not even arrive; when it does, we still refuse so we never
+        // advertise a dead shortcut).
+        handle_key(
+            &mut app,
+            KeyEvent::new(
+                KeyCode::Char('m'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+        assert!(
+            app.mouse_capture,
+            "Ctrl+Shift+M must not bind on denylisted / non-enhanced hosts"
+        );
+        assert_eq!(app.input, "keep me");
+
+        app.caps.kitty_keyboard_safe = true;
+        handle_key(
+            &mut app,
+            KeyEvent::new(
+                KeyCode::Char('m'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+        assert!(
+            !app.mouse_capture,
+            "Ctrl+Shift+M works with kitty enhancement"
+        );
+        assert_eq!(app.input, "keep me");
     }
 
     #[test]
