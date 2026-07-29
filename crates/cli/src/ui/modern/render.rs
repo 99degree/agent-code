@@ -1372,11 +1372,87 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     // Lines are pre-wrapped by the layout cache; no widget wrapping.
     frame.render_widget(Paragraph::new(view).block(title_block), area);
 
+    // Empty / near-empty conversation: show three concrete next steps
+    // instead of a blank pane (#557 Phase 4). Only when idle — never
+    // over a live stream or permission modal.
+    if app.phase == Phase::Idle && transcript_is_empty_guidance(&app.transcript) {
+        draw_empty_conversation_guidance(frame, inner);
+    }
+
     // Jump-to-bottom pill when reading above the live tail (plan §M2).
     let below = app.scroll.lines_below(total, height);
     if below > 0 {
         draw_jump_pill(frame, inner, below);
     }
+}
+
+/// True when the transcript is empty or only holds the initial chrome
+/// welcome line. `/help` System output, Errors, and Warnings are real
+/// content — guidance must not overlay them (#578).
+fn transcript_is_empty_guidance(items: &[super::app::TranscriptItem]) -> bool {
+    items.iter().all(|i| match i {
+        super::app::TranscriptItem::System(s) => s == super::app::WELCOME_SYSTEM_LINE,
+        _ => false,
+    })
+}
+
+fn draw_empty_conversation_guidance(frame: &mut Frame<'_>, area: Rect) {
+    if area.height < 6 || area.width < 40 {
+        return;
+    }
+    let p = palette();
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Start a conversation",
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  1. ", Style::default().fg(p.accent)),
+            Span::styled("Type a task", Style::default().fg(p.text)),
+            Span::styled(
+                "  — ask to explain, edit, or run something",
+                Style::default().fg(p.muted),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  2. ", Style::default().fg(p.accent)),
+            Span::styled(
+                "Ctrl+P",
+                Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  — open commands · ", Style::default().fg(p.muted)),
+            Span::styled("/resume", Style::default().fg(p.text)),
+            Span::styled(" for a past session", Style::default().fg(p.muted)),
+        ]),
+        Line::from(vec![
+            Span::styled("  3. ", Style::default().fg(p.accent)),
+            Span::styled(
+                "Shift+Tab",
+                Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  — pick a mode (plan / accept edits / …) before you start",
+                Style::default().fg(p.muted),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Tip: @path mentions a file · !cmd runs a shell command",
+            Style::default().fg(p.muted).add_modifier(Modifier::DIM),
+        )),
+    ];
+    // Centre vertically in the transcript body.
+    let h = lines.len() as u16;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    let rect = Rect {
+        x: area.x,
+        y,
+        width: area.width,
+        height: h.min(area.height),
+    };
+    frame.render_widget(Paragraph::new(lines), rect);
 }
 
 /// Floating "↓ N new" pill anchored bottom-right of the transcript area.
@@ -3480,5 +3556,35 @@ mod tests {
         term.draw(|f| draw(f, &mut app)).unwrap();
         let s2 = buffer_to_string(term.backend().buffer());
         assert!(!s2.contains("↓"), "no pill while following; buffer:\n{s2}");
+    }
+    #[test]
+    fn empty_guidance_when_only_chrome_or_empty() {
+        use super::super::app::{TranscriptItem, WELCOME_SYSTEM_LINE};
+        assert!(transcript_is_empty_guidance(&[]));
+        assert!(transcript_is_empty_guidance(&[TranscriptItem::System(
+            WELCOME_SYSTEM_LINE.into()
+        )]));
+        // Subsequent System rows (e.g. /help) are real content.
+        assert!(!transcript_is_empty_guidance(&[TranscriptItem::System(
+            "Keys: Enter send · …".into()
+        )]));
+        assert!(!transcript_is_empty_guidance(&[
+            TranscriptItem::System(WELCOME_SYSTEM_LINE.into()),
+            TranscriptItem::System("Keys: Enter send · …".into()),
+        ]));
+        // Error / Warning must not be treated as empty chrome.
+        assert!(!transcript_is_empty_guidance(&[TranscriptItem::Error(
+            "boom".into()
+        )]));
+        assert!(!transcript_is_empty_guidance(&[TranscriptItem::Warning(
+            "careful".into()
+        )]));
+        assert!(!transcript_is_empty_guidance(&[TranscriptItem::User(
+            "hi".into()
+        )]));
+        assert!(!transcript_is_empty_guidance(&[
+            TranscriptItem::System(WELCOME_SYSTEM_LINE.into()),
+            TranscriptItem::Assistant("y".into()),
+        ]));
     }
 }
