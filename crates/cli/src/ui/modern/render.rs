@@ -1408,6 +1408,33 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     // Lines are pre-wrapped by the layout cache; no widget wrapping.
     frame.render_widget(Paragraph::new(view).block(title_block), area);
 
+    // Markdown hyperlinks: register hit rects so a click opens the URL
+    // (#558 D3-10). Columns are relative to the transcript body.
+    for link in app.layout.links_in_range(top, height) {
+        let row_in_view = link.line.saturating_sub(top);
+        if row_in_view >= height {
+            continue;
+        }
+        let x = inner.x.saturating_add(link.cols.start);
+        let w = link
+            .cols
+            .end
+            .saturating_sub(link.cols.start)
+            .min(inner.width.saturating_sub(link.cols.start))
+            .max(1);
+        app.hit_registry.register(
+            Rect {
+                x,
+                y: inner.y.saturating_add(row_in_view as u16),
+                width: w,
+                height: 1,
+            },
+            super::hit_rect::HitTarget::Hyperlink {
+                url: link.url.clone(),
+            },
+        );
+    }
+
     // Empty / near-empty conversation: show three concrete next steps
     // instead of a blank pane (#557 Phase 4). Only when idle — never
     // over a live stream or permission modal.
@@ -1418,7 +1445,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     // Jump-to-bottom pill when reading above the live tail (plan §M2).
     let below = app.scroll.lines_below(total, height);
     if below > 0 {
-        draw_jump_pill(frame, inner, below);
+        draw_jump_pill(frame, inner, below, app);
     }
 }
 
@@ -1492,7 +1519,7 @@ fn draw_empty_conversation_guidance(frame: &mut Frame<'_>, area: Rect) {
 }
 
 /// Floating "↓ N new" pill anchored bottom-right of the transcript area.
-fn draw_jump_pill(frame: &mut Frame<'_>, area: Rect, n: usize) {
+fn draw_jump_pill(frame: &mut Frame<'_>, area: Rect, n: usize, app: &mut App) {
     let label = if n > 99 {
         " ↓ 99+ new ".to_string()
     } else {
@@ -1508,6 +1535,14 @@ fn draw_jump_pill(frame: &mut Frame<'_>, area: Rect, n: usize) {
         width: w,
         height: 1,
     };
+    // Register the pill's actual footprint so bottom-row links remain
+    // clickable outside this rectangle.
+    app.hit_registry.register(
+        rect,
+        super::hit_rect::HitTarget::Control {
+            id: "jump_pill".into(),
+        },
+    );
     let accent = palette().accent;
     frame.render_widget(Clear, rect);
     frame.render_widget(

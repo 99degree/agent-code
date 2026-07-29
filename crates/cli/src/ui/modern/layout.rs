@@ -19,6 +19,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::app::TranscriptItem;
 use super::colors::palette;
+use super::markdown::LinkSpan;
 use crate::ui::text_safety::escape_deceptive;
 
 struct Cached {
@@ -28,6 +29,9 @@ struct Cached {
     /// rather than the start of a logical line. Lets search operate on
     /// logical lines so a match can cross a display-wrap boundary.
     cont: Vec<bool>,
+    /// Hyperlinks within this block. `line` is a **display** row index
+    /// into `lines` (post-wrap).
+    links: Vec<LinkSpan>,
 }
 
 /// Per-block rendered-line cache with a prefix-sum line index.
@@ -97,15 +101,10 @@ impl LayoutCache {
         self.blocks.truncate(display.len());
 
         for (i, d) in display.iter().enumerate() {
-            let (hash, render): (u64, Box<dyn Fn() -> Vec<Line<'static>>>) = match d {
+            let hash = match d {
                 super::toolcard::Display::Single(idx) => {
                     let item = &items[*idx];
-                    let exp = expanded.contains(idx);
-                    let sel = selected == Some(*idx);
-                    (
-                        hash_item(item, exp, sel),
-                        Box::new(move || render_item(item, exp, sel)),
-                    )
+                    hash_item(item, expanded.contains(idx), selected == Some(*idx))
                 }
                 super::toolcard::Display::Group(idxs) => {
                     let mut h = DefaultHasher::new();
@@ -116,14 +115,32 @@ impl LayoutCache {
                     }
                     let sel = selected.is_some_and(|s| idxs.contains(&s));
                     sel.hash(&mut h);
-                    (h.finish(), Box::new(move || render_group(items, idxs, sel)))
+                    h.finish()
                 }
             };
             match self.blocks.get(i) {
                 Some(c) if c.hash == hash => {} // fresh
                 _ => {
-                    let (lines, cont) = wrap_lines_tagged(render(), width);
-                    let entry = Cached { hash, lines, cont };
+                    let (raw, logical_links) = match d {
+                        super::toolcard::Display::Single(idx) => {
+                            let item = &items[*idx];
+                            let exp = expanded.contains(idx);
+                            let sel = selected == Some(*idx);
+                            render_item_with_links(item, exp, sel)
+                        }
+                        super::toolcard::Display::Group(idxs) => {
+                            let sel = selected.is_some_and(|s| idxs.contains(&s));
+                            (render_group(items, idxs, sel), Vec::new())
+                        }
+                    };
+                    let (lines, cont) = wrap_lines_tagged(raw, width);
+                    let links = remap_links_through_wrap(&logical_links, &cont, width);
+                    let entry = Cached {
+                        hash,
+                        lines,
+                        cont,
+                        links,
+                    };
                     if i < self.blocks.len() {
                         self.blocks[i] = entry;
                     } else {
@@ -172,6 +189,41 @@ impl LayoutCache {
     #[cfg(test)]
     pub fn block_count(&self) -> usize {
         self.blocks.len()
+    }
+
+    /// Hyperlinks whose display row falls in `[top, top + height)`.
+    ///
+    /// Each link's `line` is rewritten to an **absolute** transcript line
+    /// index so the draw path can map it onto a screen row.
+    pub fn links_in_range(&self, top: usize, height: usize) -> Vec<LinkSpan> {
+        if height == 0 {
+            return Vec::new();
+        }
+        let end = top.saturating_add(height);
+        let mut out = Vec::new();
+        let mut base = 0usize;
+        for block in &self.blocks {
+            let block_end = base + block.lines.len();
+            if block_end <= top {
+                base = block_end;
+                continue;
+            }
+            if base >= end {
+                break;
+            }
+            for link in &block.links {
+                let abs = base.saturating_add(link.line);
+                if abs >= top && abs < end {
+                    out.push(LinkSpan {
+                        line: abs,
+                        cols: link.cols.clone(),
+                        url: link.url.clone(),
+                    });
+                }
+            }
+            base = block_end;
+        }
+        out
     }
 
     /// Collect the display lines in `[top, top + height)`, cloning only the
@@ -305,8 +357,69 @@ fn scrub_item(item: &TranscriptItem) -> Option<TranscriptItem> {
     }
 }
 
+/// Map pre-wrap [`LinkSpan`]s onto post-wrap display rows.
+///
+/// Each logical line becomes one or more display rows (`cont` marks
+/// soft-wrap continuations). A link that spans multiple wrap rows emits
+/// one [`LinkSpan`] per display row with local column ranges.
+fn remap_links_through_wrap(links: &[LinkSpan], cont: &[bool], width: u16) -> Vec<LinkSpan> {
+    if links.is_empty() || cont.is_empty() {
+        return Vec::new();
+    }
+    // display_row of the start of each logical line.
+    let mut logical_starts: Vec<usize> = Vec::new();
+    for (i, &is_cont) in cont.iter().enumerate() {
+        if !is_cont {
+            logical_starts.push(i);
+        }
+    }
+    let w = width.max(1) as usize;
+    let mut out = Vec::new();
+    for l in links {
+        let Some(&base) = logical_starts.get(l.line) else {
+            continue;
+        };
+        // How many display rows this logical line occupies.
+        let mut rows = 1usize;
+        let mut i = base + 1;
+        while i < cont.len() && cont[i] {
+            rows += 1;
+            i += 1;
+        }
+        let start = l.cols.start as usize;
+        let end = (l.cols.end as usize).max(start.saturating_add(1));
+        let mut col = start;
+        while col < end {
+            let row_off = col / w;
+            if row_off >= rows {
+                break;
+            }
+            let local_start = col % w;
+            // Exclusive end column on this wrap row (global display col).
+            let row_end_global = ((row_off + 1) * w).min(end);
+            let local_end = row_end_global - row_off * w;
+            out.push(LinkSpan {
+                line: base + row_off,
+                cols: (local_start as u16)..(local_end as u16),
+                url: l.url.clone(),
+            });
+            col = row_end_global;
+        }
+    }
+    out
+}
+
 /// Render one transcript block to logical (pre-wrap) lines.
 pub fn render_item(item: &TranscriptItem, expanded: bool, selected: bool) -> Vec<Line<'static>> {
+    render_item_with_links(item, expanded, selected).0
+}
+
+/// Like [`render_item`], plus pre-wrap link spans for assistant markdown.
+fn render_item_with_links(
+    item: &TranscriptItem,
+    expanded: bool,
+    selected: bool,
+) -> (Vec<Line<'static>>, Vec<LinkSpan>) {
     // Make bidi overrides and zero-width characters visible before any
     // arm renders. Done once here rather than per-variant so a new
     // `TranscriptItem` cannot quietly arrive unscrubbed, and it costs
@@ -316,6 +429,7 @@ pub fn render_item(item: &TranscriptItem, expanded: bool, selected: bool) -> Vec
     let item = scrubbed.as_ref().unwrap_or(item);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut links: Vec<LinkSpan> = Vec::new();
     let sel = if selected {
         Span::styled("▌", Style::default().fg(palette().accent))
     } else {
@@ -352,12 +466,15 @@ pub fn render_item(item: &TranscriptItem, expanded: bool, selected: bool) -> Vec
             lines.push(Line::from(""));
         }
         TranscriptItem::Assistant(t) => {
-            let mut body = super::markdown::render_markdown(t).lines;
+            let md = super::markdown::render_markdown(t);
+            let mut body = md.lines;
+            let mut body_links = md.links;
             if !expanded {
                 let max = 12;
                 let total = body.len();
                 if total > max {
                     body.truncate(max);
+                    body_links.retain(|l| l.line < max);
                     body.push(Line::from(Span::styled(
                         "  … folded · press e to expand".to_string(),
                         Style::default()
@@ -366,13 +483,25 @@ pub fn render_item(item: &TranscriptItem, expanded: bool, selected: bool) -> Vec
                     )));
                 }
             }
+            // Selection gutter on the first body line shifts columns by one.
+            for l in &mut body_links {
+                if l.line == 0 {
+                    l.cols.start = l.cols.start.saturating_add(1);
+                    l.cols.end = l.cols.end.saturating_add(1);
+                }
+            }
             if let Some(first) = body.first_mut() {
                 first.spans.insert(0, sel.clone());
             } else {
                 lines.push(Line::from(sel.clone()));
             }
+            let base = lines.len();
+            for l in &mut body_links {
+                l.line = l.line.saturating_add(base);
+            }
             lines.extend(body);
             lines.push(Line::from(""));
+            links = body_links;
         }
         TranscriptItem::Thinking { text, duration_ms } => {
             // Grok-style: collapsed header "Thought" / "Thought for Xs";
@@ -461,7 +590,7 @@ pub fn render_item(item: &TranscriptItem, expanded: bool, selected: bool) -> Vec
             ]));
         }
     }
-    lines
+    (lines, links)
 }
 
 /// Render a typed tool card (plan §M4): kind icon + label + status glyph,
@@ -860,6 +989,41 @@ mod tests {
         assert_eq!(c.total_lines(), 10);
         let view = c.viewport(3, 4);
         assert_eq!(view.len(), 4);
+    }
+
+    #[test]
+    fn assistant_markdown_links_are_cached_and_queryable() {
+        let mut c = LayoutCache::default();
+        let items = vec![TranscriptItem::Assistant(
+            "see [docs](https://example.com/a) for more".into(),
+        )];
+        c.sync(&items, 80, &std::collections::HashSet::new(), None);
+        let links = c.links_in_range(0, c.total_lines());
+        assert!(
+            links.iter().any(|l| l.url == "https://example.com/a"),
+            "expected assistant link in layout cache, got {links:?}"
+        );
+    }
+
+    #[test]
+    fn remap_links_splits_across_wrap_rows() {
+        // Logical line index 0, link covering cols 5..25 at width 10 →
+        // three display rows: 5..10, 0..10, 0..5.
+        let cont = vec![false, true, true]; // one logical line, three rows
+        let links = vec![LinkSpan {
+            line: 0,
+            cols: 5..25,
+            url: "https://example.com".into(),
+        }];
+        let mapped = remap_links_through_wrap(&links, &cont, 10);
+        assert_eq!(mapped.len(), 3, "{mapped:?}");
+        assert_eq!(mapped[0].line, 0);
+        assert_eq!(mapped[0].cols, 5..10);
+        assert_eq!(mapped[1].line, 1);
+        assert_eq!(mapped[1].cols, 0..10);
+        assert_eq!(mapped[2].line, 2);
+        assert_eq!(mapped[2].cols, 0..5);
+        assert!(mapped.iter().all(|l| l.url == "https://example.com"));
     }
 
     #[test]

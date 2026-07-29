@@ -3622,26 +3622,33 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
             app.scroll_down(3);
             app.dirty = true;
         }
-        // Jump pill: bottom transcript row → Follow.
-        MouseEventKind::Down(MouseButton::Left)
-            if !app.scroll.is_following()
-                && app.transcript_bottom_row != 0
-                && m.row == app.transcript_bottom_row =>
-        {
-            app.scroll_to_bottom();
-            app.clear_selection();
-        }
         MouseEventKind::Down(MouseButton::Left) if m.modifiers.is_empty() => {
-            // Launch recent row: click resumes (same path as Enter).
-            if let Some(super::hit_rect::HitTarget::LaunchRecent { index }) =
-                app.hit_registry.hit_test(m.column, m.row).cloned()
-                && app.launch.should_draw(app)
-                && index < app.launch.recent.len()
-            {
-                app.launch.selected = index;
-                app.launch_accept();
-                app.dirty = true;
-                return;
+            // Hit-registry targets first: a bottom-row link must win over the
+            // jump-to-tail shortcut, which used to swallow the whole row.
+            match app.hit_registry.hit_test(m.column, m.row).cloned() {
+                Some(super::hit_rect::HitTarget::LaunchRecent { index })
+                    if app.launch.should_draw(app) && index < app.launch.recent.len() =>
+                {
+                    app.launch.selected = index;
+                    app.launch_accept();
+                    app.dirty = true;
+                    return;
+                }
+                Some(super::hit_rect::HitTarget::Hyperlink { url }) => {
+                    match open_hyperlink(&url) {
+                        Ok(()) => app.push_toast(format!("opened {url}")),
+                        Err(e) => app.push_toast(format!("open failed: {e}")),
+                    }
+                    app.dirty = true;
+                    return;
+                }
+                Some(super::hit_rect::HitTarget::Control { id }) if id == "jump_pill" => {
+                    app.scroll_to_bottom();
+                    app.clear_selection();
+                    app.dirty = true;
+                    return;
+                }
+                _ => {}
             }
             if let Some(abs) = mouse_abs_line(app, m.row) {
                 app.selection = Some(super::app::TextSelection {
@@ -3693,6 +3700,76 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
             }
         }
         _ => {}
+    }
+}
+
+/// Validate and normalize a transcript hyperlink URL.
+///
+/// Only `http`/`https`/`mailto` are accepted so a crafted markdown link
+/// cannot spawn an arbitrary local process. Rejects ASCII control bytes
+/// (including CR/LF) that could break out of an opener command line.
+fn validate_hyperlink_url(url: &str) -> Result<&str, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("empty url".into());
+    }
+    if trimmed.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err("url contains control characters".into());
+    }
+    let ok = trimmed.starts_with("https://")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("mailto:");
+    if !ok {
+        return Err("only http(s) and mailto links can be opened".into());
+    }
+    Ok(trimmed)
+}
+
+/// Open a transcript hyperlink with the platform browser opener.
+fn open_hyperlink(url: &str) -> Result<(), String> {
+    let trimmed = validate_hyperlink_url(url)?;
+    platform_open_url(trimmed)
+}
+
+/// Platform-specific URL open. Kept separate so tests exercise validation
+/// without spawning a browser (AGENTS.md: hermetic default `cargo test`).
+fn platform_open_url(url: &str) -> Result<(), String> {
+    // Never route the model-authored URL through `cmd.exe /C` — metacharacters
+    // such as `&` would start a second command. Use direct openers instead.
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("open: {e}"))?;
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // `rundll32 url.dll,FileProtocolHandler` takes the URL as a single
+        // argument without re-parsing it through cmd's command separators.
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("rundll32: {e}"))?;
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("xdg-open: {e}"))?;
+        Ok(())
     }
 }
 
@@ -5142,9 +5219,13 @@ mod tests {
     }
 
     fn mouse(kind: MouseEventKind, row: u16) -> MouseEvent {
+        mouse_at(kind, 0, row)
+    }
+
+    fn mouse_at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
         MouseEvent {
             kind,
-            column: 0,
+            column,
             row,
             modifiers: KeyModifiers::NONE,
         }
@@ -5174,6 +5255,8 @@ mod tests {
 
     #[test]
     fn click_bottom_row_jumps_to_follow() {
+        use ratatui::layout::Rect;
+
         let mut app = App::new("m", "/tmp", "s");
         app.transcript.clear();
         for i in 0..100 {
@@ -5188,6 +5271,19 @@ mod tests {
         app.transcript_bottom_row = 22;
         app.scroll_up(30);
         assert!(!app.scroll.is_following());
+        // Jump pill only owns its registered rect (bottom-right), not the
+        // whole bottom row — so hyperlinks on that row stay clickable.
+        app.hit_registry.register(
+            Rect {
+                x: 60,
+                y: 22,
+                width: 15,
+                height: 1,
+            },
+            super::super::hit_rect::HitTarget::Control {
+                id: "jump_pill".into(),
+            },
+        );
         // A click anywhere BELOW the transcript (status bar, input box) must
         // NOT snap the viewport — that lost the user's reading position.
         handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 25));
@@ -5195,9 +5291,21 @@ mod tests {
             !app.scroll.is_following(),
             "click on input box must not jump"
         );
-        // Exactly the transcript's bottom row (the jump-pill target) follows.
-        handle_mouse(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 22));
-        assert!(app.scroll.is_following(), "click at bottom follows");
+        // Bottom row outside the pill must not jump either.
+        handle_mouse(
+            &mut app,
+            mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 22),
+        );
+        assert!(
+            !app.scroll.is_following(),
+            "bottom-row click outside pill must not jump"
+        );
+        // Click on the pill itself follows.
+        handle_mouse(
+            &mut app,
+            mouse_at(MouseEventKind::Down(MouseButton::Left), 65, 22),
+        );
+        assert!(app.scroll.is_following(), "click on jump pill follows");
     }
 
     // Assert a command's ANSI byte sequence via `Command::write_ansi`, which
@@ -5217,6 +5325,28 @@ mod tests {
             s.contains("\x1b[?1000l"),
             "mouse capture not disabled: {s:?}"
         );
+    }
+
+    #[test]
+    fn validate_hyperlink_rejects_non_http_schemes() {
+        assert!(validate_hyperlink_url("file:///etc/passwd").is_err());
+        assert!(validate_hyperlink_url("javascript:alert(1)").is_err());
+        assert!(validate_hyperlink_url("/local/path").is_err());
+        // cmd.exe metacharacters must not be a reason to open shell-style.
+        assert!(validate_hyperlink_url("https://example.test/\n&calc.exe").is_err());
+    }
+
+    #[test]
+    fn validate_hyperlink_accepts_http_and_mailto_prefix() {
+        // Hermetic: never spawn a browser from unit tests.
+        for url in [
+            "https://example.com/x",
+            "http://example.com",
+            "mailto:dev@example.com",
+            "https://example.test/?a=1&b=2",
+        ] {
+            assert_eq!(validate_hyperlink_url(url).unwrap(), url);
+        }
     }
 
     #[test]
