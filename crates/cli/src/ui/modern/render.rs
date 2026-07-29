@@ -18,6 +18,9 @@ use crate::ui::text_safety::escape_deceptive;
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     app.frame_count = app.frame_count.wrapping_add(1);
+    // Fresh hit map every frame — rects from the previous layout must
+    // not survive a resize or a widget that disappeared (#558).
+    app.hit_registry.clear();
     let area = frame.area();
     // Minimal skin (plan §M10) drops the header and the framed prompt for a
     // compact look — same block model, render config only.
@@ -98,20 +101,45 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         };
         draw_transcript(frame, transcript_area, app);
         draw_tasks_pane(frame, pane_area, app);
+        app.hit_registry.register(
+            pane_area,
+            super::hit_rect::HitTarget::Control {
+                id: "tasks-pane".into(),
+            },
+        );
     } else {
         draw_transcript(frame, chunks[1], app);
     }
     draw_status(frame, chunks[2], app);
+    app.hit_registry.register(
+        chunks[2],
+        super::hit_rect::HitTarget::StatusChip { id: "status" },
+    );
     if chips_h > 0 {
         draw_queue_chips(frame, chunks[3], app);
+        app.hit_registry.register(
+            chunks[3],
+            super::hit_rect::HitTarget::Control {
+                id: "queue-chips".into(),
+            },
+        );
     }
     if queue_pane_h > 0 {
         draw_queue_pane(frame, chunks[4], app);
+        // Whole pane for now; per-row rects can refine later.
+        app.hit_registry.register(
+            chunks[4],
+            super::hit_rect::HitTarget::Control {
+                id: "queue-pane".into(),
+            },
+        );
     }
     if search_h > 0 {
         draw_search_bar(frame, chunks[5], app);
     }
     draw_input(frame, chunks[6], app);
+    app.hit_registry
+        .register(chunks[6], super::hit_rect::HitTarget::Composer);
 
     if app.phase == Phase::Permission
         && let Some(modal) = app.front_modal().cloned()
