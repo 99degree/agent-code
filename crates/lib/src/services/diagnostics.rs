@@ -53,7 +53,23 @@ impl Check {
 }
 
 /// Run all diagnostic checks and return results.
+///
+/// Includes network probes (API connectivity, remote MCP URLs). Prefer
+/// [`run_local`] on the launch path so the first frame is not blocked on
+/// a multi-second HTTP timeout.
 pub async fn run_all(cwd: &Path, config: &crate::config::Config) -> Vec<Check> {
+    run_with_options(cwd, config, true).await
+}
+
+/// Same checks as [`run_all`], minus network round-trips.
+///
+/// Used by the launch surface so a flaky or slow endpoint cannot stall
+/// the first paint. `/doctor` still runs the full set.
+pub async fn run_local(cwd: &Path, config: &crate::config::Config) -> Vec<Check> {
+    run_with_options(cwd, config, false).await
+}
+
+async fn run_with_options(cwd: &Path, config: &crate::config::Config, network: bool) -> Vec<Check> {
     let mut checks = Vec::new();
 
     // 1. Required CLI tools.
@@ -62,14 +78,7 @@ pub async fn run_all(cwd: &Path, config: &crate::config::Config) -> Vec<Check> {
         ("rg", "content search (ripgrep)"),
         ("bash", "shell execution"),
     ] {
-        let available = tokio::process::Command::new("which")
-            .arg(tool)
-            .output()
-            .await
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        if available {
+        if tool_on_path(tool) {
             checks.push(Check::pass(
                 &format!("tool:{tool}"),
                 &format!("{tool} found ({purpose})"),
@@ -88,14 +97,7 @@ pub async fn run_all(cwd: &Path, config: &crate::config::Config) -> Vec<Check> {
         ("python3", "Python execution"),
         ("cargo", "Rust toolchain"),
     ] {
-        let available = tokio::process::Command::new("which")
-            .arg(tool)
-            .output()
-            .await
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        if available {
+        if tool_on_path(tool) {
             checks.push(Check::pass(
                 &format!("tool:{tool}"),
                 &format!("{tool} available ({purpose})"),
@@ -359,82 +361,85 @@ pub async fn run_all(cwd: &Path, config: &crate::config::Config) -> Vec<Check> {
         }
     }
 
-    // 8. API connectivity test (provider-aware auth).
-    if matches!(
-        config.api.auth_mode,
-        crate::config::ApiAuthMode::CodexChatgpt | crate::config::ApiAuthMode::XaiOauth
-    ) {
-        checks.push(Check::warn(
-            "api:connectivity",
-            "Skipping /models connectivity check for subscription OAuth auth",
-        ));
-    } else if config.api.api_key.is_some() {
-        let api_key = config.api.api_key.as_deref().unwrap_or("");
-        let url = format!("{}/models", config.api.base_url);
+    // 8. API connectivity test (provider-aware auth). Skipped on the
+    // launch path so a hanging endpoint cannot stall the first frame.
+    if network {
+        if matches!(
+            config.api.auth_mode,
+            crate::config::ApiAuthMode::CodexChatgpt | crate::config::ApiAuthMode::XaiOauth
+        ) {
+            checks.push(Check::warn(
+                "api:connectivity",
+                "Skipping /models connectivity check for subscription OAuth auth",
+            ));
+        } else if config.api.api_key.is_some() {
+            let api_key = config.api.api_key.as_deref().unwrap_or("");
+            let url = format!("{}/models", config.api.base_url);
 
-        let client = reqwest::Client::new();
-        let mut request = client.get(&url).timeout(std::time::Duration::from_secs(5));
+            let client = reqwest::Client::new();
+            let mut request = client.get(&url).timeout(std::time::Duration::from_secs(5));
 
-        // Use provider-specific auth headers.
-        match provider_kind {
-            crate::llm::provider::ProviderKind::AzureOpenAi => {
-                request = request.header("api-key", api_key);
-            }
-            crate::llm::provider::ProviderKind::Anthropic
-            | crate::llm::provider::ProviderKind::Bedrock
-            | crate::llm::provider::ProviderKind::Vertex => {
-                request = request
-                    .header("x-api-key", api_key)
-                    .header("anthropic-version", "2023-06-01");
-            }
-            _ => {
-                request = request.header("Authorization", format!("Bearer {api_key}"));
-            }
-        }
-
-        match request.send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                if status.is_success() || status.as_u16() == 200 {
-                    checks.push(Check::pass(
-                        "api:connectivity",
-                        &format!(
-                            "API reachable ({:?} at {})",
-                            provider_kind, config.api.base_url
-                        ),
-                    ));
-                } else if status.as_u16() == 401 || status.as_u16() == 403 {
-                    checks.push(Check::fail(
-                        "api:connectivity",
-                        &format!(
-                            "API key rejected by {:?} (HTTP {})",
-                            provider_kind,
-                            status.as_u16()
-                        ),
-                    ));
-                } else {
-                    checks.push(Check::warn(
-                        "api:connectivity",
-                        &format!(
-                            "{:?} responded with HTTP {}",
-                            provider_kind,
-                            status.as_u16()
-                        ),
-                    ));
+            // Use provider-specific auth headers.
+            match provider_kind {
+                crate::llm::provider::ProviderKind::AzureOpenAi => {
+                    request = request.header("api-key", api_key);
+                }
+                crate::llm::provider::ProviderKind::Anthropic
+                | crate::llm::provider::ProviderKind::Bedrock
+                | crate::llm::provider::ProviderKind::Vertex => {
+                    request = request
+                        .header("x-api-key", api_key)
+                        .header("anthropic-version", "2023-06-01");
+                }
+                _ => {
+                    request = request.header("Authorization", format!("Bearer {api_key}"));
                 }
             }
-            Err(e) => {
-                let msg = if e.is_timeout() {
-                    format!("{:?} unreachable (timeout after 5s)", provider_kind)
-                } else if e.is_connect() {
-                    format!(
-                        "Cannot connect to {:?} at {}",
-                        provider_kind, config.api.base_url
-                    )
-                } else {
-                    format!("{:?} error: {e}", provider_kind)
-                };
-                checks.push(Check::fail("api:connectivity", &msg));
+
+            match request.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() || status.as_u16() == 200 {
+                        checks.push(Check::pass(
+                            "api:connectivity",
+                            &format!(
+                                "API reachable ({:?} at {})",
+                                provider_kind, config.api.base_url
+                            ),
+                        ));
+                    } else if status.as_u16() == 401 || status.as_u16() == 403 {
+                        checks.push(Check::fail(
+                            "api:connectivity",
+                            &format!(
+                                "API key rejected by {:?} (HTTP {})",
+                                provider_kind,
+                                status.as_u16()
+                            ),
+                        ));
+                    } else {
+                        checks.push(Check::warn(
+                            "api:connectivity",
+                            &format!(
+                                "{:?} responded with HTTP {}",
+                                provider_kind,
+                                status.as_u16()
+                            ),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    let msg = if e.is_timeout() {
+                        format!("{:?} unreachable (timeout after 5s)", provider_kind)
+                    } else if e.is_connect() {
+                        format!(
+                            "Cannot connect to {:?} at {}",
+                            provider_kind, config.api.base_url
+                        )
+                    } else {
+                        format!("{:?} error: {e}", provider_kind)
+                    };
+                    checks.push(Check::fail("api:connectivity", &msg));
+                }
             }
         }
     }
@@ -444,24 +449,26 @@ pub async fn run_all(cwd: &Path, config: &crate::config::Config) -> Vec<Check> {
         if let Some(ref cmd) = entry.command {
             // Check if the command binary exists.
             let binary = cmd.split_whitespace().next().unwrap_or(cmd);
-            if let Ok(output) = tokio::process::Command::new("which")
-                .arg(binary)
-                .output()
-                .await
-            {
-                if output.status.success() {
-                    checks.push(Check::pass(
-                        &format!("mcp:{name}"),
-                        &format!("MCP server '{name}' binary found: {binary}"),
-                    ));
-                } else {
-                    checks.push(Check::fail(
-                        &format!("mcp:{name}"),
-                        &format!("MCP server '{name}' binary not found: {binary}"),
-                    ));
-                }
+            if tool_on_path(binary) {
+                checks.push(Check::pass(
+                    &format!("mcp:{name}"),
+                    &format!("MCP server '{name}' binary found: {binary}"),
+                ));
+            } else {
+                checks.push(Check::fail(
+                    &format!("mcp:{name}"),
+                    &format!("MCP server '{name}' binary not found: {binary}"),
+                ));
             }
         } else if let Some(ref url) = entry.url {
+            if !network {
+                // Local launch path: only note that a remote MCP is configured.
+                checks.push(Check::pass(
+                    &format!("mcp:{name}"),
+                    &format!("MCP server '{name}' configured at {url}"),
+                ));
+                continue;
+            }
             // Check if the SSE endpoint is reachable.
             match reqwest::Client::new()
                 .get(url)
@@ -572,6 +579,56 @@ pub async fn run_all(cwd: &Path, config: &crate::config::Config) -> Vec<Check> {
     checks
 }
 
+/// True when `name` resolves on `$PATH`.
+///
+/// Walks `$PATH` directly instead of shelling out to Unix `which`, which
+/// is missing on Windows and previously produced false "git missing"
+/// failures on the launch-surface probe path. On Windows, also tries
+/// each `PATHEXT` suffix (`.EXE`, `.CMD`, …).
+fn tool_on_path(name: &str) -> bool {
+    // Absolute / relative path: honor as-is (MCP commands may be full paths).
+    let as_path = Path::new(name);
+    if as_path.components().count() > 1 || as_path.is_absolute() {
+        return as_path.is_file();
+    }
+
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+
+    #[cfg(windows)]
+    let extensions: Vec<std::ffi::OsString> = {
+        let mut exts = vec![std::ffi::OsString::new()];
+        let pathext = std::env::var_os("PATHEXT")
+            .unwrap_or_else(|| std::ffi::OsString::from(".COM;.EXE;.BAT;.CMD"));
+        for part in pathext.to_string_lossy().split(';') {
+            let part = part.trim();
+            if !part.is_empty() {
+                exts.push(std::ffi::OsString::from(part));
+            }
+        }
+        exts
+    };
+    #[cfg(not(windows))]
+    let extensions: Vec<std::ffi::OsString> = vec![std::ffi::OsString::new()];
+
+    for dir in std::env::split_paths(&path_var) {
+        for ext in &extensions {
+            let candidate = if ext.is_empty() {
+                dir.join(name)
+            } else {
+                let mut file = std::ffi::OsString::from(name);
+                file.push(ext);
+                dir.join(file)
+            };
+            if candidate.is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// True when the given string is one of the HTTP verbs the hook
 /// dispatcher actually recognizes. Anything else gets treated as POST
 /// at runtime, which is almost certainly wrong — warn early.
@@ -631,6 +688,19 @@ mod tests {
         let f = Check::fail("test", "failed");
         assert_eq!(f.status, CheckStatus::Fail);
         assert_eq!(f.symbol(), "xx");
+    }
+
+    #[test]
+    fn tool_on_path_finds_a_known_binary() {
+        // `cargo` is on PATH in every environment that builds this crate.
+        assert!(
+            tool_on_path("cargo"),
+            "cargo should resolve via PATH walk (not Unix `which`)"
+        );
+        assert!(
+            !tool_on_path("definitely-not-a-real-tool-xyzzy"),
+            "missing binary must not report as present"
+        );
     }
 
     #[test]
