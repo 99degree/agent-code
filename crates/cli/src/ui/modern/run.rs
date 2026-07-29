@@ -472,6 +472,13 @@ pub async fn run_modern_tui(
     .await;
     restore_terminal(&mut terminal)?;
 
+    // Louder than a log line: the session is gone and `/resume` will not
+    // show it.
+    if let Some(e) = app.exit_save_error.as_deref() {
+        eprintln!("\nWarning: this session could not be saved ({e}).");
+        eprintln!("It will not appear in /resume.");
+    }
+
     // Don't silently lose prompts queued but never sent (plan §M5).
     if !app.queue.is_empty() {
         println!("\nUnsent queued prompts:");
@@ -1310,6 +1317,19 @@ pub(super) async fn event_loop(
                         // one that gets forgotten stamps a cached view
                         // with a count the conversation no longer has.
                         let outgoing_len = eng.state().messages.len();
+                        // Write the conversation being left before its
+                        // messages are replaced in place below. Exit saves
+                        // whatever is loaded *then*, so without this a
+                        // session worked in and then resumed away from is
+                        // never written at all — and an existing one loses
+                        // everything added since it was opened.
+                        if let Err(e) = persist_loaded_session(&eng) {
+                            app.transcript
+                                .push(super::app::TranscriptItem::System(format!(
+                                    "could not save the session being left: {e}"
+                                )));
+                            app.dirty = true;
+                        }
                         {
                             let st = eng.state_mut();
                             // Identity moves with the conversation. Left alone,
@@ -2251,10 +2271,118 @@ pub(super) async fn event_loop(
         let _ = h.join().await;
     }
 
+    // Save last, and only once the turn is joined: a live turn holds the
+    // engine mutex for the whole of `run_turn_spawned`, so locking before
+    // the cancel above deadlocked teardown on any exit during streaming or
+    // at a permission prompt. Written inline rather than off-thread —
+    // there is no UI left to keep responsive, and the write must finish
+    // before the process exits.
+    // Save last, and only once the turn is joined: a live turn holds the
+    // engine mutex for the whole of `run_turn_spawned`, so locking before
+    // the cancel above deadlocks teardown on any exit during streaming or
+    // at a permission prompt.
+    //
+    // Inline and single: nothing is left to keep responsive, the write
+    // must finish before the process exits, and there is no second writer
+    // in flight to race. Per-turn checkpointing needs the write itself to
+    // be atomic and serialized in the service — cron writes these files
+    // from another process, which no in-process ordering can reach.
+    {
+        let engine_arc = session.engine();
+        let eng = engine_arc.lock().await;
+        if let Err(e) = persist_loaded_session(&eng) {
+            // Not `tracing`: interactive runs redirect it to
+            // `<config>/logs/agent.log`, so a failed save would be
+            // invisible and the user would believe the work was kept.
+            // The caller prints this once the terminal is restored.
+            app.exit_save_error = Some(e);
+        }
+    }
+
     match loop_err {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// The parts of a conversation that get written to disk.
+///
+/// Taken under the engine lock and written outside it: `save_session_full`
+/// re-reads the previous JSON, serializes the whole history and masks it
+/// before writing, which is far too much to do on the event-loop thread
+/// once it runs after every turn.
+struct SessionSnapshot {
+    id: String,
+    messages: Vec<agent_code_lib::llm::message::Message>,
+    cwd: String,
+    model: String,
+    turn_count: usize,
+    cost_usd: f64,
+    tokens_in: u64,
+    tokens_out: u64,
+    plan_mode: bool,
+}
+
+/// Copy the live conversation out of the engine, or `None` when there is
+/// nothing worth writing.
+///
+/// An empty conversation is skipped when it was never persisted: launching
+/// and quitting without asking anything should not leave a session for the
+/// picker to list. An emptied session that already has a file is different
+/// — skipping it leaves the pre-`/clear` conversation on disk, and the next
+/// `/resume` silently restores what the user cleared.
+fn session_snapshot(eng: &agent_code_lib::query::QueryEngine) -> Option<SessionSnapshot> {
+    let st = eng.state();
+    if st.messages.is_empty() && !agent_code_lib::services::session::session_exists(&st.session_id)
+    {
+        return None;
+    }
+    Some(SessionSnapshot {
+        id: st.session_id.clone(),
+        messages: st.messages.clone(),
+        cwd: st.cwd.clone(),
+        model: st.config.api.model.clone(),
+        turn_count: st.turn_count,
+        cost_usd: st.total_cost_usd,
+        tokens_in: st.total_usage.input_tokens,
+        tokens_out: st.total_usage.output_tokens,
+        plan_mode: st.plan_mode,
+    })
+}
+
+/// Write a snapshot to the sessions directory.
+///
+/// `/resume` reads that directory, so without this the picker can only
+/// ever list sessions created by `/fork` or a scheduled run — an
+/// interactive session was never persisted at all, and quitting lost it.
+///
+/// `save_session_full`, not `save_session`: the thin wrapper hardcodes
+/// `plan_mode = false` and zeroes the cost and token totals.
+fn write_session_snapshot(snap: &SessionSnapshot) -> Result<(), String> {
+    agent_code_lib::services::session::save_session_full(
+        &snap.id,
+        &snap.messages,
+        &snap.cwd,
+        &snap.model,
+        snap.turn_count,
+        snap.cost_usd,
+        snap.tokens_in,
+        snap.tokens_out,
+        snap.plan_mode,
+    )
+    .map(|_| ())
+}
+
+/// Persist the conversation currently loaded in the engine, if any.
+///
+/// Used at process exit and immediately before a `/resume` overwrites the
+/// engine in place. Without the pre-resume call, exit only ever sees the
+/// destination conversation and the one being left is never written.
+fn persist_loaded_session(eng: &agent_code_lib::query::QueryEngine) -> Result<(), String> {
+    if let Some(snap) = session_snapshot(eng) {
+        write_session_snapshot(&snap)?;
+    }
+    Ok(())
 }
 
 /// Snapshot the shared `TaskManager` as tasks-pane rows.
@@ -5229,6 +5357,218 @@ mod tests {
             cfg.sandbox.enabled,
             "--no-sandbox was carried into a locked project that enables the sandbox"
         );
+    }
+
+    /// Build a minimal engine whose state is the thing under test.
+    fn engine_with(messages: Vec<agent_code_lib::llm::message::Message>) -> QueryEngine {
+        use agent_code_lib::config::Config;
+        use agent_code_lib::output_styles::AgentKind;
+        use agent_code_lib::permissions::PermissionChecker;
+        use agent_code_lib::query::QueryEngineConfig;
+        use agent_code_lib::state::AppState;
+        use agent_code_lib::tools::registry::ToolRegistry;
+
+        let config = Config::default();
+        let permissions = PermissionChecker::from_config(&config.permissions);
+        let mut state = AppState::new(config);
+        state.session_id = "sess-persist-test".into();
+        state.cwd = "/tmp/project".into();
+        state.turn_count = 3;
+        state.total_cost_usd = 1.25;
+        state.plan_mode = true;
+        state.messages = messages;
+
+        QueryEngine::new(
+            std::sync::Arc::new(super::super::fake_engine::ScriptedProvider::new(Vec::new())),
+            ToolRegistry::default_tools(),
+            permissions,
+            state,
+            QueryEngineConfig {
+                max_turns: Some(1),
+                verbose: false,
+                unattended: true,
+                agent_kind: AgentKind::Main,
+            },
+        )
+    }
+
+    /// The whole point of #553: `/resume` reads the sessions directory,
+    /// and an interactive session never wrote to it, so the picker had
+    /// nothing to list. Asserts the round trip rather than the call.
+    #[test]
+    fn a_persisted_session_is_listable_afterwards() {
+        let _guard = crate::ui::test_locks::env();
+        let home = tempfile::tempdir().expect("tempdir");
+        // SAFETY: the env lock is held for the whole test.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", home.path()) };
+
+        let msg = agent_code_lib::llm::message::Message::User(
+            agent_code_lib::llm::message::UserMessage {
+                uuid: uuid::Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![agent_code_lib::llm::message::ContentBlock::Text {
+                    text: "hello".into(),
+                }],
+                is_meta: false,
+                is_compact_summary: false,
+            },
+        );
+        let eng = engine_with(vec![msg]);
+        let snap = session_snapshot(&eng).expect("non-empty conversation snapshots");
+        write_session_snapshot(&snap).expect("save");
+
+        let found = agent_code_lib::services::session::list_session_summaries(10);
+        let it = found
+            .iter()
+            .find(|s| s.id == "sess-persist-test")
+            .expect("the saved session was not listable — /resume would not see it");
+        assert_eq!(it.turn_count, 3);
+
+        let data =
+            agent_code_lib::services::session::load_session("sess-persist-test").expect("load");
+        assert_eq!(data.total_cost_usd, 1.25);
+        assert!(
+            data.plan_mode,
+            "plan_mode was dropped — `save_session` hardcodes false, so this must use \
+             `save_session_full`"
+        );
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+    }
+
+    /// Launching and quitting without asking anything should not leave a
+    /// session behind for the picker to list.
+    #[test]
+    fn an_empty_conversation_is_not_persisted() {
+        let _guard = crate::ui::test_locks::env();
+        let home = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", home.path()) };
+
+        assert!(
+            session_snapshot(&engine_with(Vec::new())).is_none(),
+            "an empty conversation produced a snapshot to write"
+        );
+
+        assert!(
+            agent_code_lib::services::session::list_session_summaries(10).is_empty(),
+            "an empty conversation was written to the sessions directory"
+        );
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+    }
+
+    fn user_msg(text: &str) -> agent_code_lib::llm::message::Message {
+        agent_code_lib::llm::message::Message::User(agent_code_lib::llm::message::UserMessage {
+            uuid: uuid::Uuid::new_v4(),
+            timestamp: String::new(),
+            content: vec![agent_code_lib::llm::message::ContentBlock::Text { text: text.into() }],
+            is_meta: false,
+            is_compact_summary: false,
+        })
+    }
+
+    /// A session that was already on disk and then `/clear`ed must still
+    /// produce a snapshot: skipping it leaves the pre-clear conversation
+    /// on disk for the next `/resume` to restore.
+    #[test]
+    fn an_emptied_previously_persisted_session_still_snapshots() {
+        let _guard = crate::ui::test_locks::env();
+        let home = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", home.path()) };
+
+        let eng = engine_with(vec![user_msg("keep me")]);
+        persist_loaded_session(&eng).expect("initial save");
+        assert!(
+            agent_code_lib::services::session::session_exists("sess-persist-test"),
+            "precondition: the session file must exist"
+        );
+
+        // Simulate `/clear`: messages gone, same session id.
+        let cleared = engine_with(Vec::new());
+        let snap = session_snapshot(&cleared)
+            .expect("a previously persisted empty session must still snapshot");
+        assert!(
+            snap.messages.is_empty(),
+            "the snapshot should carry the emptied transcript"
+        );
+        write_session_snapshot(&snap).expect("overwrite");
+
+        let data =
+            agent_code_lib::services::session::load_session("sess-persist-test").expect("load");
+        assert!(
+            data.messages.is_empty(),
+            "exit after /clear must overwrite the file; got {} messages",
+            data.messages.len()
+        );
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+    }
+
+    /// The resume commit path must call `persist_loaded_session` before
+    /// it overwrites `session_id`/`messages`. A behavioural unit test of
+    /// the helper cannot catch a missing call site; this pins the order
+    /// in the source so a regression of the P1 finding fails the gate.
+    #[test]
+    fn resume_path_persists_outgoing_before_identity_swap() {
+        let src = include_str!("run.rs");
+        let outgoing = src
+            .find("let outgoing_len = eng.state().messages.len();")
+            .expect("outgoing_len marker missing");
+        let after = &src[outgoing..];
+        let persist = after
+            .find("persist_loaded_session(&eng)")
+            .expect("resume path never persists the conversation being left");
+        let swap = after
+            .find("st.session_id = id.clone();")
+            .expect("session_id swap marker missing");
+        assert!(
+            persist < swap,
+            "persist_loaded_session must run before the identity swap"
+        );
+    }
+
+    /// `/resume` overwrites the engine in place. The conversation being
+    /// left must be written *before* that swap, or exit only ever sees
+    /// the destination and the outgoing work is lost.
+    #[test]
+    fn leaving_a_conversation_for_resume_writes_it_first() {
+        let _guard = crate::ui::test_locks::env();
+        let home = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", home.path()) };
+
+        let mut eng = engine_with(vec![user_msg("outgoing work")]);
+        // The pre-swap save that the resume path must perform.
+        persist_loaded_session(&eng).expect("save outgoing");
+
+        // Swap identity the way the resume path does.
+        {
+            let st = eng.state_mut();
+            st.session_id = "sess-destination".into();
+            st.messages = vec![user_msg("restored")];
+            st.turn_count = 1;
+        }
+        // Exit would now save only the destination.
+        persist_loaded_session(&eng).expect("save destination");
+
+        let outgoing = agent_code_lib::services::session::load_session("sess-persist-test")
+            .expect("outgoing session was never written — resume overwrote it in place first");
+        assert_eq!(outgoing.messages.len(), 1);
+        let text = match &outgoing.messages[0] {
+            agent_code_lib::llm::message::Message::User(u) => u
+                .content
+                .iter()
+                .find_map(|b| match b {
+                    agent_code_lib::llm::message::ContentBlock::Text { text } => {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .unwrap_or(""),
+            _ => "",
+        };
+        assert_eq!(text, "outgoing work");
+
+        let dest =
+            agent_code_lib::services::session::load_session("sess-destination").expect("dest");
+        assert_eq!(dest.messages.len(), 1);
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
     }
 
     /// Starting in a locked project emits "--no-sandbox ignored". If
