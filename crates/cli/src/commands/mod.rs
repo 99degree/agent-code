@@ -788,29 +788,51 @@ fn slash_needs_stdin_prompt(cmd: &str) -> bool {
 
 /// Slash-command entries for the Ctrl+P palette.
 ///
-/// Matches on command name (prefix), alias (prefix), or description
-/// (substring). Hidden commands are omitted. Sorted by name.
+/// Fuzzy-matches command name, aliases, and description (see
+/// [`crate::ui::fuzzy`]). Hidden commands are omitted. Ranked best-first.
 ///
 /// Description matching is **palette-only** — Tab complete uses
 /// [`complete_slash`] so `/hel` still resolves to `/help`.
 pub fn list_slash_for_palette(query: &str) -> Vec<(&'static str, &'static str)> {
-    let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
-    let mut out: Vec<(&'static str, &'static str)> = COMMANDS
+    let q = query.trim().trim_start_matches('/');
+    let candidates: Vec<(&'static str, &'static str)> = COMMANDS
         .iter()
         .filter(|c| !c.hidden)
-        .filter(|c| {
-            if q.is_empty() {
-                return true;
-            }
-            c.name.starts_with(&q)
-                || c.aliases.iter().any(|a| a.starts_with(q.as_str()))
-                || c.description.to_ascii_lowercase().contains(&q)
-        })
         .map(|c| (c.name, c.description))
         .collect();
-    out.sort_unstable_by_key(|(name, _)| *name);
-    out.dedup_by_key(|(name, _)| *name);
-    out
+    if q.is_empty() {
+        let mut out = candidates;
+        out.sort_unstable_by_key(|(name, _)| *name);
+        out.dedup_by_key(|(name, _)| *name);
+        return out;
+    }
+    // Score against name, best alias, and description. Canonical-name
+    // hits get a large bonus so typing `ag` prefers `agents` over `redo`
+    // (alias `again`, which can score higher as a shorter match).
+    // Description hits stay half weight.
+    const NAME_BONUS: i64 = 1_000_000;
+    let mut scored: Vec<(i64, &'static str, &'static str)> = Vec::new();
+    for c in COMMANDS.iter().filter(|c| !c.hidden) {
+        let mut best: Option<i64> =
+            crate::ui::fuzzy::fuzzy_score(q, c.name).map(|s| s + NAME_BONUS);
+        for a in c.aliases {
+            if let Some(s) = crate::ui::fuzzy::fuzzy_score(q, a) {
+                best = Some(best.map_or(s, |b| b.max(s)));
+            }
+        }
+        if let Some(s) = crate::ui::fuzzy::fuzzy_score(q, c.description) {
+            best = Some(best.map_or(s / 2, |b| b.max(s / 2)));
+        }
+        if let Some(s) = best {
+            scored.push((s, c.name, c.description));
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    scored.dedup_by_key(|(_, name, _)| *name);
+    scored
+        .into_iter()
+        .map(|(_, name, desc)| (name, desc))
+        .collect()
 }
 
 #[cfg(test)]
@@ -940,6 +962,22 @@ mod slash_lookup_tests {
             tab.is_empty() || tab.iter().all(|n| n.starts_with("conversation")),
             "Tab must not use description match: {tab:?}"
         );
+    }
+
+    #[test]
+    fn list_slash_for_palette_prefers_canonical_name_over_alias() {
+        // `ag` is a prefix of both `agents` (canonical) and `again`
+        // (alias of `redo`). Canonical must rank first.
+        let hits = list_slash_for_palette("ag");
+        let agents = hits.iter().position(|(n, _)| *n == "agents");
+        let redo = hits.iter().position(|(n, _)| *n == "redo");
+        assert!(agents.is_some(), "agents should match query `ag`: {hits:?}");
+        if let (Some(a), Some(r)) = (agents, redo) {
+            assert!(
+                a < r,
+                "canonical `agents` must rank above alias `again`/`redo`: {hits:?}"
+            );
+        }
     }
 }
 
