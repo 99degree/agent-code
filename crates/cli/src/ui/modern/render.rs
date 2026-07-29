@@ -140,6 +140,21 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     draw_input(frame, chunks[6], app);
     app.hit_registry
         .register(chunks[6], super::hit_rect::HitTarget::Composer);
+    if let Some(menu) = app.completion.as_ref() {
+        // Menu floats in the region above the composer (status/transcript),
+        // anchored to the composer's top edge so it never overwrites input.
+        // Do not clip to chunks[6] — that rect is the composer itself.
+        let composer = chunks[6];
+        let above = Rect {
+            x: composer.x,
+            y: area.y,
+            width: composer.width,
+            height: composer.y.saturating_sub(area.y),
+        };
+        if above.height > 0 {
+            super::completion::draw(frame, above, menu);
+        }
+    }
 
     if app.phase == Phase::Permission
         && let Some(modal) = app.front_modal().cloned()
