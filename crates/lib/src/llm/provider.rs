@@ -25,7 +25,7 @@ static LIVE_MODELS_CACHE: std::sync::OnceLock<
 /// Unified provider trait. Both Anthropic and OpenAI-compatible
 /// endpoints implement this.
 #[async_trait]
-pub trait Provider: Send + Sync {
+pub trait Provider: Send + Sync + std::any::Any {
     /// Human-readable provider name.
     fn name(&self) -> &str;
 
@@ -34,6 +34,9 @@ pub trait Provider: Send + Sync {
         &self,
         request: &ProviderRequest,
     ) -> Result<mpsc::Receiver<StreamEvent>, ProviderError>;
+
+    /// Downcast support for provider-specific configuration and tests.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Tool choice mode for controlling tool usage.
@@ -333,9 +336,23 @@ pub fn create_provider_from_config(
             WireFormat::Anthropic => std::sync::Arc::new(
                 crate::llm::anthropic::AnthropicProvider::new(base_url, &resolved_key),
             ),
-            WireFormat::OpenAiCompatible => std::sync::Arc::new(
-                crate::llm::openai::OpenAiProvider::new(base_url, &resolved_key),
-            ),
+            WireFormat::OpenAiCompatible => {
+                // Nemotron models emit tool calls as custom text markup rather
+                // than structured `tool_calls` deltas; route them through the
+                // Nemotron-aware provider regardless of which OpenAI-compatible
+                // endpoint serves them.
+                if crate::llm::nemotron::is_nemotron_model(model) {
+                    std::sync::Arc::new(crate::llm::openai::OpenAiProvider::new_nemotron(
+                        base_url,
+                        &resolved_key,
+                    ))
+                } else {
+                    std::sync::Arc::new(crate::llm::openai::OpenAiProvider::new(
+                        base_url,
+                        &resolved_key,
+                    ))
+                }
+            }
         },
     }
 }
@@ -1071,6 +1088,36 @@ mod tests {
             ProviderKind::Zhipu
         ));
     }
+    #[test]
+    fn create_provider_dispatches_nemotron_models() {
+        let config = crate::config::Config::default();
+
+        // Nemotron model on the NVIDIA endpoint gets the Nemotron-aware
+        // provider; a non-Nemotron NVIDIA model gets the plain OpenAI one.
+        let nemotron = create_provider_from_config(
+            "nvidia/nemotron-3-ultra-550b-a55b",
+            "https://integrate.api.nvidia.com/v1",
+            &config,
+        );
+        let openai_provider = create_provider_from_config(
+            "nvidia/meta/llama-3.3-70b-instruct",
+            "https://integrate.api.nvidia.com/v1",
+            &config,
+        );
+
+        let nemotron = nemotron
+            .as_any()
+            .downcast_ref::<crate::llm::openai::OpenAiProvider>()
+            .expect("nemotron should use the OpenAI-compatible provider");
+        assert!(nemotron.is_nemotron());
+
+        let openai_provider = openai_provider
+            .as_any()
+            .downcast_ref::<crate::llm::openai::OpenAiProvider>()
+            .expect("plain NVIDIA model should use the OpenAI-compatible provider");
+        assert!(!openai_provider.is_nemotron());
+    }
+
     #[test]
     fn test_get_provider_for_model() {
         // Case 1: Model is in the provider detected from base_url.

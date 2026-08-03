@@ -15,6 +15,7 @@ pub mod client;
 pub mod codex_auth;
 pub mod message;
 pub mod models_config;
+pub mod nemotron;
 pub mod normalize;
 pub mod novita;
 pub mod openai;

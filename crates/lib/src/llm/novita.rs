@@ -43,6 +43,10 @@ impl Provider for NovitaProvider {
         "novita"
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn stream(
         &self,
         request: &ProviderRequest,

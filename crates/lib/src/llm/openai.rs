@@ -13,6 +13,7 @@ use tracing::debug;
 
 use super::codex_auth::CodexChatGptAuth;
 use super::message::{ContentBlock, Message, StopReason, Usage};
+use super::nemotron::NemotronStreamParser;
 use super::provider::{Provider, ProviderError, ProviderRequest, ToolChoice};
 use super::stream::StreamEvent;
 use super::xai_auth::XaiOauthAuth;
@@ -35,6 +36,8 @@ enum OpenAiAuth {
 enum OpenAiApi {
     ChatCompletions,
     Responses,
+    /// Chat Completions with Nemotron's text-based tool-call parsing.
+    Nemotron,
 }
 
 impl OpenAiProvider {
@@ -79,6 +82,27 @@ impl OpenAiProvider {
             auth: OpenAiAuth::XaiOauth(auth),
             api: OpenAiApi::ChatCompletions,
         }
+    }
+
+    /// Nemotron models — Chat Completions with the same request body, but the
+    /// response stream is parsed for Nemotron's custom text-based tool calls.
+    pub fn new_nemotron(base_url: &str, api_key: &str) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .expect("failed to build HTTP client");
+
+        Self {
+            http,
+            base_url: base_url.trim_end_matches('/').to_string(),
+            auth: OpenAiAuth::ApiKey(api_key.to_string()),
+            api: OpenAiApi::Nemotron,
+        }
+    }
+
+    /// Whether this provider parses Nemotron-style text tool calls.
+    pub(crate) fn is_nemotron(&self) -> bool {
+        matches!(self.api, OpenAiApi::Nemotron)
     }
 
     /// Build the request body in OpenAI format.
@@ -374,6 +398,21 @@ impl OpenAiProvider {
         &self,
         request: &ProviderRequest,
     ) -> Result<mpsc::Receiver<StreamEvent>, ProviderError> {
+        self.stream_chat_completions_impl(request, false).await
+    }
+
+    async fn stream_nemotron(
+        &self,
+        request: &ProviderRequest,
+    ) -> Result<mpsc::Receiver<StreamEvent>, ProviderError> {
+        self.stream_chat_completions_impl(request, true).await
+    }
+
+    async fn stream_chat_completions_impl(
+        &self,
+        request: &ProviderRequest,
+        nemotron: bool,
+    ) -> Result<mpsc::Receiver<StreamEvent>, ProviderError> {
         let url = format!("{}/chat/completions", self.base_url);
         let body = self.build_body(request);
 
@@ -425,10 +464,20 @@ impl OpenAiProvider {
             };
         }
 
-        Ok(spawn_chat_completions_stream(
-            response,
-            request.cancel.clone(),
-        ))
+        if nemotron {
+            let tool_names: Vec<String> =
+                request.tools.iter().map(|t| t.name.to_string()).collect();
+            Ok(spawn_nemotron_stream(
+                response,
+                request.cancel.clone(),
+                tool_names,
+            ))
+        } else {
+            Ok(spawn_chat_completions_stream(
+                response,
+                request.cancel.clone(),
+            ))
+        }
     }
 
     async fn stream_responses(
@@ -495,6 +544,10 @@ impl Provider for OpenAiProvider {
         "openai"
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn stream(
         &self,
         request: &ProviderRequest,
@@ -502,6 +555,7 @@ impl Provider for OpenAiProvider {
         match self.api {
             OpenAiApi::ChatCompletions => self.stream_chat_completions(request).await,
             OpenAiApi::Responses => self.stream_responses(request).await,
+            OpenAiApi::Nemotron => self.stream_nemotron(request).await,
         }
     }
 }
@@ -691,6 +745,200 @@ async fn emit_pending_chat_tool_call(
         }))
         .await;
     current_tool_args.clear();
+}
+
+/// Stream parser for Nemotron models.
+///
+/// Identical to [`spawn_chat_completions_stream`] (same SSE shape, usage
+/// handling, and structured `tool_calls` deltas for endpoints that emit
+/// them), but `content` deltas are routed through
+/// [`NemotronStreamParser`] so tool calls emitted as custom text markup
+/// (`<function=...>` / `<function>...</function>` / `{"tool": ...}`) are
+/// converted into standard tool-use blocks.
+fn spawn_nemotron_stream(
+    response: reqwest::Response,
+    cancel: tokio_util::sync::CancellationToken,
+    tool_names: Vec<String>,
+) -> mpsc::Receiver<StreamEvent> {
+    let (tx, rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        let mut byte_stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut parser = NemotronStreamParser::new(tool_names);
+        let mut usage = Usage::default();
+        let mut stop_reason: Option<StopReason> = None;
+        let mut saw_tool_call = false;
+        let mut current_tool_id = String::new();
+        let mut current_tool_name = String::new();
+        let mut current_tool_args = String::new();
+
+        loop {
+            // On cancel, drop the byte stream to abort the HTTP connection.
+            let chunk_result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                chunk = byte_stream.next() => match chunk {
+                    Some(c) => c,
+                    None => break,
+                },
+            };
+            let chunk = match chunk_result {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+                    break;
+                }
+            };
+
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(pos) = buffer.find("\n\n") {
+                let event_text = buffer[..pos].to_string();
+                buffer = buffer[pos + 2..].to_string();
+
+                for data in sse_data_lines(&event_text) {
+                    if data == "[DONE]" {
+                        emit_pending_chat_tool_call(
+                            &tx,
+                            &mut current_tool_id,
+                            &mut current_tool_name,
+                            &mut current_tool_args,
+                        )
+                        .await;
+                        forward_nemotron_events(&tx, &mut saw_tool_call, parser.finish()).await;
+                        let _ = tx
+                            .send(StreamEvent::Done {
+                                usage: usage.clone(),
+                                stop_reason: Some(nemotron_stop_reason(stop_reason, saw_tool_call)),
+                            })
+                            .await;
+                        return;
+                    }
+
+                    let parsed: serde_json::Value = match serde_json::from_str(&data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+
+                    // Usage may arrive on its own trailing chunk (choices: [])
+                    // or attached to the final delta/finish chunk.
+                    merge_chat_usage(&mut usage, &parsed);
+
+                    let delta = match parsed
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("delta"))
+                    {
+                        Some(d) => d,
+                        None => continue,
+                    };
+
+                    if let Some(content) = delta.get("content").and_then(|c| c.as_str())
+                        && !content.is_empty()
+                    {
+                        forward_nemotron_events(&tx, &mut saw_tool_call, parser.push_text(content))
+                            .await;
+                    }
+
+                    if let Some(finish) = parsed
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("finish_reason"))
+                        .and_then(|f| f.as_str())
+                    {
+                        match finish {
+                            "stop" => stop_reason = Some(StopReason::EndTurn),
+                            "tool_calls" => stop_reason = Some(StopReason::ToolUse),
+                            "length" => stop_reason = Some(StopReason::MaxTokens),
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                        for tc in tool_calls {
+                            if let Some(func) = tc.get("function") {
+                                if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                                    if !current_tool_id.is_empty() && !current_tool_args.is_empty()
+                                    {
+                                        emit_pending_chat_tool_call(
+                                            &tx,
+                                            &mut current_tool_id,
+                                            &mut current_tool_name,
+                                            &mut current_tool_args,
+                                        )
+                                        .await;
+                                    }
+                                    current_tool_id = tc
+                                        .get("id")
+                                        .and_then(|i| i.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    current_tool_name = name.to_string();
+                                    current_tool_args.clear();
+                                }
+                                if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
+                                    current_tool_args.push_str(args);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Stream ended without [DONE]: flush any remaining text, including
+        // an incomplete tool-call block, then finish.
+        emit_pending_chat_tool_call(
+            &tx,
+            &mut current_tool_id,
+            &mut current_tool_name,
+            &mut current_tool_args,
+        )
+        .await;
+        forward_nemotron_events(&tx, &mut saw_tool_call, parser.finish()).await;
+        let _ = tx
+            .send(StreamEvent::Done {
+                usage,
+                stop_reason: Some(nemotron_stop_reason(stop_reason, saw_tool_call)),
+            })
+            .await;
+    });
+
+    rx
+}
+
+/// Resolve the final stop reason for a Nemotron turn.
+///
+/// The NIM endpoint reports a plain `stop` finish even when the model
+/// emitted a text-form tool call, so any parsed tool use wins over the
+/// wire finish reason. The endpoint's `tool_calls` / `length` reasons are
+/// otherwise preserved.
+fn nemotron_stop_reason(wire: Option<StopReason>, saw_tool_call: bool) -> StopReason {
+    if saw_tool_call {
+        StopReason::ToolUse
+    } else {
+        wire.unwrap_or(StopReason::EndTurn)
+    }
+}
+
+/// Forward parser events, tracking whether any of them is a tool use so the
+/// final `stop_reason` reflects tool usage even when the endpoint reports a
+/// plain `stop` finish (text-based tool calls look like ordinary text to the
+/// server).
+async fn forward_nemotron_events(
+    tx: &mpsc::Sender<StreamEvent>,
+    saw_tool_call: &mut bool,
+    events: Vec<StreamEvent>,
+) {
+    for ev in events {
+        if matches!(
+            &ev,
+            StreamEvent::ContentBlockComplete(ContentBlock::ToolUse { .. })
+        ) {
+            *saw_tool_call = true;
+        }
+        let _ = tx.send(ev).await;
+    }
 }
 
 fn spawn_responses_stream(
@@ -1101,6 +1349,66 @@ mod tests {
             stop_reason: None,
             request_id: None,
         })
+    }
+
+    #[test]
+    fn nemotron_stop_reason_prefers_tool_use() {
+        // Text tool calls surface as a plain `stop` finish on the wire.
+        assert_eq!(
+            nemotron_stop_reason(Some(StopReason::EndTurn), true),
+            StopReason::ToolUse
+        );
+        assert_eq!(nemotron_stop_reason(None, true), StopReason::ToolUse);
+        // Endpoint-provided reasons are preserved when no tool was parsed.
+        assert_eq!(
+            nemotron_stop_reason(Some(StopReason::EndTurn), false),
+            StopReason::EndTurn
+        );
+        assert_eq!(
+            nemotron_stop_reason(Some(StopReason::MaxTokens), false),
+            StopReason::MaxTokens
+        );
+        assert_eq!(nemotron_stop_reason(None, false), StopReason::EndTurn);
+    }
+
+    #[test]
+    fn nemotron_provider_builds_chat_completions_body() {
+        let provider =
+            OpenAiProvider::new_nemotron("https://integrate.api.nvidia.com/v1", "test-key");
+        assert!(provider.is_nemotron());
+
+        let request = ProviderRequest {
+            messages: vec![user_message(vec![ContentBlock::Text {
+                text: "hello".to_string(),
+            }])],
+            system_prompt: "be useful".to_string(),
+            tools: vec![ToolSchema {
+                name: "read_file",
+                description: "Read a file",
+                input_schema: serde_json::json!({"type":"object"}),
+            }],
+            model: "nvidia/nemotron-3-ultra-550b-a55b".to_string(),
+            max_tokens: 2048,
+            temperature: None,
+            enable_caching: false,
+            tool_choice: ToolChoice::Auto,
+            metadata: None,
+            cancel: CancellationToken::new(),
+        };
+
+        let body = provider.build_body(&request);
+        // Nemotron uses the classic max_tokens param, not max_completion_tokens.
+        assert_eq!(body["max_tokens"], 2048);
+        assert!(body.get("max_completion_tokens").is_none());
+        // Tools are sent in standard OpenAI format.
+        assert_eq!(body["tools"][0]["function"]["name"], "read_file");
+        assert_eq!(body["model"], "nvidia/nemotron-3-ultra-550b-a55b");
+    }
+
+    #[test]
+    fn non_nemotron_provider_is_not_nemotron() {
+        let provider = OpenAiProvider::new("https://example.test/v1", "test-key");
+        assert!(!provider.is_nemotron());
     }
 
     #[test]

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Nemotron models use their native text-based tool-call format**: Nemotron models on the NVIDIA endpoint (nemotron-3-*, llama-3.3-nemotron-*, nvidia-nemotron-*) emit tool calls as custom text markup (`<function=…><parameter name=…>…</parameter></function>`, the alternate `<function>…</function></tool_call>` form, or `{"tool": …}` JSON) instead of structured `tool_calls` deltas. The OpenAI-compatible provider now streams those calls into the standard tool loop, strips `<think>…</think>` reasoning into thinking blocks, coerces tag-form argument values to typed JSON (numbers/bools stay numbers/bools), and gates parsed calls against the request's tool list so stray markup in prose stays plain text. Tool calls parsed from text are reported with `stop_reason = tool_use` even though the endpoint reports a plain `stop` finish.
+
 ### Fixed
 
 - **Steering typing indicator no longer produces visual garbage** (`repl`): the mid-turn `↳` indicator was written to stderr while streaming output goes to stdout; since carriage-return is stream-relative, each keystroke appended a new line instead of overwriting. The indicator now writes to stdout (same stream as output) and caps display width at 60 characters.
