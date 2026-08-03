@@ -809,6 +809,7 @@ impl QueryEngine {
         'turn: for turn in 0..max_turns {
             self.state.turn_count = base_turns + turn + 1;
             self.state.is_query_active = true;
+            self.state.using_alt_key = false;
             sink.on_turn_start(turn + 1);
 
             // Steering: drain any input submitted mid-turn and inject it
@@ -1110,6 +1111,33 @@ impl QueryEngine {
                                     "LLM call failed ({e}); retrying in {}ms",
                                     after.as_millis()
                                 );
+
+                                // On a rate-limit error (429), try swapping to the
+                                // fallback API key for this turn. Only swap once
+                                // per turn to avoid ping-ponging between keys.
+                                if matches!(
+                                    retryable,
+                                    crate::llm::retry::RetryableError::RateLimited { .. }
+                                ) && !self.state.using_alt_key
+                                    && let Some(alt_key) = crate::llm::provider::resolve_api_key_alt(
+                                        self.state.provider_kind,
+                                        &self.state.config,
+                                    )
+                                {
+                                    let new_provider =
+                                        crate::llm::provider::create_provider_from_config(
+                                            &model,
+                                            &self.state.config.api.base_url,
+                                            &self.state.config,
+                                            Some(alt_key),
+                                        );
+                                    self.set_provider_sync(new_provider);
+                                    self.state.using_alt_key = true;
+                                    tracing::info!(
+                                        "429 rate-limit: switching to fallback API key for this turn"
+                                    );
+                                }
+
                                 // Backoff can reach 60s — racing the cancel
                                 // token keeps Ctrl+C responsive during it
                                 // (previously the sleep ran to completion and

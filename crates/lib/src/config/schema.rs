@@ -287,6 +287,11 @@ pub struct ApiConfig {
     /// credential instead of a different provider's (e.g. a Google key
     /// is never sent to NVIDIA). Populated by the setup wizard; not
     /// dumped via `--print-config`.
+    ///
+    /// Alternative (429-fallback) keys use the `-alt` suffix, e.g.
+    /// `"nvidia-alt"` or `"kilo-alt"`. The primary key's env form is
+    /// `<PROVIDER>_API_KEY_2`. Alternative keys are never sent to a
+    /// different provider — they are scoped per-provider like primary keys.
     #[serde(default, skip_serializing)]
     pub provider_keys: std::collections::HashMap<String, String>,
     /// Optional Codex home directory for `auth_mode = "codex_chatgpt"`.

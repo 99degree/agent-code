@@ -782,6 +782,7 @@ async fn async_main() -> anyhow::Result<()> {
             &config.api.model,
             &config.api.base_url,
             &config,
+            None,
         ),
     };
     tracing::info!(
@@ -1087,6 +1088,7 @@ async fn async_main() -> anyhow::Result<()> {
                     &engine.state().config.api.model,
                     &engine.state().config.api.base_url,
                     &engine.state().config,
+                    None,
                 );
                 engine.set_provider_sync(new_provider);
                 eprintln!(

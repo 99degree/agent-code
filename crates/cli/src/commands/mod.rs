@@ -835,6 +835,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         new_model,
                         final_base_url,
                         &engine.state().config,
+                        None,
                     );
                     engine.set_provider_sync(new_provider);
                     tracing::info!("[model] Provider swapped to match new model");
@@ -953,6 +954,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                                     &chosen,
                                     final_base_url,
                                     &engine.state().config,
+                                    None,
                                 );
                             engine.set_provider_sync(new_provider);
                             tracing::info!("[model] Provider swapped to match new model");
@@ -1077,6 +1079,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                                         &model,
                                         &base_url,
                                         &engine.state().config,
+                                        None,
                                     );
                                 engine.set_provider_sync(new_provider);
                                 tracing::info!("[resume] Provider swapped to match restored model");

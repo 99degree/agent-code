@@ -151,6 +151,10 @@ pub struct AppState {
     /// dropped head. `persistable_messages` reassembles the two for saving.
     /// Empty for a fresh session (nothing was truncated).
     pub full_history: Vec<Message>,
+    /// Whether the current turn is using the fallback API key (set after a
+    /// 429 rate-limit retry). Reset to `false` at the start of each turn.
+    /// Prevents flipping back and forth between primary and alt keys.
+    pub using_alt_key: bool,
 }
 
 impl AppState {
@@ -186,6 +190,7 @@ impl AppState {
             pre_fast_model: None,
             provider_kind,
             full_history: Vec::new(),
+            using_alt_key: false,
         }
     }
 

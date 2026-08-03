@@ -23,6 +23,7 @@ pub struct OpenAiProvider {
     base_url: String,
     auth: OpenAiAuth,
     api: OpenAiApi,
+    alt_api_key: Option<String>,
 }
 
 enum OpenAiAuth {
@@ -38,7 +39,7 @@ enum OpenAiApi {
 }
 
 impl OpenAiProvider {
-    pub fn new(base_url: &str, api_key: &str) -> Self {
+    pub fn new(base_url: &str, api_key: &str, alt_key: Option<String>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
@@ -49,6 +50,7 @@ impl OpenAiProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: OpenAiAuth::ApiKey(api_key.to_string()),
             api: OpenAiApi::ChatCompletions,
+            alt_api_key: alt_key,
         }
     }
 
@@ -63,6 +65,7 @@ impl OpenAiProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: OpenAiAuth::CodexChatGpt(auth),
             api: OpenAiApi::Responses,
+            alt_api_key: None,
         }
     }
 
@@ -78,7 +81,13 @@ impl OpenAiProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: OpenAiAuth::XaiOauth(auth),
             api: OpenAiApi::ChatCompletions,
+            alt_api_key: None,
         }
+    }
+
+    /// Get the alternative API key, if set.
+    pub fn alt_api_key(&self) -> Option<&str> {
+        self.alt_api_key.as_deref()
     }
 
     /// Build the request body in OpenAI format.
@@ -1105,7 +1114,7 @@ mod tests {
 
     #[test]
     fn responses_body_maps_messages_tools_and_tool_results() {
-        let provider = OpenAiProvider::new("https://example.test/v1", "test-key");
+        let provider = OpenAiProvider::new("https://example.test/v1", "test-key", None);
         let request = ProviderRequest {
             messages: vec![
                 user_message(vec![ContentBlock::Text {
@@ -1151,7 +1160,7 @@ mod tests {
 
     #[test]
     fn responses_body_omits_codex_unsupported_token_limit_fields() {
-        let provider = OpenAiProvider::new("https://example.test/v1", "test-key");
+        let provider = OpenAiProvider::new("https://example.test/v1", "test-key", None);
         let request = ProviderRequest {
             messages: vec![user_message(vec![ContentBlock::Text {
                 text: "hello".to_string(),

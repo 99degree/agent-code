@@ -20,10 +20,11 @@ pub struct AnthropicProvider {
     http: reqwest::Client,
     base_url: String,
     api_key: String,
+    alt_api_key: Option<String>,
 }
 
 impl AnthropicProvider {
-    pub fn new(base_url: &str, api_key: &str) -> Self {
+    pub fn new(base_url: &str, api_key: &str, alt_key: Option<String>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
@@ -33,7 +34,12 @@ impl AnthropicProvider {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
+            alt_api_key: alt_key,
         }
+    }
+
+    pub fn alt_api_key(&self) -> Option<&str> {
+        self.alt_api_key.as_deref()
     }
 }
 

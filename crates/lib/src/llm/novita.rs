@@ -17,14 +17,16 @@ use super::stream::StreamEvent;
 pub struct NovitaProvider {
     base_url: String,
     api_key: String,
+    alt_api_key: Option<String>,
 }
 
 impl NovitaProvider {
     /// Create a new Novita provider from the given base URL and API key.
-    pub fn new(base_url: &str, api_key: &str) -> Self {
+    pub fn new(base_url: &str, api_key: &str, alt_key: Option<String>) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
+            alt_api_key: alt_key,
         }
     }
 
@@ -34,6 +36,11 @@ impl NovitaProvider {
 
     pub fn api_key(&self) -> &str {
         &self.api_key
+    }
+
+    /// Get the alternative API key, if set.
+    pub fn alt_api_key(&self) -> Option<&str> {
+        self.alt_api_key.as_deref()
     }
 }
 
@@ -47,7 +54,11 @@ impl Provider for NovitaProvider {
         &self,
         request: &ProviderRequest,
     ) -> Result<mpsc::Receiver<StreamEvent>, ProviderError> {
-        let openai_provider = super::openai::OpenAiProvider::new(self.base_url(), self.api_key());
+        let openai_provider = super::openai::OpenAiProvider::new(
+            self.base_url(),
+            self.api_key(),
+            self.alt_api_key.clone(),
+        );
         openai_provider.stream(request).await
     }
 }
@@ -58,7 +69,7 @@ mod tests {
 
     #[test]
     fn test_new_with_base_url_and_api_key() {
-        let provider = NovitaProvider::new("https://custom.novita.ai/v1", "test-key");
+        let provider = NovitaProvider::new("https://custom.novita.ai/v1", "test-key", None);
         assert_eq!(provider.base_url(), "https://custom.novita.ai/v1");
         assert_eq!(provider.api_key(), "test-key");
     }

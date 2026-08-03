@@ -488,195 +488,28 @@ id = "mistralai/devstral-2512"
 name = "Devstral"
 
 # ============================================================================
-# OPENCODE (Zen - paid)
+# OPENCODE (Zen - free models only)
 # ============================================================================
+# Only the $0.00/1M models from opencode.ai/zen/v1/models are listed.
 [[opencode]]
 id = "big-pickle"
 name = "Big Pickle"
-
-[[opencode]]
-id = "claude-fable-5"
-name = "Claude Fable 5"
-
-[[opencode]]
-id = "claude-haiku-4-5"
-name = "Claude Haiku 4.5"
-
-[[opencode]]
-id = "claude-opus-4-1"
-name = "Claude Opus 4.1"
-
-[[opencode]]
-id = "claude-opus-4-5"
-name = "Claude Opus 4.5"
-
-[[opencode]]
-id = "claude-opus-4-6"
-name = "Claude Opus 4.6"
-
-[[opencode]]
-id = "claude-opus-4-7"
-name = "Claude Opus 4.7"
-
-[[opencode]]
-id = "claude-opus-4-8"
-name = "Claude Opus 4.8"
-
-[[opencode]]
-id = "claude-sonnet-4"
-name = "Claude Sonnet 4"
-
-[[opencode]]
-id = "claude-sonnet-4-5"
-name = "Claude Sonnet 4.5"
-
-[[opencode]]
-id = "claude-sonnet-4-6"
-name = "Claude Sonnet 4.6"
-
-[[opencode]]
-id = "claude-sonnet-5"
-name = "Claude Sonnet 5"
-
-[[opencode]]
-id = "deepseek-v4-flash"
-name = "DeepSeek V4 Flash"
 
 [[opencode]]
 id = "deepseek-v4-flash-free"
 name = "DeepSeek V4 Flash Free"
 
 [[opencode]]
-id = "deepseek-v4-pro"
-name = "DeepSeek V4 Pro"
+id = "laguna-s-2.1-free"
+name = "Laguna S 2.1 Free"
 
 [[opencode]]
-id = "gemini-3-flash"
-name = "Gemini 3 Flash"
-
-[[opencode]]
-id = "gemini-3.1-pro"
-name = "Gemini 3.1 Pro"
-
-[[opencode]]
-id = "gemini-3.5-flash"
-name = "Gemini 3.5 Flash"
-
-[[opencode]]
-id = "glm-5"
-name = "GLM-5"
-
-[[opencode]]
-id = "glm-5.1"
-name = "GLM-5.1"
-
-[[opencode]]
-id = "glm-5.2"
-name = "GLM-5.2"
-
-[[opencode]]
-id = "hy3-free"
-name = "Hy3 Free"
-
-[[opencode]]
-id = "gpt-5"
-name = "GPT-5"
-
-[[opencode]]
-id = "gpt-5-codex"
-name = "GPT-5 Codex"
-
-[[opencode]]
-id = "gpt-5-nano"
-name = "GPT-5 Nano"
-
-[[opencode]]
-id = "gpt-5.1"
-name = "GPT-5.1"
-
-[[opencode]]
-id = "gpt-5.1-codex"
-name = "GPT-5.1 Codex"
-
-[[opencode]]
-id = "gpt-5.1-codex-max"
-name = "GPT-5.1 Codex Max"
-
-[[opencode]]
-id = "gpt-5.1-codex-mini"
-name = "GPT-5.1 Codex Mini"
-
-[[opencode]]
-id = "gpt-5.2"
-name = "GPT-5.2"
-
-[[opencode]]
-id = "gpt-5.2-codex"
-name = "GPT-5.2 Codex"
-
-[[opencode]]
-id = "gpt-5.3-codex"
-name = "GPT-5.3 Codex"
-
-[[opencode]]
-id = "gpt-5.4"
-name = "GPT-5.4"
-
-[[opencode]]
-id = "gpt-5.4-mini"
-name = "GPT-5.4 Mini"
-
-[[opencode]]
-id = "gpt-5.4-nano"
-name = "GPT-5.4 Nano"
-
-[[opencode]]
-id = "gpt-5.4-pro"
-name = "GPT-5.4 Pro"
-
-[[opencode]]
-id = "gpt-5.5"
-name = "GPT-5.5"
-
-[[opencode]]
-id = "gpt-5.5-pro"
-name = "GPT-5.5 Pro"
-
-[[opencode]]
-id = "grok-4.5"
-name = "Grok 4.5"
-
-[[opencode]]
-id = "grok-build-0.1"
-name = "Grok Build 0.1"
-
-[[opencode]]
-id = "kimi-k2.5"
-name = "Kimi K2.5"
-
-[[opencode]]
-id = "kimi-k2.6"
-name = "Kimi K2.6"
-
-[[opencode]]
-id = "kimi-k2.7-code"
-name = "Kimi K2.7 Code"
+id = "ling-3.0-flash-free"
+name = "Ling 3.0 Flash Free"
 
 [[opencode]]
 id = "mimo-v2.5-free"
 name = "MiMo V2.5 Free"
-
-[[opencode]]
-id = "minimax-m2.5"
-name = "MiniMax M2.5"
-
-[[opencode]]
-id = "minimax-m2.7"
-name = "MiniMax M2.7"
-
-[[opencode]]
-id = "minimax-m3"
-name = "MiniMax M3"
 
 [[opencode]]
 id = "nemotron-3-ultra-free"
@@ -685,14 +518,6 @@ name = "Nemotron 3 Ultra Free"
 [[opencode]]
 id = "north-mini-code-free"
 name = "North Mini Code Free"
-
-[[opencode]]
-id = "qwen3.5-plus"
-name = "Qwen3.5 Plus"
-
-[[opencode]]
-id = "qwen3.6-plus"
-name = "Qwen3.6 Plus"
 
 # ============================================================================
 # OPENCODE-GO (free tier)
@@ -778,13 +603,43 @@ name = "DeepSeek V4"
 # ============================================================================
 # KILO
 # ============================================================================
+# Free models only (isFree: true). IDs use provider/model:free format from
+# the Kilo Gateway API (https://api.kilo.ai/api/gateway/models).
 [[kilo]]
-id = "kilo-alpha"
-name = "Kilo Alpha"
+id = "kilo-auto/free"
+name = "Kilo Auto (Free)"
 
 [[kilo]]
-id = "kilo-beta"
-name = "Kilo Beta"
+id = "kilo-auto"
+name = "Kilo Auto (Stealth)"
+
+[[kilo]]
+id = "inclusionai/ling-3.0-flash:free"
+name = "Ling 3.0 Flash (Free)"
+
+[[kilo]]
+id = "poolside/laguna-s-2.1:free"
+name = "Laguna S 2.1 (Free)"
+
+[[kilo]]
+id = "poolside/laguna-xs-2.1:free"
+name = "Laguna XS 2.1 (Free)"
+
+[[kilo]]
+id = "stepfun/step-3.7-flash:free"
+name = "Step 3.7 Flash (Free)"
+
+[[kilo]]
+id = "cohere/north-mini-code:free"
+name = "North Mini Code (Free)"
+
+[[kilo]]
+id = "nvidia/nemotron-3-ultra-550b-a55b:free"
+name = "Nemotron 3 Ultra (Free)"
+
+[[kilo]]
+id = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+name = "Nemotron 3 Nano Omni (Free)"
 
 # ============================================================================
 # NOVITA

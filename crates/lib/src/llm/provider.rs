@@ -289,6 +289,10 @@ pub async fn models_for_provider_filtered(
 ///    provider (`AgentCode` / `OpenAiCompatible`), which owns
 ///    `AGENT_CODE_API_KEY`. A concrete provider (e.g. NVIDIA) must use
 ///    its own key — we never send a different provider's key to it.
+///
+/// Alternative keys: set `<PROVIDER>_API_KEY_2` env or a
+/// `provider_keys.<provider>-alt` config entry (e.g. `nvidia-alt`).
+/// These are consumed only on a 429 retry via [`resolve_api_key_alt`].
 pub fn resolve_api_key(kind: ProviderKind, config: &crate::config::Config) -> Option<String> {
     // 1. Provider-specific env var.
     if let Some(key) = kind.api_key_from_env() {
@@ -310,31 +314,57 @@ pub fn resolve_api_key(kind: ProviderKind, config: &crate::config::Config) -> Op
     None
 }
 
+/// Resolve an *alternative* API key for a provider, used as a fallback
+/// when the primary key is rate-limited (429). Mirrors [`resolve_api_key`]
+/// but consults the secondary env var / config key (`<provider>2`), so the
+/// alternative credential is still scoped to this provider only — never a
+/// different provider's key.
+///
+/// 1. The provider-specific alt env var (e.g. `NVIDIA_API_KEY2`).
+/// 2. A per-provider alt key from config (`config.api.provider_keys[<kind>2]`).
+pub fn resolve_api_key_alt(kind: ProviderKind, config: &crate::config::Config) -> Option<String> {
+    // 1. Provider-specific alt env var.
+    if let Some(key) = kind.api_key_from_env_alt() {
+        return Some(key);
+    }
+    // 2. Per-provider alt key from config (e.g. `provider_keys.nvidia2`).
+    let alt_key = format!("{}-alt", kind.toml_key());
+    if let Some(key) = config.api.provider_keys.get(&alt_key)
+        && !key.is_empty()
+    {
+        return Some(key.clone());
+    }
+    None
+}
+
 /// Create a provider from config (model, base_url). The API key is
 /// resolved per-provider via [`resolve_api_key`], so each provider uses
 /// its own credential (env var, then per-provider config key) instead of
-/// a different provider's key.
+/// a different provider's key. `alt_key`, when `Some`, is the secondary
+/// credential used after a 429 rate-limit retry (see [`resolve_api_key_alt`]).
 pub fn create_provider_from_config(
     model: &str,
     base_url: &str,
     config: &crate::config::Config,
+    alt_key: Option<String>,
 ) -> std::sync::Arc<dyn Provider> {
     let kind = detect_provider(model, base_url);
     let resolved_key = resolve_api_key(kind, config).unwrap_or_default();
     match kind {
         ProviderKind::AzureOpenAi => std::sync::Arc::new(
-            crate::llm::azure_openai::AzureOpenAiProvider::new(base_url, &resolved_key),
+            crate::llm::azure_openai::AzureOpenAiProvider::new(base_url, &resolved_key, alt_key),
         ),
         ProviderKind::Novita => std::sync::Arc::new(crate::llm::novita::NovitaProvider::new(
             base_url,
             &resolved_key,
+            alt_key,
         )),
         _ => match kind.wire_format() {
             WireFormat::Anthropic => std::sync::Arc::new(
-                crate::llm::anthropic::AnthropicProvider::new(base_url, &resolved_key),
+                crate::llm::anthropic::AnthropicProvider::new(base_url, &resolved_key, alt_key),
             ),
             WireFormat::OpenAiCompatible => std::sync::Arc::new(
-                crate::llm::openai::OpenAiProvider::new(base_url, &resolved_key),
+                crate::llm::openai::OpenAiProvider::new(base_url, &resolved_key, alt_key),
             ),
         },
     }
@@ -439,6 +469,9 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     if url_lower.contains("novita.ai") {
         return ProviderKind::Novita;
     }
+    if url_lower.contains("kilo.ai") {
+        return ProviderKind::Kilo;
+    }
     if url_lower.contains("localhost") || url_lower.contains("127.0.0.1") {
         return ProviderKind::OpenAiCompatible;
     }
@@ -526,7 +559,7 @@ pub enum ProviderKind {
     Cohere,
     Perplexity,
     Nvidia,
-    /// Kilo AI (OpenAI-compatible endpoint https://api.kilo.ai).
+    /// Kilo AI (OpenAI-compatible gateway https://api.kilo.ai/api/gateway).
     Kilo,
     Novita,
     OpenAiCompatible,
@@ -606,6 +639,31 @@ impl ProviderKind {
         }
     }
 
+    /// Get the *alternative* API key from environment (used as a 429
+    /// rate-limit fallback). Consults `<PRIMARY_ENV>_2` (e.g.
+    /// `NVIDIA_API_KEY2`), plus provider-specific alt fallbacks.
+    pub fn api_key_from_env_alt(&self) -> Option<String> {
+        // Primary-alt env var: `<ENV>_2`.
+        if let Ok(key) = std::env::var(format!("{}_2", self.env_var_name()))
+            && !key.is_empty()
+        {
+            return Some(key);
+        }
+        // Provider-specific alt fallbacks.
+        match self {
+            Self::OpenCode => std::env::var("OPENCODE_API_KEY2")
+                .ok()
+                .filter(|k| !k.is_empty()),
+            Self::OpenCodeGo => std::env::var("OPENCODE2_API_KEY2")
+                .ok()
+                .filter(|k| !k.is_empty()),
+            Self::Kilo => std::env::var("KILO_API_KEY2")
+                .ok()
+                .filter(|k| !k.is_empty()),
+            _ => None,
+        }
+    }
+
     /// Which wire format this provider uses.
     pub fn wire_format(&self) -> WireFormat {
         match self {
@@ -678,7 +736,7 @@ impl ProviderKind {
             Self::Cohere => Some("https://api.cohere.com/v2"),
             Self::Perplexity => Some("https://api.perplexity.ai"),
             Self::Nvidia => Some("https://integrate.api.nvidia.com/v1"),
-            Self::Kilo => Some("https://api.kilo.ai"),
+            Self::Kilo => Some("https://api.kilo.ai/api/gateway"),
             // These require user-supplied URLs.
             Self::Bedrock
             | Self::Vertex

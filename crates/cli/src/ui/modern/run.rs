@@ -332,6 +332,7 @@ pub(super) async fn event_loop(
                                     &name,
                                     &final_base_url,
                                     &eng.state().config,
+                                    None,
                                 );
                             eng.set_provider_sync(new_provider);
                             tracing::info!("[model] Provider swapped to match new model");

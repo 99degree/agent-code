@@ -1173,6 +1173,7 @@ impl App {
                     &engine.state().config.api.model,
                     &engine.state().config.api.base_url,
                     &engine.state().config,
+                    None,
                 );
                 engine.set_provider_sync(new_provider);
 

@@ -446,7 +446,7 @@ async fn run_subagent_in_process(
         config.api.auth_mode = *auth_mode;
     }
 
-    let llm = create_provider_from_config(&config.api.model, &config.api.base_url, &config);
+    let llm = create_provider_from_config(&config.api.model, &config.api.base_url, &config, None);
 
     // Build tool registry with visibility filtering from the definition.
     let mut tools = ToolRegistry::default_tools();

@@ -23,10 +23,11 @@ pub struct AzureOpenAiProvider {
     base_url: String,
     api_key: String,
     api_version: String,
+    alt_api_key: Option<String>,
 }
 
 impl AzureOpenAiProvider {
-    pub fn new(base_url: &str, api_key: &str) -> Self {
+    pub fn new(base_url: &str, api_key: &str, alt_key: Option<String>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
@@ -40,7 +41,12 @@ impl AzureOpenAiProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             api_version,
+            alt_api_key: alt_key,
         }
+    }
+
+    pub fn alt_api_key(&self) -> Option<&str> {
+        self.alt_api_key.as_deref()
     }
 
     /// Build the request body in OpenAI format, but without the `model` field
