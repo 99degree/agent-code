@@ -15,7 +15,7 @@ use super::codex_auth::CodexChatGptAuth;
 use super::message::{ContentBlock, Message, StopReason, Usage};
 use super::nemotron::NemotronStreamParser;
 use super::provider::{Provider, ProviderError, ProviderRequest, ToolChoice};
-use super::stream::StreamEvent;
+use super::stream::{StreamEvent, stream_timeout_error, wait_for_stream_timeout};
 use super::xai_auth::XaiOauthAuth;
 
 /// OpenAI Chat Completions provider (GPT, Groq, Together, DeepSeek, etc.).
@@ -471,11 +471,13 @@ impl OpenAiProvider {
                 response,
                 request.cancel.clone(),
                 tool_names,
+                request.stream_timeout,
             ))
         } else {
             Ok(spawn_chat_completions_stream(
                 response,
                 request.cancel.clone(),
+                request.stream_timeout,
             ))
         }
     }
@@ -534,7 +536,11 @@ impl OpenAiProvider {
             };
         }
 
-        Ok(spawn_responses_stream(response, request.cancel.clone()))
+        Ok(spawn_responses_stream(
+            response,
+            request.cancel.clone(),
+            request.stream_timeout,
+        ))
     }
 }
 
@@ -579,6 +585,7 @@ fn retry_after_ms(response: &reqwest::Response, default_ms: u64) -> u64 {
 fn spawn_chat_completions_stream(
     response: reqwest::Response,
     cancel: tokio_util::sync::CancellationToken,
+    stream_timeout: Option<std::time::Duration>,
 ) -> mpsc::Receiver<StreamEvent> {
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(async move {
@@ -599,6 +606,12 @@ fn spawn_chat_completions_stream(
                     Some(c) => c,
                     None => break,
                 },
+                _ = wait_for_stream_timeout(stream_timeout) => {
+                    let _ = tx
+                        .send(StreamEvent::Error(stream_timeout_error(stream_timeout)))
+                        .await;
+                    break;
+                }
             };
             let chunk = match chunk_result {
                 Ok(c) => c,
@@ -759,6 +772,7 @@ fn spawn_nemotron_stream(
     response: reqwest::Response,
     cancel: tokio_util::sync::CancellationToken,
     tool_names: Vec<String>,
+    stream_timeout: Option<std::time::Duration>,
 ) -> mpsc::Receiver<StreamEvent> {
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(async move {
@@ -781,6 +795,12 @@ fn spawn_nemotron_stream(
                     Some(c) => c,
                     None => break,
                 },
+                _ = wait_for_stream_timeout(stream_timeout) => {
+                    let _ = tx
+                        .send(StreamEvent::Error(stream_timeout_error(stream_timeout)))
+                        .await;
+                    break;
+                }
             };
             let chunk = match chunk_result {
                 Ok(c) => c,
@@ -944,6 +964,7 @@ async fn forward_nemotron_events(
 fn spawn_responses_stream(
     response: reqwest::Response,
     cancel: tokio_util::sync::CancellationToken,
+    stream_timeout: Option<std::time::Duration>,
 ) -> mpsc::Receiver<StreamEvent> {
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(async move {
@@ -960,6 +981,12 @@ fn spawn_responses_stream(
                     Some(c) => c,
                     None => break,
                 },
+                _ = wait_for_stream_timeout(stream_timeout) => {
+                    let _ = tx
+                        .send(StreamEvent::Error(stream_timeout_error(stream_timeout)))
+                        .await;
+                    break;
+                }
             };
             let chunk = match chunk_result {
                 Ok(c) => c,
@@ -1329,6 +1356,103 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
+    /// A silent model: the HTTP server sends SSE headers and then never
+    /// produces a chunk. With `stream_timeout` set, the provider must
+    /// emit an Error event instead of waiting forever.
+    #[tokio::test]
+    async fn chat_completions_stream_times_out_on_silent_server() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let headers = "HTTP/1.1 200 OK\r\n\
+                           Content-Type: text/event-stream\r\n\
+                           Transfer-Encoding: chunked\r\n\r\n";
+            let _ = sock.write_all(headers.as_bytes()).await;
+            // Keep the connection open but never send a data chunk.
+            std::future::pending::<()>().await;
+        });
+
+        let provider = OpenAiProvider::new(&format!("http://{addr}/v1"), "test-key");
+        let request = ProviderRequest {
+            messages: vec![user_message(vec![ContentBlock::Text {
+                text: "hello".to_string(),
+            }])],
+            system_prompt: "be useful".to_string(),
+            tools: vec![],
+            model: "test-model".to_string(),
+            max_tokens: 2048,
+            temperature: None,
+            enable_caching: false,
+            tool_choice: ToolChoice::Auto,
+            metadata: None,
+            cancel: CancellationToken::new(),
+            stream_timeout: Some(std::time::Duration::from_millis(200)),
+        };
+
+        let mut rx = provider.stream(&request).await.unwrap();
+        let got_error = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Some(StreamEvent::Error(msg)) => return msg,
+                    Some(_) => continue,
+                    None => return "channel closed without error".to_string(),
+                }
+            }
+        })
+        .await
+        .expect("timeout did not fire; provider hung");
+
+        assert!(
+            got_error.contains("no output from model within"),
+            "unexpected error: {got_error}"
+        );
+    }
+
+    /// Without a stream timeout the same silent server would hang until
+    /// the HTTP client deadline; ensure `None` is accepted (no crash).
+    #[tokio::test]
+    async fn chat_completions_stream_without_timeout_accepts_request() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let headers = "HTTP/1.1 200 OK\r\n\
+                           Content-Type: text/event-stream\r\n\
+                           Transfer-Encoding: chunked\r\n\r\n";
+            let _ = sock.write_all(headers.as_bytes()).await;
+            std::future::pending::<()>().await;
+        });
+
+        let provider = OpenAiProvider::new(&format!("http://{addr}/v1"), "test-key");
+        let request = ProviderRequest {
+            messages: vec![user_message(vec![ContentBlock::Text {
+                text: "hello".to_string(),
+            }])],
+            system_prompt: "be useful".to_string(),
+            tools: vec![],
+            model: "test-model".to_string(),
+            max_tokens: 2048,
+            temperature: None,
+            enable_caching: false,
+            tool_choice: ToolChoice::Auto,
+            metadata: None,
+            cancel: CancellationToken::new(),
+            stream_timeout: None,
+        };
+
+        let mut rx = provider.stream(&request).await.unwrap();
+        // Nothing should arrive: assert the channel is still open after a
+        // short wait (proving the loop accepted the request without
+        // immediately erroring on `None`).
+        let arrived = tokio::time::timeout(std::time::Duration::from_millis(150), rx.recv()).await;
+        assert!(arrived.is_err(), "expected no event without a timeout");
+    }
+
     fn user_message(content: Vec<ContentBlock>) -> Message {
         Message::User(UserMessage {
             uuid: Uuid::new_v4(),
@@ -1394,6 +1518,7 @@ mod tests {
             tool_choice: ToolChoice::Auto,
             metadata: None,
             cancel: CancellationToken::new(),
+            stream_timeout: None,
         };
 
         let body = provider.build_body(&request);
@@ -1444,6 +1569,7 @@ mod tests {
             tool_choice: ToolChoice::Auto,
             metadata: None,
             cancel: CancellationToken::new(),
+            stream_timeout: None,
         };
 
         let body = provider.build_responses_body(&request);
@@ -1473,6 +1599,7 @@ mod tests {
             tool_choice: ToolChoice::None,
             metadata: None,
             cancel: CancellationToken::new(),
+            stream_timeout: None,
         };
 
         let body = provider.build_responses_body(&request);

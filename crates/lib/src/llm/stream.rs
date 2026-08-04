@@ -15,6 +15,25 @@ use serde::Deserialize;
 
 use crate::llm::message::{ContentBlock, StopReason, Usage};
 
+/// Resolves once `timeout` elapses — or never, when `None`. Provider SSE
+/// loops race this against `byte_stream.next()` to bound the wait for the
+/// next chunk (silent models, stalled connections). Recreating the future
+/// per chunk read gives each read a fresh deadline.
+pub async fn wait_for_stream_timeout(timeout: Option<std::time::Duration>) {
+    match timeout {
+        Some(t) => tokio::time::sleep(t).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Error message reported when no stream chunk arrived within the timeout.
+pub fn stream_timeout_error(timeout: Option<std::time::Duration>) -> String {
+    match timeout {
+        Some(t) => format!("no output from model within {}s — timed out", t.as_secs()),
+        None => "stream timed out".to_string(),
+    }
+}
+
 /// Events yielded by the stream parser.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {

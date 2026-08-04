@@ -304,7 +304,12 @@ pub struct ApiConfig {
     pub effort: Option<String>,
     /// Maximum spend per session in USD.
     pub max_cost_usd: Option<f64>,
-    /// Request timeout in seconds.
+    /// Request timeout in seconds — bounds the wait for each chunk of the
+    /// response stream (the first byte included), so a silent model or a
+    /// stalled connection fails with a "no output" error instead of
+    /// hanging the agent. 0 disables the per-chunk wait (only the HTTP
+    /// client's total deadline applies). Reasoning models that stay quiet
+    /// for a long stretch before the first token may need a higher value.
     pub timeout_secs: u64,
     /// Maximum retry attempts for transient errors.
     pub max_retries: u32,
