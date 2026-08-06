@@ -18,7 +18,7 @@ use crate::tools::ToolSchema;
 /// Unified provider trait. Both Anthropic and OpenAI-compatible
 /// endpoints implement this.
 #[async_trait]
-pub trait Provider: Send + Sync {
+pub trait Provider: Send + Sync + std::any::Any {
     /// Human-readable provider name.
     fn name(&self) -> &str;
 
@@ -27,6 +27,9 @@ pub trait Provider: Send + Sync {
         &self,
         request: &ProviderRequest,
     ) -> Result<mpsc::Receiver<StreamEvent>, ProviderError>;
+
+    /// Downcast support for provider-specific configuration and tests.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Tool choice mode for controlling tool usage.

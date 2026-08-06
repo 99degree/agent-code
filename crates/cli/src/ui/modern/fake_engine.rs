@@ -111,6 +111,10 @@ impl Provider for ScriptedProvider {
         "fake-engine"
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn stream(
         &self,
         request: &ProviderRequest,

@@ -3376,6 +3376,10 @@ mod tests {
             "hanging-mock"
         }
 
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
         async fn stream(
             &self,
             _request: &ProviderRequest,
@@ -3404,6 +3408,10 @@ mod tests {
     impl Provider for CancelAwareHangingProvider {
         fn name(&self) -> &str {
             "cancel-aware-mock"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
 
         async fn stream(
@@ -3437,6 +3445,10 @@ mod tests {
     impl Provider for CompletingProvider {
         fn name(&self) -> &str {
             "completing-mock"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
 
         async fn stream(
@@ -3475,6 +3487,10 @@ mod tests {
     impl Provider for CompleteThenHangProvider {
         fn name(&self) -> &str {
             "complete-then-hang-mock"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
 
         async fn stream(
@@ -3526,6 +3542,10 @@ mod tests {
     impl Provider for SteerOnFirstCallProvider {
         fn name(&self) -> &str {
             "steer-on-first-mock"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
 
         async fn stream(
