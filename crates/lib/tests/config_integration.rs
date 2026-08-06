@@ -12,7 +12,7 @@ fn default_config_has_sane_defaults() {
     assert!(config.permissions.rules.is_empty());
     assert!(config.ui.markdown);
     assert!(config.ui.syntax_highlight);
-    assert_eq!(config.api.timeout_secs, 120);
+    assert_eq!(config.api.timeout_secs, 20);
     assert_eq!(config.api.max_retries, 3);
     assert!(config.hooks.is_empty());
     assert!(config.mcp_servers.is_empty());

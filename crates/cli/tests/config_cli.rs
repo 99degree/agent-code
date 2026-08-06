@@ -41,7 +41,7 @@ fn config_defaults_base_url() {
 #[test]
 fn config_defaults_timeout_secs() {
     let config = Config::default();
-    assert_eq!(config.api.timeout_secs, 120);
+    assert_eq!(config.api.timeout_secs, 20);
 }
 
 #[test]
