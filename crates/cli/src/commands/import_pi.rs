@@ -393,12 +393,24 @@ fn import_pi_session(pi_path: &Path) -> Result<String, String> {
                         .tokens_before
                         .map(|t| format!(" (from {}k tokens)", t / 1000))
                         .unwrap_or_default();
+                    // Traceability marker (not sent to API).
                     messages.push(Message::System(SystemMessage {
                         uuid: uuid::Uuid::new_v4(),
                         timestamp: chrono::Utc::now().to_rfc3339(),
                         subtype: SystemMessageType::CompactBoundary,
                         content: format!("[Compacted{tokens_info}]: {summary}"),
                         level: agent_code_lib::llm::message::MessageLevel::Info,
+                    }));
+                    // Summary content — must be is_compact_summary so
+                    // truncate_to_last_summary() can find it on resume.
+                    messages.push(Message::User(UserMessage {
+                        uuid: uuid::Uuid::new_v4(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        content: vec![ContentBlock::Text {
+                            text: format!("[Compacted{tokens_info}]: {summary}"),
+                        }],
+                        is_meta: true,
+                        is_compact_summary: true,
                     }));
                 }
             }
