@@ -1153,6 +1153,7 @@ impl QueryEngine {
         let mut retry_state = crate::llm::retry::RetryState::default();
         let retry_config = crate::llm::retry::RetryConfig::default();
         let mut max_output_recovery_count = 0u32;
+        let mut no_output_retry_count = 0u32;
 
         // Session-cumulative turn base: `turn` below is the 0-based iteration
         // index within THIS user exchange (and gates the per-query max_turns
@@ -1407,6 +1408,11 @@ impl QueryEngine {
                     tool_choice: Default::default(),
                     metadata: None,
                     cancel: self.cancel.clone(),
+                    // Stop waiting for a silent model / stalled connection.
+                    // `timeout_secs` bounds the wait for each chunk; 0 disables.
+                    stream_timeout: (self.state.config.api.timeout_secs > 0).then(|| {
+                        std::time::Duration::from_secs(self.state.config.api.timeout_secs)
+                    }),
                 };
 
                 match self.llm.stream(&request).await {
@@ -1757,6 +1763,69 @@ impl QueryEngine {
                 sink.on_turn_outcome(self.state.turn_count, "cancelled");
                 self.state.is_query_active = false;
                 return Ok(());
+            }
+
+            // A no-output timeout usually means the server's request queue is
+            // saturated (NVIDIA NIM, OpenRouter queueing): the request was
+            // accepted but sits behind many pending ones, so nothing streams.
+            // Retry with backoff instead of failing the turn. Bounded by
+            // `api.max_retries` (default 3) so it cannot loop forever, and by
+            // the remaining turn budget so it never burns more turns than
+            // exist; set `api.max_retries = 0` to disable. Checked before
+            // recording any assistant message so retries don't pollute
+            // history.
+            let no_output_budget = max_turns.min(self.state.config.api.max_retries as usize);
+            if got_error
+                && content_blocks.is_empty()
+                && error_text.contains("no output from model")
+                && (no_output_retry_count as usize) < no_output_budget
+            {
+                no_output_retry_count += 1;
+                let backoff = std::time::Duration::from_millis(
+                    retry_config.initial_backoff.as_millis() as u64
+                        * 2u64.saturating_pow(no_output_retry_count - 1).min(32),
+                );
+                sink.on_warning(&format!(
+                    "No output from model within {}s — server busy or request queue \
+                     saturated. Retrying in {:.1}s (attempt {}/{})",
+                    self.state.config.api.timeout_secs,
+                    backoff.as_secs_f64(),
+                    no_output_retry_count,
+                    no_output_budget
+                ));
+                tokio::time::sleep(backoff).await;
+                if self.cancel.is_cancelled() {
+                    self.state.is_query_active = false;
+                    return Ok(());
+                }
+                continue;
+            }
+
+            // Any other stream error with zero content means the model
+            // produced nothing (a connection drop before the first byte, an
+            // SSE parse failure, a non-retryable no-output). Fail the turn
+            // instead of silently "completing" with an empty reply — the
+            // failure is visible, retryable, and the phantom empty assistant
+            // message does not pollute unrelated history. Mirror the
+            // acquire-loop error path exactly (empty assistant message +
+            // hooks + error outcome).
+            if got_error && content_blocks.is_empty() {
+                self.state
+                    .push_message(Message::Assistant(AssistantMessage {
+                        uuid: Uuid::new_v4(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        content: vec![ContentBlock::Text {
+                            text: String::new(),
+                        }],
+                        model: None,
+                        usage: None,
+                        stop_reason: None,
+                        request_id: None,
+                    }));
+                self.state.is_query_active = false;
+                let _ = self.fire_error_hooks("llm_call_failed", &error_text).await;
+                sink.on_turn_outcome(turn + 1, "error");
+                return Err(crate::error::Error::Other(error_text));
             }
 
             // Step 5: Record the assistant message.
@@ -3576,6 +3645,68 @@ mod tests {
         }
     }
 
+    /// A provider whose stream emits a non-timeout error with no content
+    /// and then closes. Verifies an empty stream error fails the turn
+    /// (rather than silently completing with an empty reply).
+    struct ErrorImmediatelyProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for ErrorImmediatelyProvider {
+        fn name(&self) -> &str {
+            "error-immediately-mock"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn stream(
+            &self,
+            _request: &ProviderRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>, ProviderError> {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = tx.send(StreamEvent::Error("connection reset".into())).await;
+            });
+            Ok(rx)
+        }
+    }
+
+    /// A provider that always times out with no output (the "server busy,
+    /// queue saturated" case): emits a no-output timeout Error on every
+    /// call. Tracks the call count so a test can assert the retry budget
+    /// is honored before the turn finally fails.
+    struct NoOutputTimeoutProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for NoOutputTimeoutProvider {
+        fn name(&self) -> &str {
+            "no-output-timeout-mock"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn stream(
+            &self,
+            _request: &ProviderRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(StreamEvent::Error(
+                        "no output from model within 120s — timed out".into(),
+                    ))
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
     /// Everything project-scoped has to move together. Feature flags
     /// are read from `state.config` on the turn that uses them rather
     /// than captured at startup, so a destination that turns one off is
@@ -3608,6 +3739,85 @@ mod tests {
         assert!(
             !engine.state.config.features.prompt_caching,
             "the destination's feature settings were ignored after the move"
+        );
+    }
+
+    /// A stream error with zero content must fail the turn — previously it
+    /// silently "completed" with an empty assistant reply (blank output,
+    /// exit 0), so a dead connection or a no-output timeout looked like a
+    /// normal (empty) answer.
+    #[tokio::test]
+    async fn stream_error_with_no_content_fails_turn() {
+        let mut engine = build_engine(Arc::new(ErrorImmediatelyProvider));
+        let result = engine.run_turn_with_sink("test", &NullSink).await;
+        let err = result.expect_err("empty-content stream error must fail the turn");
+        assert!(
+            err.to_string().contains("connection reset"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A no-output timeout (server busy / request queue saturated) retries
+    /// with backoff instead of failing immediately, bounded by
+    /// `api.max_retries` and the turn budget; the turn only fails once the
+    /// budget is exhausted. Paused time keeps the backoff sleeps instant.
+    #[tokio::test(start_paused = true)]
+    async fn no_output_timeout_retries_bounded_then_fails() {
+        use std::sync::Mutex;
+
+        struct CapturingSink {
+            warnings: Mutex<Vec<String>>,
+        }
+        impl StreamSink for CapturingSink {
+            fn on_text(&self, _: &str) {}
+            fn on_tool_start(&self, _: &str, _: &serde_json::Value) {}
+            fn on_tool_result(&self, _: &str, _: &crate::tools::ToolResult) {}
+            fn on_error(&self, _: &str) {}
+            fn on_warning(&self, msg: &str) {
+                self.warnings.lock().unwrap().push(msg.to_string());
+            }
+        }
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sink = CapturingSink {
+            warnings: Mutex::new(Vec::new()),
+        };
+
+        // max_turns=4 with the default api.max_retries=3: three retries
+        // (turns 0-2) then the fourth attempt (turn 3) exhausts the
+        // budget and fails the turn.
+        let mut engine = build_engine_with_max_turns(
+            Arc::new(NoOutputTimeoutProvider {
+                calls: calls.clone(),
+            }),
+            4,
+        );
+        let run = engine.run_turn_with_sink("test", &sink);
+        tokio::pin!(run);
+        let mut result = None;
+        for _ in 0..30 {
+            if let Ok(r) =
+                tokio::time::timeout(std::time::Duration::from_millis(50), &mut run).await
+            {
+                result = Some(r);
+                break;
+            }
+            // Backoffs are 1s, 2s, 4s; advance so the retry sleeps elapse.
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        }
+        let result = result.expect("turn should finish within the advanced budget");
+        assert!(result.is_err(), "turn should fail after the retry budget");
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "expected 1 initial attempt + 3 retries"
+        );
+        let warnings = sink.warnings.lock().unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("Retrying")),
+            "expected retry warnings, got: {:?}",
+            *warnings
         );
     }
 

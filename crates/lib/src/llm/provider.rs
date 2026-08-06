@@ -66,6 +66,12 @@ pub struct ProviderRequest {
     /// (memory extraction, consolidation) can pass `CancellationToken::new()`
     /// for an uncancellable request.
     pub cancel: CancellationToken,
+    /// Max time to wait for the next chunk of the response stream (the
+    /// first byte included). Guards against silent models and stalled
+    /// connections: when no chunk arrives within the timeout the stream
+    /// emits an [`StreamEvent::Error`]. `None` disables the wait (the
+    /// legacy behavior — only the HTTP client's total deadline applies).
+    pub stream_timeout: Option<std::time::Duration>,
 }
 
 /// Provider-level errors.
