@@ -202,6 +202,7 @@ pub(crate) fn try_expand_skill_slash_full(
             | "help"
             | "terminal-setup"
             | "copy"
+            | "import-pi"
             | "minimal"
             | "fullscreen"
             | "stats"

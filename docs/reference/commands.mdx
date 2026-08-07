@@ -1,6 +1,6 @@
 ---
 title: "Commands Reference"
-description: "All 63 slash commands"
+description: "All 64 slash commands"
 ---
 
 Type `/` followed by a command name in the REPL. Unknown commands are passed to the agent as prompts. Skill names work as commands too.
@@ -16,6 +16,7 @@ Type `/` followed by a command name in the REPL. Unknown commands are passed to 
 | `/sessions` | List recent saved sessions (shows labels from `/rename`) |
 | `/rename <name>` | Set a human-readable label on the current session (empty clears it) |
 | `/export` | Export conversation to markdown file |
+| `/import-pi [path]` | Import a pi.dev session JSONL file (no args lists sessions) |
 | `/share` | Export session as shareable markdown with metadata |
 | `/summary` | Ask the agent to summarize the session |
 | `/version` | Show agent-code version |
