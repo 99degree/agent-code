@@ -609,6 +609,7 @@ pub async fn compact_with_llm(
         tool_choice: Default::default(),
         metadata: None,
         cancel,
+        stream_timeout: None,
     };
 
     let mut rx = match llm.stream(&request).await {
