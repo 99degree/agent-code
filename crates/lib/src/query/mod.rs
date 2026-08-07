@@ -1153,6 +1153,7 @@ impl QueryEngine {
         let mut retry_state = crate::llm::retry::RetryState::default();
         let retry_config = crate::llm::retry::RetryConfig::default();
         let mut max_output_recovery_count = 0u32;
+        let mut no_output_retry_count = 0u32;
 
         // Session-cumulative turn base: `turn` below is the 0-based iteration
         // index within THIS user exchange (and gates the per-query max_turns
@@ -1407,6 +1408,12 @@ impl QueryEngine {
                     tool_choice: Default::default(),
                     metadata: None,
                     cancel: self.cancel.clone(),
+                    // Stop waiting for a silent model / stalled connection.
+                    // `timeout_secs` bounds the wait for each stream chunk
+                    // (first byte included); 0 disables the per-chunk wait.
+                    stream_timeout: (self.state.config.api.timeout_secs > 0).then(|| {
+                        std::time::Duration::from_secs(self.state.config.api.timeout_secs)
+                    }),
                 };
 
                 match self.llm.stream(&request).await {
@@ -1757,6 +1764,60 @@ impl QueryEngine {
                 sink.on_turn_outcome(self.state.turn_count, "cancelled");
                 self.state.is_query_active = false;
                 return Ok(());
+            }
+
+            // A no-output timeout usually means the server's request queue is
+            // saturated (NVIDIA NIM, OpenRouter queueing): the request was
+            // accepted but sits behind many pending ones, so nothing streams.
+            // Retry with backoff instead of failing the turn. Bounded by
+            // `api.max_retries` (default 3) so it cannot loop forever, and by
+            // the remaining turn budget so it never burns more turns than
+            // exist; set `api.max_retries = 0` to disable. Checked before
+            // recording any assistant message so retries don't pollute
+            // history.
+            let no_output_budget = max_turns.min(self.state.config.api.max_retries as usize);
+            if got_error
+                && content_blocks.is_empty()
+                && error_text.contains("no output from model")
+                && (no_output_retry_count as usize) < no_output_budget
+            {
+                no_output_retry_count += 1;
+                let backoff = std::time::Duration::from_millis(
+                    retry_config.initial_backoff.as_millis() as u64
+                        * 2u64.saturating_pow(no_output_retry_count - 1).min(32),
+                );
+                sink.on_warning(&format!(
+                    "No output from model within {}s — server busy or request queue \
+                     saturated. Retrying in {:.1}s (attempt {}/{})",
+                    self.state.config.api.timeout_secs,
+                    backoff.as_secs_f64(),
+                    no_output_retry_count,
+                    no_output_budget
+                ));
+                tokio::time::sleep(backoff).await;
+                if self.cancel.is_cancelled() {
+                    self.state.is_query_active = false;
+                    return Ok(());
+                }
+                continue 'turn;
+            }
+
+            // Any other stream error with zero content means the model
+            // produced nothing (a connection drop before the first byte, an
+            // SSE parse failure, a non-retryable no-output). Fail the turn
+            // instead of silently "completing" with an empty reply — the
+            // failure is visible, retryable, and the phantom empty assistant
+            // message does not pollute unrelated history. Mirror the
+            // acquire-loop error path exactly (error hooks + error outcome).
+            // A "prompt is too long" error is excluded: it is recoverable via
+            // the Step-6 microcompact path and would otherwise preempt it.
+            let prompt_too_long = error_text.contains("prompt is too long")
+                || error_text.contains("Prompt is too long");
+            if got_error && content_blocks.is_empty() && !prompt_too_long {
+                self.state.is_query_active = false;
+                let _ = self.fire_error_hooks("llm_call_failed", &error_text).await;
+                sink.on_turn_outcome(self.state.turn_count, "error");
+                return Err(crate::error::Error::Other(error_text));
             }
 
             // Step 5: Record the assistant message.

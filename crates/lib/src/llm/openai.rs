@@ -15,7 +15,7 @@ use super::codex_auth::CodexChatGptAuth;
 use super::message::{ContentBlock, Message, StopReason, Usage};
 use super::nemotron::NemotronStreamParser;
 use super::provider::{Provider, ProviderError, ProviderRequest, ToolChoice};
-use super::stream::StreamEvent;
+use super::stream::{StreamEvent, stream_timeout_error, wait_for_stream_timeout};
 use super::xai_auth::XaiOauthAuth;
 
 /// OpenAI Chat Completions provider (GPT, Groq, Together, DeepSeek, etc.).
@@ -399,11 +399,13 @@ impl OpenAiProvider {
                 response,
                 request.cancel.clone(),
                 tool_names,
+                request.stream_timeout,
             ))
         } else {
             Ok(spawn_chat_completions_stream(
                 response,
                 request.cancel.clone(),
+                request.stream_timeout,
             ))
         }
     }
@@ -447,7 +449,11 @@ impl OpenAiProvider {
             };
         }
 
-        Ok(spawn_responses_stream(response, request.cancel.clone()))
+        Ok(spawn_responses_stream(
+            response,
+            request.cancel.clone(),
+            request.stream_timeout,
+        ))
     }
 }
 
@@ -488,6 +494,7 @@ fn retry_after_ms(response: &reqwest::Response, default_ms: u64) -> u64 {
 fn spawn_chat_completions_stream(
     response: reqwest::Response,
     cancel: tokio_util::sync::CancellationToken,
+    stream_timeout: Option<std::time::Duration>,
 ) -> mpsc::Receiver<StreamEvent> {
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(async move {
@@ -508,6 +515,12 @@ fn spawn_chat_completions_stream(
                     Some(c) => c,
                     None => break,
                 },
+                _ = wait_for_stream_timeout(stream_timeout) => {
+                    let _ = tx
+                        .send(StreamEvent::Error(stream_timeout_error(stream_timeout)))
+                        .await;
+                    break;
+                }
             };
             let chunk = match chunk_result {
                 Ok(c) => c,
@@ -668,6 +681,7 @@ fn spawn_nemotron_stream(
     response: reqwest::Response,
     cancel: tokio_util::sync::CancellationToken,
     tool_names: Vec<String>,
+    stream_timeout: Option<std::time::Duration>,
 ) -> mpsc::Receiver<StreamEvent> {
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(async move {
@@ -690,6 +704,12 @@ fn spawn_nemotron_stream(
                     Some(c) => c,
                     None => break,
                 },
+                _ = wait_for_stream_timeout(stream_timeout) => {
+                    let _ = tx
+                        .send(StreamEvent::Error(stream_timeout_error(stream_timeout)))
+                        .await;
+                    break;
+                }
             };
             let chunk = match chunk_result {
                 Ok(c) => c,
@@ -862,6 +882,7 @@ async fn forward_nemotron_events(
 fn spawn_responses_stream(
     response: reqwest::Response,
     cancel: tokio_util::sync::CancellationToken,
+    stream_timeout: Option<std::time::Duration>,
 ) -> mpsc::Receiver<StreamEvent> {
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(async move {
@@ -878,6 +899,12 @@ fn spawn_responses_stream(
                     Some(c) => c,
                     None => break,
                 },
+                _ = wait_for_stream_timeout(stream_timeout) => {
+                    let _ = tx
+                        .send(StreamEvent::Error(stream_timeout_error(stream_timeout)))
+                        .await;
+                    break;
+                }
             };
             let chunk = match chunk_result {
                 Ok(c) => c,
@@ -1295,6 +1322,7 @@ mod tests {
             tool_choice: ToolChoice::Auto,
             metadata: None,
             cancel: CancellationToken::new(),
+            stream_timeout: None,
         };
 
         let body = provider.build_responses_body(&request);
@@ -1324,6 +1352,7 @@ mod tests {
             tool_choice: ToolChoice::None,
             metadata: None,
             cancel: CancellationToken::new(),
+            stream_timeout: None,
         };
 
         let body = provider.build_responses_body(&request);

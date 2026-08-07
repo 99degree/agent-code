@@ -15,7 +15,7 @@ use tracing::debug;
 
 use super::message::{ContentBlock, Message, StopReason, Usage};
 use super::provider::{Provider, ProviderError, ProviderRequest};
-use super::stream::StreamEvent;
+use super::stream::{StreamEvent, stream_timeout_error, wait_for_stream_timeout};
 
 /// Azure OpenAI provider with `api-key` header auth and AD token support.
 pub struct AzureOpenAiProvider {
@@ -261,6 +261,7 @@ impl Provider for AzureOpenAiProvider {
         // Parse SSE stream — identical to OpenAI format.
         let (tx, rx) = mpsc::channel(64);
         let cancel = request.cancel.clone();
+        let stream_timeout = request.stream_timeout;
         tokio::spawn(async move {
             let mut byte_stream = response.bytes_stream();
             let mut buffer = String::new();
@@ -281,6 +282,12 @@ impl Provider for AzureOpenAiProvider {
                         Some(c) => c,
                         None => break,
                     },
+                    _ = wait_for_stream_timeout(stream_timeout) => {
+                        let _ = tx
+                            .send(StreamEvent::Error(stream_timeout_error(stream_timeout)))
+                            .await;
+                        break;
+                    }
                 };
                 let chunk = match chunk_result {
                     Ok(c) => c,
