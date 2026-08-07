@@ -675,24 +675,6 @@ async fn async_main() -> anyhow::Result<()> {
     // from tools+state without contacting any LLM, so it must not
     // require an API key. CI environments and the e2e test in
     // `output_styles_subagent.rs` strip all key env vars precisely
-    // because none should be necessary on this path. Fall through
-    // with an empty placeholder so provider construction below still
-    // type-checks; the provider is never used before the early
-    // return at the `dump_system_prompt` branch.
-    let api_key = if config.api.auth_mode == ApiAuthMode::ApiKey {
-        if let Some(key) = config.api.api_key.as_deref() {
-            Some(key)
-        } else if cli.dump_system_prompt {
-            Some("")
-        } else {
-            return Err(anyhow::anyhow!(
-                "API key required. Set AGENT_CODE_API_KEY or pass --api-key."
-            ));
-        }
-    } else {
-        None
-    };
-
     // Initialize LLM provider. If --model or --provider implies a different
     // provider than what's in the config, override the base URL to match.
     let provider_kind = match config.api.auth_mode {
@@ -711,8 +693,35 @@ async fn async_main() -> anyhow::Result<()> {
             "together" => ProviderKind::Together,
             "zhipu" | "glm" | "z.ai" => ProviderKind::Zhipu,
             "azure" | "azure-openai" => ProviderKind::AzureOpenAi,
+            "nvidia" | "nim" => ProviderKind::Nvidia,
+            "kilo" => ProviderKind::Kilo,
+            "novita" => ProviderKind::Novita,
+            "opencode" | "zen" => ProviderKind::OpenCode,
+            "opencode-go" | "zen-go" => ProviderKind::OpenCodeGo,
             _ => detect_provider(&config.api.model, &config.api.base_url),
         },
+    };
+
+    // because none should be necessary on this path. Fall through
+    // with an empty placeholder so provider construction below still
+    // type-checks; the provider is never used before the early
+    // return at the `dump_system_prompt` branch.
+    let env_api_key = provider_kind.api_key_from_env();
+    let api_key: Option<&str> = if config.api.auth_mode == ApiAuthMode::ApiKey {
+        if let Some(key) = config.api.api_key.as_deref() {
+            Some(key)
+        } else if cli.dump_system_prompt {
+            Some("")
+        } else if let Some(key) = env_api_key.as_deref() {
+            Some(key)
+        } else {
+            return Err(anyhow::anyhow!(
+                "API key required. Set {} or pass --api-key.",
+                provider_kind.env_var_name()
+            ));
+        }
+    } else {
+        None
     };
 
     // Override base URL if the detected provider has a known default.
@@ -761,6 +770,12 @@ async fn async_main() -> anyhow::Result<()> {
                         api_key,
                     ))
                 }
+                ProviderKind::Novita => Arc::new(
+                    agent_code_lib::llm::novita::NovitaProvider::new(
+                        &config.api.base_url,
+                        api_key,
+                    ),
+                ),
                 _ => match provider_kind.wire_format() {
                     WireFormat::Anthropic => {
                         Arc::new(agent_code_lib::llm::anthropic::AnthropicProvider::new(
