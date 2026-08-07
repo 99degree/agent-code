@@ -319,7 +319,15 @@ pub struct ApiConfig {
     pub effort: Option<String>,
     /// Maximum spend per session in USD.
     pub max_cost_usd: Option<f64>,
-    /// Request timeout in seconds.
+    /// Request stream timeout in seconds — bounds the wait for each chunk
+    /// of the response stream, including the first byte. A model that
+    /// accepts a request and then produces nothing (a saturated NIM/OpenRouter
+    /// request queue, a dead connection) errors instead of hanging the agent.
+    /// **Reasoning models (Nemotron 3 Ultra / 3 Nano Omni, DeepSeek R1, Qwen3
+    /// with thinking, …) can legitimately stay silent for 60–120s before
+    /// emitting the first token. A 20s default will abort those mid-reasoning;
+    /// raise this (e.g. 180) for reasoning-heavy model usage.** Set to 0 to
+    /// disable per-chunk waiting (only the HTTP client total deadline applies).
     pub timeout_secs: u64,
     /// Maximum retry attempts for transient errors.
     pub max_retries: u32,
@@ -412,7 +420,7 @@ impl Default for ApiConfig {
             thinking: None,
             effort: None,
             max_cost_usd: None,
-            timeout_secs: 120,
+            timeout_secs: 20,
             max_retries: 3,
         }
     }
@@ -842,7 +850,7 @@ mod tests {
     #[test]
     fn api_config_default_timeout() {
         let cfg = ApiConfig::default();
-        assert_eq!(cfg.timeout_secs, 120);
+        assert_eq!(cfg.timeout_secs, 20);
     }
 
     #[test]
@@ -1588,7 +1596,7 @@ additional_directories = ["/tmp"]
     #[test]
     fn config_toml_empty_string_uses_defaults() {
         let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(cfg.api.timeout_secs, 120);
+        assert_eq!(cfg.api.timeout_secs, 20);
         assert_eq!(cfg.permissions.default_mode, PermissionMode::Ask);
         assert!(cfg.ui.markdown);
     }
