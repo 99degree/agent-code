@@ -158,29 +158,37 @@ fn resolve_executable(
 /// repointed under an unchanged grant.
 #[cfg(not(windows))]
 fn default_search_path() -> std::ffi::OsString {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-
-    // SAFETY: `confstr` with a null buffer and zero length is the
-    // documented way to ask for the size it needs, including the NUL.
-    let needed = unsafe { libc::confstr(libc::_CS_PATH, std::ptr::null_mut(), 0) };
-    if needed > 1 {
-        let mut buf = vec![0u8; needed];
-        // SAFETY: `buf` is `needed` bytes long, exactly what the call
-        // above asked for, and is written as C chars.
-        let written = unsafe {
-            libc::confstr(
-                libc::_CS_PATH,
-                buf.as_mut_ptr() as *mut libc::c_char,
-                needed,
-            )
-        };
-        if written > 1 && written <= needed {
-            buf.truncate(written - 1); // drop the trailing NUL
-            return OsString::from_vec(buf);
-        }
+    #[cfg(target_os = "android")]
+    {
+        use std::ffi::OsString;
+        std::env::var_os("PATH").unwrap_or_else(|| OsString::from("/bin:/usr/bin"))
     }
-    OsString::from("/bin:/usr/bin")
+    #[cfg(not(target_os = "android"))]
+    {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        // SAFETY: `confstr` with a null buffer and zero length is the
+        // documented way to ask for the size it needs, including the NUL.
+        let needed = unsafe { libc::confstr(libc::_CS_PATH, std::ptr::null_mut(), 0) };
+        if needed > 1 {
+            let mut buf = vec![0u8; needed];
+            // SAFETY: `buf` is `needed` bytes long, exactly what the call
+            // above asked for, and is written as C chars.
+            let written = unsafe {
+                libc::confstr(
+                    libc::_CS_PATH,
+                    buf.as_mut_ptr() as *mut libc::c_char,
+                    needed,
+                )
+            };
+            if written > 1 && written <= needed {
+                buf.truncate(written - 1); // drop the trailing NUL
+                return OsString::from_vec(buf);
+            }
+        }
+        OsString::from("/bin:/usr/bin")
+    }
 }
 
 /// `execvp` semantics: a name containing `/` is used as given, a bare
@@ -415,7 +423,7 @@ fn is_executable_file(path: &std::path::Path) -> bool {
                 libc::AT_FDCWD,
                 c_path.as_ptr(),
                 libc::X_OK,
-                libc::AT_EACCESS,
+                faccessat_flags(),
             ) == 0
         }
     }
@@ -423,6 +431,16 @@ fn is_executable_file(path: &std::path::Path) -> bool {
     {
         true
     }
+}
+
+#[cfg(target_os = "android")]
+fn faccessat_flags() -> libc::c_int {
+    0
+}
+
+#[cfg(not(target_os = "android"))]
+fn faccessat_flags() -> libc::c_int {
+    libc::AT_EACCESS
 }
 
 /// Transport configuration for connecting to an MCP server.
