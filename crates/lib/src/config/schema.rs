@@ -331,6 +331,19 @@ pub struct ApiConfig {
     pub timeout_secs: u64,
     /// Maximum retry attempts for transient errors.
     pub max_retries: u32,
+    /// Maximum retry-after duration in seconds from the API.
+    /// If the API specifies a longer wait, we abort instead of retrying.
+    /// Set to 0 to use the API's value regardless of duration.
+    #[serde(default = "default_max_retry_after_secs")]
+    pub max_retry_after_secs: u64,
+    /// Max agent turns per run (default: 50).
+    /// Overrides the --max-turns CLI flag if set.
+    #[serde(default)]
+    pub max_turns: Option<usize>,
+}
+
+fn default_max_retry_after_secs() -> u64 {
+    10
 }
 
 impl Default for ApiConfig {
@@ -422,6 +435,8 @@ impl Default for ApiConfig {
             max_cost_usd: None,
             timeout_secs: 20,
             max_retries: 3,
+            max_retry_after_secs: 10,
+            max_turns: None,
         }
     }
 }

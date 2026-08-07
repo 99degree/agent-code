@@ -1148,10 +1148,18 @@ impl QueryEngine {
             )
             .await;
 
-        let max_turns = self.config.max_turns.unwrap_or(50);
+        // CLI flag wins, then config-file api.max_turns, then the 50 default.
+        let max_turns = self
+            .config
+            .max_turns
+            .or(self.state.config.api.max_turns)
+            .unwrap_or(50);
         let mut compact_tracking = CompactTracking::default();
         let mut retry_state = crate::llm::retry::RetryState::default();
-        let retry_config = crate::llm::retry::RetryConfig::default();
+        let retry_config = crate::llm::retry::RetryConfig {
+            max_retry_after_ms: self.state.config.api.max_retry_after_secs * 1000,
+            ..crate::llm::retry::RetryConfig::default()
+        };
         let mut max_output_recovery_count = 0u32;
         let mut no_output_retry_count = 0u32;
 
