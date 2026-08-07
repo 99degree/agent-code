@@ -165,6 +165,44 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
             ("x-ai/grok-4.3", "Grok 4.3"),
             ("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro · Open"),
         ],
+        ProviderKind::Nvidia => &[
+            (
+                "nvidia/nemotron-3-ultra-550b-a55b",
+                "Nemotron 3 Ultra · Most capable",
+            ),
+            (
+                "nvidia/nemotron-3-nano-30b-a3b",
+                "Nemotron 3 Nano · Fast",
+            ),
+            (
+                "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+                "Nemotron 3 Nano Omni · Reasoning",
+            ),
+            ("minimaxai/minimax-m3", "MiniMax M3"),
+            ("deepseek-ai/deepseek-v4-pro", "DeepSeek V4 Pro"),
+            ("meta/llama-3.1-8b-instruct", "Llama 3.1 8B · Fast"),
+        ],
+        ProviderKind::Kilo => &[("kilo-alpha", "Kilo Alpha · Most capable")],
+        ProviderKind::Novita => &[("tencent/hy3", "Tencent Hy3 · Open")],
+        ProviderKind::OpenCode => &[
+            ("big-pickle", "Big Pickle · Frontier"),
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            ("claude-opus-4-7", "Claude Opus 4.7"),
+            ("deepseek-v4-pro", "DeepSeek V4 Pro"),
+            ("glm-5.2", "GLM 5.2"),
+            ("gpt-5", "GPT-5"),
+            ("kimi-k2.6", "Kimi K2.6"),
+            ("mimo-v2.5", "MiMo 2.5"),
+        ],
+        ProviderKind::OpenCodeGo => &[
+            ("deepseek-v4-flash", "DeepSeek V4 Flash"),
+            ("glm-5.1", "GLM 5.1"),
+            ("kimi-k2.6", "Kimi K2.6"),
+            ("mimo-v2.5", "MiMo 2.5"),
+            ("minimax-m2.7", "MiniMax M2.7"),
+            ("qwen3.6-plus", "Qwen3.6 Plus"),
+            ("qwen3.7-plus", "Qwen3.7 Plus"),
+        ],
         _ => &[],
     }
 }
@@ -226,6 +264,21 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     if url_lower.contains("perplexity.ai") {
         return ProviderKind::Perplexity;
     }
+    if url_lower.contains("opencode.ai/zen/go") {
+        return ProviderKind::OpenCodeGo;
+    }
+    if url_lower.contains("opencode.ai") {
+        return ProviderKind::OpenCode;
+    }
+    if url_lower.contains("nvidia") || url_lower.contains("nvidianim") {
+        return ProviderKind::Nvidia;
+    }
+    if url_lower.contains("novita.ai") {
+        return ProviderKind::Novita;
+    }
+    if url_lower.contains("kilo.ai") {
+        return ProviderKind::Kilo;
+    }
     if url_lower.contains("localhost") || url_lower.contains("127.0.0.1") {
         return ProviderKind::OpenAiCompatible;
     }
@@ -268,6 +321,9 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     if model_lower.starts_with("pplx") || model_lower.starts_with("sonar") {
         return ProviderKind::Perplexity;
     }
+    if model_lower.contains("nemotron") || model_lower.starts_with("nvidia/") {
+        return ProviderKind::Nvidia;
+    }
 
     ProviderKind::OpenAiCompatible
 }
@@ -299,6 +355,12 @@ pub enum ProviderKind {
     OpenRouter,
     Cohere,
     Perplexity,
+    Nvidia,
+    /// Kilo AI (OpenAI-compatible endpoint https://api.kilo.ai).
+    Kilo,
+    Novita,
+    OpenCode,
+    OpenCodeGo,
     OpenAiCompatible,
 }
 
@@ -319,6 +381,11 @@ impl ProviderKind {
             | Self::OpenRouter
             | Self::Cohere
             | Self::Perplexity
+            | Self::Nvidia
+            | Self::Kilo
+            | Self::Novita
+            | Self::OpenCode
+            | Self::OpenCodeGo
             | Self::OpenAiCompatible => WireFormat::OpenAiCompatible,
         }
     }
@@ -338,8 +405,13 @@ impl ProviderKind {
             Self::Together => Some("https://api.together.xyz/v1"),
             Self::Zhipu => Some("https://open.bigmodel.cn/api/paas/v4"),
             Self::OpenRouter => Some("https://openrouter.ai/api/v1"),
+            Self::OpenCode => Some("https://opencode.ai/zen/v1"),
+            Self::OpenCodeGo => Some("https://opencode.ai/zen/go/v1"),
             Self::Cohere => Some("https://api.cohere.com/v2"),
             Self::Perplexity => Some("https://api.perplexity.ai"),
+            Self::Nvidia => Some("https://integrate.api.nvidia.com/v1"),
+            Self::Kilo => Some("https://api.kilo.ai"),
+            Self::Novita => Some("https://api.novita.ai/openai/v1"),
             // These require user-supplied URLs.
             Self::Bedrock | Self::Vertex | Self::AzureOpenAi | Self::OpenAiCompatible => None,
         }
@@ -359,9 +431,37 @@ impl ProviderKind {
             Self::Together => "TOGETHER_API_KEY",
             Self::Zhipu => "ZHIPU_API_KEY",
             Self::OpenRouter => "OPENROUTER_API_KEY",
+            Self::OpenCode => "OPENCODE_ZEN_API_KEY",
+            Self::OpenCodeGo => "OPENCODE_GO_API_KEY",
             Self::Cohere => "COHERE_API_KEY",
             Self::Perplexity => "PERPLEXITY_API_KEY",
+            Self::Nvidia => "NVIDIA_API_KEY",
+            Self::Kilo => "KILO_API_KEY",
+            Self::Novita => "NOVITA_API_KEY",
             Self::OpenAiCompatible => "OPENAI_API_KEY",
+        }
+    }
+
+    /// Resolve this provider's API key from its environment variables,
+    /// honoring the documented fallbacks (e.g. OpenCode Zen falls back to
+    /// `OPENCODE_API_KEY`). Returns `None` when nothing is set.
+    pub fn api_key_from_env(&self) -> Option<String> {
+        let primary = std::env::var(self.env_var_name())
+            .ok()
+            .filter(|k| !k.is_empty());
+        if primary.is_some() {
+            return primary;
+        }
+        match self {
+            // OPENCODE_ZEN_API_KEY → OPENCODE_API_KEY
+            Self::OpenCode => std::env::var("OPENCODE_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty()),
+            // OPENCODE_GO_API_KEY → OPENCODE2_API_KEY
+            Self::OpenCodeGo => std::env::var("OPENCODE2_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty()),
+            _ => None,
         }
     }
 }
