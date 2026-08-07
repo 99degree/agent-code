@@ -769,10 +769,21 @@ async fn async_main() -> anyhow::Result<()> {
                         ))
                     }
                     WireFormat::OpenAiCompatible => {
-                        Arc::new(agent_code_lib::llm::openai::OpenAiProvider::new(
-                            &config.api.base_url,
-                            api_key,
-                        ))
+                        // Nemotron models emit tool calls as custom text markup
+                        // rather than structured `tool_calls` deltas; route them
+                        // through the Nemotron-aware provider regardless of which
+                        // OpenAI-compatible endpoint serves them.
+                        if agent_code_lib::llm::nemotron::is_nemotron_model(&config.api.model) {
+                            Arc::new(agent_code_lib::llm::openai::OpenAiProvider::new_nemotron(
+                                &config.api.base_url,
+                                api_key,
+                            ))
+                        } else {
+                            Arc::new(agent_code_lib::llm::openai::OpenAiProvider::new(
+                                &config.api.base_url,
+                                api_key,
+                            ))
+                        }
                     }
                 },
             }
