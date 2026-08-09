@@ -105,6 +105,18 @@ impl RetryState {
                 );
                 RetryAction::Retry { after: backoff }
             }
+            RetryableError::Network => {
+                if self.consecutive_failures > config.max_retries {
+                    return RetryAction::Abort("Network error retry limit reached".into());
+                }
+                let backoff = calculate_backoff(
+                    self.consecutive_failures,
+                    config.initial_backoff,
+                    config.max_backoff,
+                    config.multiplier,
+                );
+                RetryAction::Retry { after: backoff }
+            }
             RetryableError::NonRetryable(msg) => RetryAction::Abort(msg.clone()),
         }
     }
@@ -122,6 +134,7 @@ pub enum RetryableError {
     RateLimited { retry_after: u64 },
     Overloaded,
     StreamInterrupted,
+    Network,
     NonRetryable(String),
 }
 

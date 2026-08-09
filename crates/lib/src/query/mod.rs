@@ -1429,6 +1429,32 @@ impl QueryEngine {
                         std::time::Duration::from_secs(self.state.config.api.timeout_secs)
                     }),
                 };
+                // Snapshot the request fields so we can dump them on a final
+                // failed attempt. Only the *current* send is captured; the
+                // dump file is overwritten by the next failure, so storage
+                // stays bounded.
+                let dump_snapshot: Option<(
+                    String,
+                    Vec<serde_json::Value>,
+                    String,
+                    u64,
+                )> = if self.state.config.features.dump_failed_requests {
+                    let msgs: Vec<serde_json::Value> = request
+                        .messages
+                        .iter()
+                        .map(|m| {
+                            serde_json::to_value(m).unwrap_or(serde_json::Value::Null)
+                        })
+                        .collect();
+                    Some((
+                        request.model.clone(),
+                        msgs,
+                        request.system_prompt.clone(),
+                        request.max_tokens as u64,
+                    ))
+                } else {
+                    None
+                };
 
                 match self.llm.stream(&request).await {
                     Ok(rx) => {
@@ -1436,6 +1462,13 @@ impl QueryEngine {
                         break 'acquire rx;
                     }
                     Err(e) => {
+                        // Cancelled requests (Esc/Ctrl+C) must NOT be retried —
+                        // abort the turn immediately. The provider returns
+                        // `Network("cancelled")` when the cancel token fires.
+                        if self.cancel.is_cancelled() {
+                            warn!("LLM call cancelled by user; aborting turn");
+                            return Ok(());
+                        }
                         let retryable = match &e {
                             ProviderError::RateLimited { retry_after_ms } => {
                                 crate::llm::retry::RetryableError::RateLimited {
@@ -1485,6 +1518,31 @@ impl QueryEngine {
                                 continue 'acquire;
                             }
                             crate::llm::retry::RetryAction::Abort(reason) => {
+                                // Final failure for this attempt — dump the
+                                // request we sent, so the caller can inspect
+                                // what tripped the server.
+                                if let Some((model, msgs, sys, max_tokens)) = dump_snapshot {
+                                    let dir = crate::config::agent_config_dir()
+                                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                                    let _ = std::fs::create_dir_all(&dir);
+                                    let dump = serde_json::json!({
+                                        "model": model,
+                                        "max_tokens": max_tokens,
+                                        "system_prompt": sys,
+                                        "messages": msgs,
+                                        "error": reason,
+                                    });
+                                    let path = dir.join("last_failed_request.json");
+                                    let _ = std::fs::write(
+                                        &path,
+                                        serde_json::to_string_pretty(&dump)
+                                            .unwrap_or_default(),
+                                    );
+                                    debug!(
+                                        "Dumped failed LLM request to {}",
+                                        path.display()
+                                    );
+                                }
                                 // Unattended retry: in non-interactive mode, retry
                                 // capacity errors with longer backoff instead of
                                 // aborting. In place, so it doesn't consume turns.
@@ -1551,6 +1609,36 @@ impl QueryEngine {
                                         continue 'turn;
                                     }
                                 }
+                                // Surface the failure for both the UI and the
+                                // alternation invariant: push a system:api_error
+                                // entry (kept in history for traceability) and
+                                // an inert assistant placeholder so the next
+                                // user message still follows assistant
+                                // alternation. Both messages are stripped before
+                                // serialization (System bookkeeping flushes to
+                                // empty role:"user"; the empty assistant stays
+                                // content-free) so the API payload stays clean
+                                // regardless of how many errors stack up.
+                                self.state.push_message(Message::System(SystemMessage {
+                                    uuid: Uuid::new_v4(),
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                    subtype: SystemMessageType::ApiError,
+                                    content: reason.clone(),
+                                    level: MessageLevel::Error,
+                                }));
+                                self.state.push_message(Message::Assistant(
+                                    AssistantMessage {
+                                        uuid: Uuid::new_v4(),
+                                        timestamp: chrono::Utc::now().to_rfc3339(),
+                                        content: vec![ContentBlock::Text {
+                                            text: String::new(),
+                                        }],
+                                        model: None,
+                                        usage: None,
+                                        stop_reason: None,
+                                        request_id: None,
+                                    },
+                                ));
                                 sink.on_error(&reason);
                                 self.state.is_query_active = false;
                                 // Error hooks fire once per turn that
@@ -1768,6 +1856,40 @@ impl QueryEngine {
             }
 
             if cancelled {
+                // Record the partial assistant message so the next turn has a
+                // consistent history (assistant + tool_result pairs). Without
+                // this, orphaned tool_use blocks 400 the next API call.
+                if !content_blocks.is_empty() {
+                    let assistant_msg = Message::Assistant(AssistantMessage {
+                        uuid: Uuid::new_v4(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        content: content_blocks.clone(),
+                        model: Some(model.clone()),
+                        usage: Some(usage.clone()),
+                        stop_reason: Some(StopReason::EndTurn),
+                        request_id: None,
+                    });
+                    self.state.push_message(assistant_msg);
+
+                    // Add tool_result messages for any tool_use blocks in the
+                    // assistant message, so the next API call doesn't fail with
+                    // orphaned tool_calls.
+                    for block in &content_blocks {
+                        if let ContentBlock::ToolUse { id, name, .. } = block {
+                            let result_msg = crate::llm::message::tool_result_message(
+                                id,
+                                "(cancelled)",
+                                true,
+                            );
+                            self.state.push_message(result_msg);
+                            sink.on_tool_call_result(
+                                id,
+                                name,
+                                &crate::tools::ToolResult::error("(cancelled)".to_string()),
+                            );
+                        }
+                    }
+                }
                 // Deliver events fast-path tools emitted before the cancel
                 // (plan-proposed, output chunks) — the Step-8 drain below is
                 // unreachable on this exit.
