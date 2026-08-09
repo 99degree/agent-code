@@ -170,7 +170,18 @@ impl OpenAiProvider {
 
                     messages.push(msg_json);
                 }
-                Message::System(_) => {} // Already handled above.
+                Message::System(_) => {
+                    // The system subtypes (CompactBoundary, ApiError,
+                    // Informational, TurnDuration, MemorySaved, ToolProgress)
+                    // are all bookkeeping; none of their content is meant to
+                    // drive inference. Forward them as empty role:"user" so
+                    // turn alternation in the wire payload is preserved
+                    // without burning tokens.
+                    messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": "",
+                    }));
+                }
             }
         }
 
@@ -1058,7 +1069,14 @@ fn messages_to_responses_input(messages: &[Message]) -> Vec<Value> {
                     }));
                 }
             }
-            Message::System(_) => {}
+            Message::System(_) => {
+                // Bookkeeping subtypes flush to empty role:"user".
+                input.push(serde_json::json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": "",
+                }));
+            }
         }
     }
 
