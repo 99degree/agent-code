@@ -1074,7 +1074,7 @@ pub(super) async fn event_loop(
         if turn.is_none()
             && let Some(loaded) = pending_restore.take()
         {
-            let (generation, id, data, items, loaded_cfg, loaded_project_root) = *loaded;
+            let (generation, id, mut data, items, loaded_cfg, loaded_project_root) = *loaded;
             // Superseded by a newer selection made while this one was
             // still loading: drop it, the load arm fetches the new one.
             if app.resume.is_awaiting(generation) {
@@ -1444,6 +1444,14 @@ pub(super) async fn event_loop(
                             // the old id to hooks and telemetry) while the
                             // header claims the restored one.
                             st.session_id = id.clone();
+                            // Restored transcripts can predate the current
+                            // normalization rules (orphaned tool_use,
+                            // mixed tool-result users, mid-conversation
+                            // system messages) — normalize strictly so the
+                            // first call after resume does not 400.
+                            agent_code_lib::llm::normalize::normalize_strict(
+                                &mut data.messages,
+                            );
                             st.messages = data.messages;
                             st.turn_count = data.turn_count;
                             st.total_cost_usd = data.total_cost_usd;
