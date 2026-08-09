@@ -714,6 +714,10 @@ pub struct FeaturesConfig {
     /// Enable prompt caching (system prompt + tools + conversation prefix).
     /// Reduces cost by up to 90% for long sessions with supporting providers.
     pub prompt_caching: bool,
+    /// Dump the LLM request payload to disk when a call fails, so the
+    /// offending history can be inspected. Each failure overwrites the
+    /// previous dump file (so storage stays bounded).
+    pub dump_failed_requests: bool,
 }
 
 impl Default for FeaturesConfig {
@@ -732,6 +736,7 @@ impl Default for FeaturesConfig {
             context_collapse: true,
             reactive_compact: true,
             prompt_caching: true,
+            dump_failed_requests: true,
         }
     }
 }
