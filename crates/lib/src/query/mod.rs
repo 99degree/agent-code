@@ -1214,11 +1214,17 @@ impl QueryEngine {
             }
 
             // Normalize messages for API compatibility.
-            crate::llm::normalize::sanitize_tool_use_input(&mut self.state.messages);
             crate::llm::normalize::ensure_tool_result_pairing(&mut self.state.messages);
             crate::llm::normalize::strip_empty_blocks(&mut self.state.messages);
+            crate::llm::normalize::sanitize_tool_use_input(&mut self.state.messages);
             crate::llm::normalize::remove_empty_messages(&mut self.state.messages);
             crate::llm::normalize::cap_document_blocks(&mut self.state.messages, 500_000);
+            crate::llm::normalize::remove_mid_conversation_system_messages(
+                &mut self.state.messages,
+            );
+            crate::llm::normalize::split_mixed_tool_result_users(&mut self.state.messages);
+            crate::llm::normalize::ensure_alternation_after_tool_result(&mut self.state.messages);
+            crate::llm::normalize::remove_stray_synthetic_assistants(&mut self.state.messages);
             crate::llm::normalize::merge_consecutive_user_messages(&mut self.state.messages);
 
             debug!("Agent turn {}/{}", turn + 1, max_turns);
