@@ -160,6 +160,9 @@ impl ScheduleExecutor {
                 &state.config.api.base_url,
                 state.config.api.auth_mode,
             )),
+            state.brief_mode,
+            state.response_style.name(),
+            &state.config.api.base_url,
         );
 
         // Truncate summary.
