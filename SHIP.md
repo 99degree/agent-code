@@ -1,4 +1,4 @@
-# SPEED.md — Throughput without quality debt
+# SHIP.md — Throughput without quality debt
 
 **Audience:** humans and coding agents shipping in this repository.
 
@@ -9,7 +9,7 @@ the CI gate.
 **Not a goal:** commit count, token spend, or “vibe” volume. Those are lagging noise.
 Optimize for **green PRs merged per week** and **time from idea → first green CI**.
 
-Companion to the Avala monorepo’s `SPEED.md` (same discipline, this repo’s lanes).
+Companion to the Avala monorepo’s `SHIP.md` (same discipline, this repo’s lanes).
 
 ---
 
