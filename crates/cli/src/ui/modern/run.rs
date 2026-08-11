@@ -2455,6 +2455,7 @@ struct SessionSnapshot {
     brief_mode: bool,
     response_style: String,
     base_url: String,
+    repo: String,
 }
 
 /// Copy the live conversation out of the engine, or `None` when there is
@@ -2488,6 +2489,8 @@ fn session_snapshot(eng: &agent_code_lib::query::QueryEngine) -> Option<SessionS
         brief_mode: st.brief_mode,
         response_style: st.response_style.name().to_string(),
         base_url: st.config.api.base_url.clone(),
+        repo: agent_code_lib::services::git::repo_name_sync(std::path::Path::new(&st.cwd))
+            .unwrap_or_default(),
     })
 }
 
@@ -2514,6 +2517,7 @@ fn write_session_snapshot(snap: &SessionSnapshot) -> Result<(), String> {
         snap.brief_mode,
         &snap.response_style,
         &snap.base_url,
+        &snap.repo,
     )
     .map(|_| ())
 }
