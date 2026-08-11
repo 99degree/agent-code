@@ -2216,13 +2216,22 @@ pub(super) async fn event_loop(
                 session_scan_generation = session_scan_generation.wrapping_add(1);
                 let generation = session_scan_generation;
                 let tx = session_list_tx.clone();
+                let here = app.cwd.clone();
                 tokio::task::spawn_blocking(move || {
                     // Summary-only listing: it is index-cached and skips
                     // deserializing every transcript, which is the entire
                     // cost of the full read for data the picker never shows.
-                    let rows = agent_code_lib::services::session::list_session_summaries(
+                    let mut rows = agent_code_lib::services::session::list_sessions_for_cwd(
+                        &here,
                         SESSION_PICKER_LIMIT,
                     );
+                    if rows.is_empty() {
+                        // Fallback: no sessions match this cwd — show all
+                        // recent ones so the picker never looks empty.
+                        rows = agent_code_lib::services::session::list_session_summaries(
+                            SESSION_PICKER_LIMIT,
+                        );
+                    }
                     let _ = tx.send((generation, rows));
                 });
             }

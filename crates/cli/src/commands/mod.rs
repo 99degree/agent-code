@@ -110,6 +110,12 @@ pub const COMMANDS: &[Command] = &[
         hidden: false,
     },
     Command {
+        name: "clean-sessions",
+        aliases: &[],
+        description: "Remove sessions with fewer than N messages (default 20)",
+        hidden: false,
+    },
+    Command {
         name: "memory",
         aliases: &[],
         description: "Show loaded memory context",
@@ -1215,13 +1221,27 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             CommandResult::Handled
         }
         Some("sessions") => {
-            // Optional filter: /sessions --tag <tag>
+            // Optional filters: /sessions --tag <tag> [--all]
             let filter_tag = args
-                .and_then(|a| a.strip_prefix("--tag "))
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty());
+                .and_then(|a| {
+                    let after_tag = a.strip_prefix("--tag ")?.trim();
+                    // Don't treat --all as a tag name.
+                    let tag_val = after_tag
+                        .split_whitespace()
+                        .next()
+                        .filter(|t| !t.eq_ignore_ascii_case("all"));
+                    tag_val
+                });
+            let show_all = args
+                .map(|a| a.contains("--all") || a.contains("-a"))
+                .unwrap_or(false);
 
-            let mut sessions = agent_code_lib::services::session::list_sessions(100);
+            let cwd = engine.state().cwd.clone();
+            let mut sessions = if show_all {
+                agent_code_lib::services::session::list_sessions(100)
+            } else {
+                agent_code_lib::services::session::list_sessions_for_cwd(&cwd, 100)
+            };
 
             if let Some(tag) = filter_tag {
                 let normalized = agent_code_lib::services::session::normalize_tag(tag);
@@ -1240,6 +1260,8 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             if sessions.is_empty() {
                 if filter_tag.is_some() {
                     println!("No sessions match that tag.");
+                } else if !show_all {
+                    println!("No sessions for this directory. Use /sessions --all to see all.");
                 } else {
                     println!("No saved sessions.");
                 }
@@ -1261,7 +1283,26 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         s.id, s.cwd, s.turn_count, s.message_count, s.updated_at,
                     );
                 }
-                println!("\nUse /resume <id> to restore, or /sessions --tag <tag> to filter.");
+                println!("\nUse /resume <id> to restore, /sessions --tag <tag> to filter, or /sessions --all for every directory.");
+            }
+            CommandResult::Handled
+        }
+        Some("clean-sessions") => {
+            let min: usize = args.and_then(|a| a.trim().parse().ok()).unwrap_or(20);
+            match agent_code_lib::services::session::prune_by_message_count(min) {
+                Ok(stats) => {
+                    if stats.removed == 0 {
+                        println!("No sessions with fewer than {min} messages.");
+                    } else {
+                        println!(
+                            "Cleaned {} session{} ({} kept, threshold: <{min} messages).",
+                            stats.removed,
+                            if stats.removed == 1 { "" } else { "s" },
+                            stats.kept,
+                        );
+                    }
+                }
+                Err(e) => println!("Error: {e}"),
             }
             CommandResult::Handled
         }
@@ -6007,7 +6048,12 @@ fn execute_files(engine: &QueryEngine) {
 /// resumes the selected session (same code path as `/resume <id>`).
 /// Esc/q leaves the current session untouched.
 fn execute_session_picker(engine: &mut QueryEngine) {
-    let sessions = agent_code_lib::services::session::list_sessions(20);
+    let cwd = engine.state().cwd.clone();
+    let mut sessions = agent_code_lib::services::session::list_sessions_for_cwd(&cwd, 20);
+    if sessions.is_empty() {
+        // Fallback: show all sessions if none match this cwd.
+        sessions = agent_code_lib::services::session::list_sessions(20);
+    }
     if sessions.is_empty() {
         println!("No saved sessions to pick from.");
         return;

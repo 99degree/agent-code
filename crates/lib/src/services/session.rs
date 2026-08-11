@@ -386,6 +386,30 @@ pub fn list_sessions(limit: usize) -> Vec<SessionSummary> {
     sessions
 }
 
+/// Canonicalize a path for comparison: resolve `.` / `..` and remove
+/// trailing slashes so `/home/user/project/` matches `/home/user/project`.
+fn canonicalize_cwd(path: &str) -> String {
+    std::path::Path::new(path)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(path))
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// List recent sessions filtered to the given working directory.
+///
+/// Sessions whose `cwd` does not match `target_cwd` (after
+/// canonicalization) are excluded.  Returns an empty vec when no
+/// sessions match, preserving the same sort order as [`list_sessions`].
+pub fn list_sessions_for_cwd(target_cwd: &str, limit: usize) -> Vec<SessionSummary> {
+    let canonical = canonicalize_cwd(target_cwd);
+    let mut sessions = list_sessions(limit * 4); // over-fetch before filtering
+    sessions.retain(|s| canonicalize_cwd(&s.cwd) == canonical);
+    sessions.truncate(limit);
+    sessions
+}
+
 /// Summary fields only, deserialized WITHOUT materializing the
 /// `messages` transcript (serde skips the unknown field), so hot-path
 /// callers don't pay to allocate every session's full history.
@@ -693,6 +717,62 @@ pub(crate) fn prune_older_than_in(
     debug!(
         "Session prune: removed {} kept {} (threshold {} days)",
         stats.removed, stats.kept, days
+    );
+    Ok(stats)
+}
+
+/// Delete sessions with fewer than `min_messages` messages.
+///
+/// Sessions with unparseable data or zero messages are kept
+/// defensively. The sidecar index is dropped when anything is removed.
+pub fn prune_by_message_count(min_messages: usize) -> Result<PruneStats, String> {
+    let dir = sessions_dir().ok_or("Could not determine sessions directory")?;
+    if !dir.is_dir() {
+        return Ok(PruneStats::default());
+    }
+
+    let mut stats = PruneStats::default();
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("Read {dir:?} failed: {e}"))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => {
+                stats.kept += 1;
+                continue;
+            }
+        };
+        let data: SessionData = match serde_json::from_str(&content) {
+            Ok(d) => d,
+            Err(_) => {
+                stats.kept += 1;
+                continue;
+            }
+        };
+
+        if data.messages.len() < min_messages {
+            if std::fs::remove_file(&path).is_ok() {
+                stats.removed += 1;
+            } else {
+                stats.kept += 1;
+            }
+        } else {
+            stats.kept += 1;
+        }
+    }
+
+    if stats.removed > 0 {
+        let _ = std::fs::remove_file(dir.join(INDEX_FILE));
+    }
+
+    debug!(
+        "Session prune by count: removed {} kept {} (min_messages {})",
+        stats.removed, stats.kept, min_messages
     );
     Ok(stats)
 }
@@ -1864,4 +1944,3 @@ mod tests {
         );
     }
 }
-
