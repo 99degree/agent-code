@@ -70,6 +70,9 @@ pub struct SessionData {
     pub updated_at: String,
     /// Working directory at session start.
     pub cwd: String,
+    /// Repository name (e.g. "owner/repo") if in a git repo.
+    #[serde(default)]
+    pub repo: String,
     /// Model used in this session.
     pub model: String,
     /// Base URL of the provider the session ran on.
@@ -205,7 +208,7 @@ pub fn save_session(
     turn_count: usize,
 ) -> Result<PathBuf, String> {
     save_session_full(
-        session_id, messages, cwd, model, turn_count, 0.0, 0, 0, false, None, false, "", "",
+        session_id, messages, cwd, model, turn_count, 0.0, 0, 0, false, None, false, "", "", "",
     )
 }
 
@@ -230,6 +233,7 @@ pub fn save_session_full(
     brief_mode: bool,
     response_style: &str,
     base_url: &str,
+    repo: &str,
 ) -> Result<PathBuf, String> {
     with_session_lock(session_id, |path| {
         // Preserve original created_at, label, tags, and (when the caller
@@ -248,6 +252,7 @@ pub fn save_session_full(
             updated_at: chrono::Utc::now().to_rfc3339(),
             cwd: cwd.to_string(),
             model: model.to_string(),
+            repo: repo.to_string(),
             base_url: base_url.to_string(),
             messages: messages.to_vec(),
             turn_count,
@@ -999,6 +1004,7 @@ mod tests {
             created_at: "2026-04-15T00:00:00Z".into(),
             updated_at: "2026-04-15T00:00:00Z".into(),
             cwd: "/work".into(),
+            repo: String::new(),
             model: "test-model".into(),
             messages,
             turn_count: 1,
@@ -1062,6 +1068,7 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             updated_at: chrono::Utc::now().to_rfc3339(),
             cwd: "/tmp".to_string(),
+            repo: String::new(),
             model: "test-model".to_string(),
             messages: messages.clone(),
             turn_count: 5,
@@ -1096,6 +1103,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             cwd: "/home/user/project".to_string(),
+            repo: String::new(),
             model: "claude-sonnet-4".to_string(),
             messages: vec![user_message("test")],
             turn_count: 3,
@@ -1129,6 +1137,7 @@ mod tests {
             created_at: "2026-04-15T00:00:00Z".to_string(),
             updated_at: "2026-04-15T00:00:00Z".to_string(),
             cwd: "/work".to_string(),
+            repo: String::new(),
             model: "test-model".to_string(),
             messages: vec![user_message(format!("here is my key {aws_key}"))],
             turn_count: 1,
@@ -1162,6 +1171,7 @@ mod tests {
             created_at: "2026-04-15T00:00:00Z".to_string(),
             updated_at: "2026-04-15T00:00:00Z".to_string(),
             cwd: "/work".to_string(),
+            repo: String::new(),
             model: "test-model".to_string(),
             messages: vec![user_message(secret_line)],
             turn_count: 1,
@@ -1192,6 +1202,7 @@ mod tests {
             created_at: "2026-04-15T00:00:00Z".to_string(),
             updated_at: "2026-04-15T00:00:00Z".to_string(),
             cwd: "/work".to_string(),
+            repo: String::new(),
             model: "test-model".to_string(),
             messages: vec![user_message("api_key=hunter2hunter2")],
             turn_count: 1,
@@ -1234,6 +1245,7 @@ mod tests {
                 created_at: "2026-04-15T00:00:00Z".to_string(),
                 updated_at: "2026-04-15T00:00:00Z".to_string(),
                 cwd: "/work".to_string(),
+                repo: String::new(),
                 model: "test-model".to_string(),
                 messages: vec![user_message(shape.to_string())],
                 turn_count: 1,
@@ -1343,6 +1355,7 @@ mod tests {
             created_at: "2026-04-15T00:00:00Z".to_string(),
             updated_at: "2026-04-15T00:00:00Z".to_string(),
             cwd: "/work".to_string(),
+            repo: String::new(),
             model: "test-model".to_string(),
             messages: vec![user_message("fn main() { println!(\"hello\"); }")],
             turn_count: 1,
@@ -1369,6 +1382,7 @@ mod tests {
             created_at: "2026-04-15T00:00:00Z".into(),
             updated_at: "2026-04-15T00:00:00Z".into(),
             cwd: "/work".into(),
+            repo: String::new(),
             model: "m".into(),
             messages: vec![],
             turn_count: 1,
@@ -1464,6 +1478,7 @@ mod tests {
             created_at: updated_at.to_string(),
             updated_at: updated_at.to_string(),
             cwd: "/w".into(),
+            repo: String::new(),
             model: "m".into(),
             messages: Vec::new(),
             turn_count: 0,
@@ -1800,6 +1815,7 @@ mod tests {
             false,
             "",
             "",
+            "",
         )
         .expect("save");
         let loaded = load_session(id).expect("load");
@@ -1819,6 +1835,7 @@ mod tests {
             false,
             None,
             false,
+            "",
             "",
             "",
         )
@@ -1847,3 +1864,4 @@ mod tests {
         );
     }
 }
+
