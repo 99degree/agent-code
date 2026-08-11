@@ -72,6 +72,9 @@ pub struct SessionData {
     pub cwd: String,
     /// Model used in this session.
     pub model: String,
+    /// Base URL of the provider the session ran on.
+    #[serde(default)]
+    pub base_url: String,
     /// Conversation messages.
     pub messages: Vec<Message>,
     /// Total turns completed.
@@ -88,6 +91,12 @@ pub struct SessionData {
     /// Whether plan mode was active.
     #[serde(default)]
     pub plan_mode: bool,
+    /// Brief mode setting at save time.
+    #[serde(default)]
+    pub brief_mode: bool,
+    /// Response style name at save time.
+    #[serde(default)]
+    pub response_style: String,
     /// Optional human-readable label set via `/rename`. Not used for
     /// lookup — the session ID is still the primary key — but shown
     /// in `/sessions` and the resume picker.
@@ -196,7 +205,7 @@ pub fn save_session(
     turn_count: usize,
 ) -> Result<PathBuf, String> {
     save_session_full(
-        session_id, messages, cwd, model, turn_count, 0.0, 0, 0, false, None,
+        session_id, messages, cwd, model, turn_count, 0.0, 0, 0, false, None, false, "", "",
     )
 }
 
@@ -218,6 +227,9 @@ pub fn save_session_full(
     total_output_tokens: u64,
     plan_mode: bool,
     provider: Option<ProviderIdentity>,
+    brief_mode: bool,
+    response_style: &str,
+    base_url: &str,
 ) -> Result<PathBuf, String> {
     with_session_lock(session_id, |path| {
         // Preserve original created_at, label, tags, and (when the caller
@@ -236,12 +248,15 @@ pub fn save_session_full(
             updated_at: chrono::Utc::now().to_rfc3339(),
             cwd: cwd.to_string(),
             model: model.to_string(),
+            base_url: base_url.to_string(),
             messages: messages.to_vec(),
             turn_count,
             total_cost_usd,
             total_input_tokens,
             total_output_tokens,
             plan_mode,
+            brief_mode,
+            response_style: response_style.to_string(),
             label,
             tags,
             provider: provider.or(prior_provider),
@@ -991,6 +1006,9 @@ mod tests {
             total_input_tokens: 0,
             total_output_tokens: 0,
             plan_mode: false,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             label: None,
             tags: Vec::new(),
             provider: None,
@@ -1051,6 +1069,9 @@ mod tests {
             total_input_tokens: 0,
             total_output_tokens: 0,
             plan_mode: false,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             label: None,
             tags: Vec::new(),
             provider: None,
@@ -1082,6 +1103,9 @@ mod tests {
             total_input_tokens: 1000,
             total_output_tokens: 500,
             plan_mode: false,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             label: None,
             tags: Vec::new(),
             provider: None,
@@ -1112,6 +1136,9 @@ mod tests {
             total_input_tokens: 0,
             total_output_tokens: 0,
             plan_mode: false,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             label: None,
             tags: Vec::new(),
             provider: None,
@@ -1142,6 +1169,9 @@ mod tests {
             total_input_tokens: 0,
             total_output_tokens: 0,
             plan_mode: false,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             label: None,
             tags: Vec::new(),
             provider: None,
@@ -1169,6 +1199,9 @@ mod tests {
             total_input_tokens: 0,
             total_output_tokens: 0,
             plan_mode: false,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             label: None,
             tags: Vec::new(),
             provider: None,
@@ -1208,6 +1241,9 @@ mod tests {
                 total_input_tokens: 0,
                 total_output_tokens: 0,
                 plan_mode: false,
+                base_url: String::new(),
+                brief_mode: false,
+                response_style: String::new(),
                 label: None,
                 tags: Vec::new(),
                 provider: None,
@@ -1314,6 +1350,9 @@ mod tests {
             total_input_tokens: 0,
             total_output_tokens: 0,
             plan_mode: false,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             label: None,
             tags: Vec::new(),
             provider: None,
@@ -1337,6 +1376,9 @@ mod tests {
             total_input_tokens: 0,
             total_output_tokens: 0,
             plan_mode: false,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             label: Some("refactor pass".into()),
             tags: Vec::new(),
             provider: None,
@@ -1429,6 +1471,9 @@ mod tests {
             total_input_tokens: 0,
             total_output_tokens: 0,
             plan_mode: false,
+            base_url: String::new(),
+            brief_mode: false,
+            response_style: String::new(),
             label: None,
             tags: Vec::new(),
             provider: None,
@@ -1752,6 +1797,9 @@ mod tests {
             0,
             false,
             Some(identity.clone()),
+            false,
+            "",
+            "",
         )
         .expect("save");
         let loaded = load_session(id).expect("load");
@@ -1770,6 +1818,9 @@ mod tests {
             0,
             false,
             None,
+            false,
+            "",
+            "",
         )
         .expect("resave");
         let again = load_session(id).expect("load again");

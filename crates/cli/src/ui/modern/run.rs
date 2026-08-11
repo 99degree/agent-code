@@ -1468,6 +1468,21 @@ pub(super) async fn event_loop(
                             if !data.model.is_empty() {
                                 st.config.api.model = data.model.clone();
                             }
+                            // Restore per-session presentation state saved
+                            // with the conversation.
+                            st.brief_mode = data.brief_mode;
+                            if !data.response_style.is_empty() {
+                                if let Some(style) =
+                                    agent_code_lib::state::ResponseStyle::from_name(
+                                        &data.response_style,
+                                    )
+                                {
+                                    st.response_style = style;
+                                }
+                            }
+                            if !data.base_url.is_empty() {
+                                st.config.api.base_url = data.base_url.clone();
+                            }
                         }
                         // "Allow for this session" grants belong to the
                         // conversation they were given in. The engine is
@@ -2437,6 +2452,9 @@ struct SessionSnapshot {
     plan_mode: bool,
     /// Resolved provider identity of the live engine at save time.
     provider: agent_code_lib::services::session::ProviderIdentity,
+    brief_mode: bool,
+    response_style: String,
+    base_url: String,
 }
 
 /// Copy the live conversation out of the engine, or `None` when there is
@@ -2467,6 +2485,9 @@ fn session_snapshot(eng: &agent_code_lib::query::QueryEngine) -> Option<SessionS
             &st.config.api.base_url,
             st.config.api.auth_mode,
         ),
+        brief_mode: st.brief_mode,
+        response_style: st.response_style.name().to_string(),
+        base_url: st.config.api.base_url.clone(),
     })
 }
 
@@ -2490,6 +2511,9 @@ fn write_session_snapshot(snap: &SessionSnapshot) -> Result<(), String> {
         snap.tokens_out,
         snap.plan_mode,
         Some(snap.provider.clone()),
+        snap.brief_mode,
+        &snap.response_style,
+        &snap.base_url,
     )
     .map(|_| ())
 }
