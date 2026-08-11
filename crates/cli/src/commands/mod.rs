@@ -2100,6 +2100,9 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         state.config.api.auth_mode,
                     ),
                 ),
+                state.brief_mode,
+                state.response_style.name(),
+                &state.config.api.base_url,
             ) {
                 Ok(_) => {
                     println!("Forked conversation at message {msg_count} -> session {fork_id}",);
