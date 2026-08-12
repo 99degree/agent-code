@@ -382,10 +382,13 @@ fn load_truncated_file(path: &Path) -> Option<String> {
     let mut was_byte_truncated = false;
 
     if result.len() > MAX_MEMORY_FILE_BYTES {
-        if let Some(pos) = result[..MAX_MEMORY_FILE_BYTES].rfind('\n') {
+        // Snap to a char boundary so the byte slice and truncate below
+        // never land inside a multi-byte UTF-8 sequence (e.g. an em dash).
+        let end = result.ceil_char_boundary(MAX_MEMORY_FILE_BYTES);
+        if let Some(pos) = result[..end].rfind('\n') {
             result.truncate(pos);
         } else {
-            result.truncate(MAX_MEMORY_FILE_BYTES);
+            result.truncate(end);
         }
         was_byte_truncated = true;
     }

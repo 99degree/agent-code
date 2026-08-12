@@ -43,6 +43,7 @@ pub mod mcp_resources;
 pub mod monitor;
 pub mod multi_edit;
 pub mod notebook_edit;
+pub mod read_alias;
 pub mod plan_mode;
 pub mod plugin_exec;
 pub mod powershell;

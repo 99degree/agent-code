@@ -104,6 +104,7 @@ impl ToolRegistry {
         registry.register(Arc::new(super::apply_patch::ApplyPatchTool));
         registry.register(Arc::new(super::bash::BashTool));
         registry.register(Arc::new(super::file_read::FileReadTool));
+        registry.register(Arc::new(super::read_alias::ReadTool));
         registry.register(Arc::new(super::file_write::FileWriteTool));
         registry.register(Arc::new(super::file_edit::FileEditTool));
         registry.register(Arc::new(super::multi_edit::MultiEditTool));
@@ -153,6 +154,7 @@ impl ToolRegistry {
     pub fn read_only_file_tools() -> Self {
         let mut registry = Self::new();
         registry.register(Arc::new(super::file_read::FileReadTool));
+        registry.register(Arc::new(super::read_alias::ReadTool));
         registry.register(Arc::new(super::grep::GrepTool));
         registry.register(Arc::new(super::glob::GlobTool));
         registry

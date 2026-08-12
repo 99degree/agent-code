@@ -2310,8 +2310,12 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                                 })
                                 .collect::<Vec<_>>()
                                 .join("");
-                            let preview = if text.len() > 120 {
-                                format!("{}...", &text[..117])
+                            let preview = if text.chars().count() > 120 {
+                                let end = text
+                                    .char_indices()
+                                    .nth(117)
+                                    .map_or(text.len(), |(i, _)| i);
+                                format!("{}...", &text[..end])
                             } else {
                                 text
                             };
@@ -2343,8 +2347,12 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                                     )
                                 })
                                 .count();
-                            let preview = if text.len() > 120 {
-                                format!("{}...", &text[..117])
+                            let preview = if text.chars().count() > 120 {
+                                let end = text
+                                    .char_indices()
+                                    .nth(117)
+                                    .map_or(text.len(), |(i, _)| i);
+                                format!("{}...", &text[..end])
                             } else {
                                 text
                             };
@@ -3821,8 +3829,12 @@ pub(crate) fn run_tips_command(
                 let dismissed = state.dismissed.iter().any(|d| d == &tip.id);
                 let marker = if dismissed { " [dismissed]" } else { "" };
                 let preview = tip.body.lines().next().unwrap_or("");
-                let snip = if preview.len() > 72 {
-                    format!("{}…", &preview[..72])
+                let snip = if preview.chars().count() > 72 {
+                    let end = preview
+                        .char_indices()
+                        .nth(72)
+                        .map_or(preview.len(), |(i, _)| i);
+                    format!("{}…", &preview[..end])
                 } else {
                     preview.to_string()
                 };
@@ -4276,7 +4288,7 @@ fn execute_usage(engine: &QueryEngine) {
     // Model column width: longest model name, capped at 24.
     let model_w = rows
         .iter()
-        .map(|r| r.model.len())
+        .map(|r| r.model.chars().count())
         .max()
         .unwrap_or(5)
         .min(24);
@@ -4307,9 +4319,10 @@ fn execute_usage(engine: &QueryEngine) {
     let mut tot_cr = 0u64;
     let mut tot_cw = 0u64;
     for r in &rows {
-        let model_display = if r.model.len() > model_w {
+        let model_display = if r.model.chars().count() > model_w {
             // Keep the tail — model family tokens live at the end.
-            let start = r.model.len() - model_w;
+            let skip = r.model.chars().count() - model_w;
+            let start = r.model.char_indices().nth(skip).map_or(0, |(i, _)| i);
             &r.model[start..]
         } else {
             r.model.as_str()
@@ -4403,12 +4416,16 @@ fn mask_secret(value: &str) -> String {
     if value.is_empty() {
         return "(empty)".to_string();
     }
-    let len = value.len();
-    if len <= 4 {
-        return format!("({len} chars, masked)");
+    let char_count = value.chars().count();
+    if char_count <= 4 {
+        return format!("({char_count} chars, masked)");
     }
-    let tail = &value[len - 4..];
-    format!("({len} chars, ends in …{tail})")
+    let tail_start = value
+        .char_indices()
+        .nth(char_count - 4)
+        .map_or(value.len(), |(i, _)| i);
+    let tail = &value[tail_start..];
+    format!("({char_count} chars, ends in …{tail})")
 }
 
 /// Execute `/env` — print the environment vars agent-code actually reads,
