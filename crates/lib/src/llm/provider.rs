@@ -328,6 +328,42 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     ProviderKind::OpenAiCompatible
 }
 
+/// Get a provider kind for a model and base URL, with fallback behavior.
+///
+/// 1. First, detect a provider candidate from the model and base URL.
+///    If the model is found in that provider's model list, return it.
+/// 2. Otherwise, search all providers' model lists (by name only) for the
+///    model and return the first match.
+/// 3. If still not found, fall back to the detected provider from step 1.
+pub fn get_provider_for_model(model: &str, base_url: &str) -> ProviderKind {
+    // Step 1: Get candidate provider from model and base_url.
+    let candidate_kind = detect_provider(model, base_url);
+
+    // Step 2: Check if the model is in the candidate provider's model list.
+    let models = models_for_provider(candidate_kind);
+    if models.iter().any(|(m, _)| m.eq_ignore_ascii_case(model)) {
+        return candidate_kind;
+    }
+
+    // Step 3: Search all providers by model name.
+    for &kind in ProviderKind::all() {
+        let models = models_for_provider(kind);
+        if models.iter().any(|(m, _)| m.eq_ignore_ascii_case(model)) {
+            return kind;
+        }
+    }
+
+    // Step 4: Fallback to candidate_kind.
+    candidate_kind
+}
+
+/// Resolve the API key for a provider: the provider's environment variable
+/// first, then the global config key.
+pub fn resolve_api_key(kind: ProviderKind, config: &crate::config::Config) -> Option<String> {
+    kind.api_key_from_env()
+        .or_else(|| config.api.api_key.clone())
+}
+
 /// The two wire formats that cover the entire LLM ecosystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireFormat {
@@ -365,6 +401,46 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
+    /// All known provider kinds, in display order.
+    pub fn all() -> &'static [ProviderKind] {
+        &[
+            ProviderKind::Anthropic,
+            ProviderKind::Bedrock,
+            ProviderKind::Vertex,
+            ProviderKind::OpenAi,
+            ProviderKind::AzureOpenAi,
+            ProviderKind::Xai,
+            ProviderKind::Google,
+            ProviderKind::DeepSeek,
+            ProviderKind::Groq,
+            ProviderKind::Mistral,
+            ProviderKind::Together,
+            ProviderKind::Zhipu,
+            ProviderKind::OpenRouter,
+            ProviderKind::Cohere,
+            ProviderKind::Perplexity,
+            ProviderKind::Nvidia,
+            ProviderKind::Kilo,
+            ProviderKind::Novita,
+            ProviderKind::OpenCode,
+            ProviderKind::OpenCodeGo,
+            ProviderKind::OpenAiCompatible,
+        ]
+    }
+
+    /// Check if this provider has an API key configured (via its env var).
+    pub fn is_configured(&self) -> bool {
+        // Skip providers that don't use simple API key auth.
+        if matches!(self, Self::Bedrock | Self::Vertex) {
+            return false;
+        }
+        // OpenAiCompatible is a fallback, not a real provider.
+        if matches!(self, Self::OpenAiCompatible) {
+            return false;
+        }
+        self.api_key_from_env().is_some()
+    }
+
     /// Which wire format this provider uses.
     pub fn wire_format(&self) -> WireFormat {
         match self {

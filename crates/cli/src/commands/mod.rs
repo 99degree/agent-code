@@ -116,6 +116,12 @@ pub const COMMANDS: &[Command] = &[
         hidden: false,
     },
     Command {
+        name: "subagent",
+        aliases: &[],
+        description: "Show or change the default sub-agent model",
+        hidden: false,
+    },
+    Command {
         name: "memory",
         aliases: &[],
         description: "Show loaded memory context",
@@ -1122,8 +1128,29 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
         }
         Some("model") => {
             if let Some(new_model) = args {
+                // Find provider for this model using URL-first logic with fallback.
+                let base_url = engine.state().config.api.base_url.clone();
+                let provider_kind =
+                    agent_code_lib::llm::provider::get_provider_for_model(new_model, &base_url);
+
+                // Set base URL based on provider (clear if no default URL).
+                if let Some(url) = provider_kind.default_base_url() {
+                    engine.state_mut().config.api.base_url = url.to_string();
+                } else {
+                    // Provider has no default URL — clear a stale base_url
+                    // that was auto-set from a different provider's default.
+                    let stale = agent_code_lib::llm::provider::ProviderKind::all().iter().any(
+                        |k| {
+                            k.default_base_url()
+                                .is_some_and(|u| u == base_url)
+                        },
+                    );
+                    if stale {
+                        engine.state_mut().config.api.base_url.clear();
+                    }
+                }
+
                 engine.state_mut().config.api.model = new_model.to_string();
-                println!("Model changed to: {new_model}");
                 // Record model change in conversation history.
                 engine
                     .state_mut()
@@ -1138,29 +1165,53 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             level: agent_code_lib::llm::message::MessageLevel::Info,
                         },
                     ));
+
+                println!("Model changed to: {new_model} [{provider_kind:?}]");
             } else {
-                // Interactive model selector based on configured provider.
+                // Interactive model selector showing all configured providers.
                 let current = engine.state().config.api.model.clone();
-                let base_url = engine.state().config.api.base_url.clone();
-                let provider = agent_code_lib::llm::provider::detect_provider(&current, &base_url);
 
-                let models = agent_code_lib::llm::provider::models_for_provider(provider);
+                // Collect (model_name, description, provider_kind) tuples.
+                let mut all_models: Vec<(
+                    String,
+                    String,
+                    agent_code_lib::llm::provider::ProviderKind,
+                )> = Vec::new();
+                for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
+                    if !kind.is_configured() {
+                        continue;
+                    }
+                    let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                    if models.is_empty() {
+                        continue;
+                    }
+                    for (name, desc) in models {
+                        all_models.push((name.to_string(), desc.to_string(), kind));
+                    }
+                }
 
-                if models.is_empty() {
+                if all_models.is_empty() {
                     println!("Model: {current}");
-                    println!("Use /model <name> to change.");
+                    println!(
+                        "No providers configured. Set an API key (e.g. {}) to browse models.",
+                        agent_code_lib::llm::provider::detect_provider(
+                            &current,
+                            &engine.state().config.api.base_url,
+                        )
+                        .env_var_name()
+                    );
                 } else {
                     println!();
                     println!("  Select model");
                     println!();
 
-                    let options: Vec<crate::ui::selector::SelectOption> = models
+                    let options: Vec<crate::ui::selector::SelectOption> = all_models
                         .iter()
-                        .map(|(name, desc)| {
+                        .map(|(name, desc, kind)| {
                             let check = if *name == current { " ✔" } else { "" };
                             crate::ui::selector::SelectOption {
                                 label: format!("{name}{check}"),
-                                description: desc.to_string(),
+                                description: format!("[{kind:?}] {desc}"),
                                 value: name.to_string(),
                                 preview: None,
                             }
@@ -1169,8 +1220,18 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
 
                     let chosen = crate::ui::selector::select(&options);
                     if !chosen.is_empty() {
+                        // Find the provider for this model and update base_url.
+                        let found_kind = all_models
+                            .iter()
+                            .find(|(n, _, _)| n == &chosen)
+                            .map(|(_, _, k)| *k);
+                        if let Some(kind) = found_kind {
+                            if let Some(url) = kind.default_base_url() {
+                                engine.state_mut().config.api.base_url = url.to_string();
+                            }
+                        }
                         engine.state_mut().config.api.model = chosen.clone();
-                        println!("Model changed to: {chosen}");
+                        println!("Model changed to: {chosen} [{found_kind:?}]");
                         // Record model change in conversation history.
                         engine.state_mut().messages.push(
                             agent_code_lib::llm::message::Message::System(
@@ -1330,6 +1391,23 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     }
                 }
                 Err(e) => println!("Error: {e}"),
+            }
+            CommandResult::Handled
+        }
+        Some("subagent") => {
+            if let Some(new_model) = args {
+                engine.state_mut().config.api.subagent_model =
+                    Some(new_model.to_string());
+                println!("Sub-agent model changed to: {new_model}");
+            } else {
+                let current = engine
+                    .state()
+                    .config
+                    .api
+                    .subagent_model
+                    .as_deref()
+                    .unwrap_or("(not set — inherits main model)");
+                println!("Sub-agent model: {current}");
             }
             CommandResult::Handled
         }
