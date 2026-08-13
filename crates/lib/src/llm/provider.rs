@@ -364,6 +364,51 @@ pub fn resolve_api_key(kind: ProviderKind, config: &crate::config::Config) -> Op
         .or_else(|| config.api.api_key.clone())
 }
 
+/// Create a provider from config (model, base_url). The API key is
+/// resolved per-provider via [`resolve_api_key`], so each provider uses
+/// its own credential (env var, then per-provider config key) instead of
+/// a different provider's key. Covers the API-key auth modes; OAuth-based
+/// modes (Codex ChatGPT, xAI OAuth) are not constructed here.
+pub fn create_provider_from_config(
+    model: &str,
+    base_url: &str,
+    config: &crate::config::Config,
+) -> std::sync::Arc<dyn Provider> {
+    let kind = detect_provider(model, base_url);
+    let resolved_key = resolve_api_key(kind, config).unwrap_or_default();
+    match kind {
+        ProviderKind::AzureOpenAi => std::sync::Arc::new(
+            crate::llm::azure_openai::AzureOpenAiProvider::new(base_url, &resolved_key),
+        ),
+        ProviderKind::Novita => std::sync::Arc::new(crate::llm::novita::NovitaProvider::new(
+            base_url,
+            &resolved_key,
+        )),
+        _ => match kind.wire_format() {
+            WireFormat::Anthropic => std::sync::Arc::new(
+                crate::llm::anthropic::AnthropicProvider::new(base_url, &resolved_key),
+            ),
+            WireFormat::OpenAiCompatible => {
+                // Nemotron models emit tool calls as custom text markup rather
+                // than structured `tool_calls` deltas; route them through the
+                // Nemotron-aware provider regardless of which OpenAI-compatible
+                // endpoint serves them.
+                if crate::llm::nemotron::is_nemotron_model(model) {
+                    std::sync::Arc::new(crate::llm::openai::OpenAiProvider::new_nemotron(
+                        base_url,
+                        &resolved_key,
+                    ))
+                } else {
+                    std::sync::Arc::new(crate::llm::openai::OpenAiProvider::new(
+                        base_url,
+                        &resolved_key,
+                    ))
+                }
+            }
+        },
+    }
+}
+
 /// The two wire formats that cover the entire LLM ecosystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireFormat {
