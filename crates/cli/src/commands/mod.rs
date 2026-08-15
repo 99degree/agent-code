@@ -10,6 +10,7 @@
 //! the conversation, change settings, or execute side effects.
 
 mod heapdump;
+mod import_pi;
 mod settings_sync;
 mod uninstall;
 
@@ -119,6 +120,12 @@ pub const COMMANDS: &[Command] = &[
         name: "subagent",
         aliases: &[],
         description: "Show or change the default sub-agent model",
+        hidden: false,
+    },
+    Command {
+        name: "import-pi",
+        aliases: &[],
+        description: "Import a pi.dev JSONL session file into agent-code",
         hidden: false,
     },
     Command {
@@ -1409,6 +1416,11 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     .unwrap_or("(not set — inherits main model)");
                 println!("Sub-agent model: {current}");
             }
+            CommandResult::Handled
+        }
+        Some("import-pi") => {
+            let result = import_pi::execute(args, engine);
+            println!("{result}");
             CommandResult::Handled
         }
         Some("diff") => {
