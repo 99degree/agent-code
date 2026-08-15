@@ -429,6 +429,7 @@ pub(super) async fn run_beats(mut h: Harness, beats: Vec<Beat>, seen: Seen) -> (
         // Test-mode service: records instead of shelling out to the OS.
         &mut test_notifier,
         &mut term_events,
+        &mut None,
         &mut draw,
     )
     .await
