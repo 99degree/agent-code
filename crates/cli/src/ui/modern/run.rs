@@ -218,6 +218,7 @@ async fn drive_while_painting<F>(
     term_events: &mut (impl futures::Stream<Item = std::io::Result<Event>> + Unpin),
     draw: &mut dyn FnMut(&mut App) -> anyhow::Result<()>,
     buffered: &mut std::collections::VecDeque<Event>,
+    term_rx: &mut Option<mpsc::UnboundedReceiver<Event>>,
     work: F,
 ) -> bool
 where
@@ -228,7 +229,7 @@ where
     loop {
         tokio::select! {
             () = &mut work => break,
-            maybe_ev = term_events.next() => {
+            maybe_ev = term_reader_next(term_events, term_rx) => {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) if is_cancel_chord(&key) => {
                         cancelled = true;
@@ -255,14 +256,58 @@ where
 ///
 /// Keeps replayed input on exactly the same path as live input, so the
 /// handling never diverges between the two.
+/// True when running inside Termux (Android), which advertises itself via the
+/// `TERMUX_VERSION` environment variable.
+fn is_termux() -> bool {
+    std::env::var_os("TERMUX_VERSION").is_some()
+}
+
+/// Spawn a thread that reads terminal events with the blocking
+/// [`crossterm::event::read`] and forwards them over a channel. Used in place
+/// of [`EventStream`] on Termux: a foreground process parked in `poll()` does
+/// not keep the pty's read pending, so Termux never shows the on-screen
+/// keyboard on tap. A dedicated thread blocked in `read()` does.
+///
+/// The thread cannot be interrupted once blocked in `read()`, so on clean
+/// exit it lingers until the next keystroke (which fails to send and breaks
+/// the loop). The CLI process exits immediately after, so this is harmless.
+fn spawn_blocking_event_reader() -> mpsc::UnboundedReceiver<Event> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        while let Ok(ev) = crossterm::event::read() {
+            if tx.send(ev).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// Yield the next terminal event from the blocking-read channel when on
+/// Termux, otherwise from the crossterm [`EventStream`]. Used for the
+/// secondary event-read sites (teardown waits) so that on Termux the only
+/// reader is the blocking thread — mixing it with the poll-based
+/// `EventStream` would split the same stdin and drop events.
+async fn term_reader_next(
+    stream: &mut (impl futures::Stream<Item = std::io::Result<Event>> + Unpin),
+    rx: &mut Option<mpsc::UnboundedReceiver<Event>>,
+) -> Option<std::io::Result<Event>> {
+    if let Some(rx) = rx {
+        rx.recv().await.map(Ok)
+    } else {
+        stream.next().await
+    }
+}
+
 async fn next_terminal_event(
     buffered: &mut std::collections::VecDeque<Event>,
     stream: &mut (impl futures::Stream<Item = std::io::Result<Event>> + Unpin),
+    rx: &mut Option<mpsc::UnboundedReceiver<Event>>,
 ) -> Option<std::io::Result<Event>> {
     if let Some(ev) = buffered.pop_front() {
         return Some(Ok(ev));
     }
-    stream.next().await
+    term_reader_next(stream, rx).await
 }
 
 /// Whether moving from `current` to `candidate` relaxes the default.
@@ -486,6 +531,10 @@ pub async fn run_modern_tui(
 
     let mut terminal = setup_terminal()?;
     let mut term_events = EventStream::new();
+    // On Termux, read terminal input from a blocking thread so taps bring up
+    // the on-screen keyboard (see term_reader_next / spawn_blocking_event_reader).
+    let mut term_rx: Option<mpsc::UnboundedReceiver<Event>> =
+        if is_termux() { Some(spawn_blocking_event_reader()) } else { None };
     let mut draw = |app: &mut App| draw_frame(&mut terminal, app, caps);
     let result = event_loop(
         &session,
@@ -496,6 +545,7 @@ pub async fn run_modern_tui(
         &cli_permissions,
         &mut notifier,
         &mut term_events,
+        &mut term_rx,
         &mut draw,
     )
     .await;
@@ -710,6 +760,9 @@ fn pop_keyboard_enhancement(out: &mut impl Write) {
 }
 
 fn apply_mouse_capture(out: &mut impl Write, want: bool) {
+    // On Termux, never enable mouse capture (see setup_terminal) so a tap always
+    // reaches Termux's own show-keyboard handler.
+    let want = want && !is_termux();
     MOUSE_CAPTURE_WANTED.store(want, Ordering::Relaxed);
     if want {
         let _ = execute!(out, EnableMouseCapture);
@@ -726,17 +779,27 @@ fn setup_terminal() -> anyhow::Result<Term> {
     // (focus), paste brackets, or mouse tracking leak into the shell
     // (plan §M7/§M9). Mouse capture starts on; the user can drop it with
     // `/mouse` for native terminal selection.
+    // Enter alt screen and enable focus + bracketed paste. Mouse capture is
+    // enabled on every other platform. On Termux (Android) it is deliberately
+    // skipped: with mouse tracking on, Termux turns a screen tap into a mouse
+    // report sent to the app instead of re-triggering its own show-keyboard-on-
+    // touch, so once the on-screen keyboard is dismissed it can never be tapped
+    // back into view. Without mouse tracking, taps always reach Termux's
+    // keyboard handler (plan §M7/§M9).
+    let enable_mouse = !is_termux();
     if let Err(e) = execute!(
         out,
         EnterAlternateScreen,
         EnableFocusChange,
         EnableBracketedPaste,
-        EnableMouseCapture,
     ) {
         let _ = disable_raw_mode();
         return Err(e.into());
     }
-    MOUSE_CAPTURE_WANTED.store(true, Ordering::Relaxed);
+    if enable_mouse {
+        let _ = execute!(out, EnableMouseCapture);
+    }
+    MOUSE_CAPTURE_WANTED.store(enable_mouse, Ordering::Relaxed);
     // Pushed last, so it is popped first on every restore path.
     push_keyboard_enhancement(&mut out);
     let backend = CrosstermBackend::new(out);
@@ -863,6 +926,7 @@ pub(super) async fn event_loop(
     cli_permissions: &CliPermissionOverride,
     notifier: &mut NotifierService,
     term_events: &mut (impl futures::Stream<Item = std::io::Result<Event>> + Unpin),
+    mut term_rx: &mut Option<mpsc::UnboundedReceiver<Event>>,
     draw: &mut dyn FnMut(&mut App) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let mut turn: Option<TurnHandle> = None;
@@ -1238,7 +1302,7 @@ pub(super) async fn event_loop(
                                         }
                                         break;
                                     }
-                                    maybe_ev = term_events.next() => {
+                                    maybe_ev = term_reader_next(term_events, term_rx) => {
                                         match maybe_ev {
                                             Some(Ok(Event::Key(key))) if is_cancel_chord(&key) => {
                                                 // Acted on now, not queued:
@@ -1292,6 +1356,7 @@ pub(super) async fn event_loop(
                                     term_events,
                                     draw,
                                     &mut pending_events,
+                                    &mut term_rx,
                                     async {
                                         let mut eng = engine_arc.lock().await;
                                         // The scope Ctrl+C just cancelled
@@ -1369,6 +1434,7 @@ pub(super) async fn event_loop(
                                 term_events,
                                 draw,
                                 &mut pending_events,
+                                &mut term_rx,
                                 async {
                                     let mut eng = engine_arc.lock().await;
                                     // The working set was announced as
@@ -1580,6 +1646,7 @@ pub(super) async fn event_loop(
                                 term_events,
                                 draw,
                                 &mut pending_events,
+                                &mut term_rx,
                                 async {
                                     let _ =
                                         eng.fire_cwd_changed_hooks(&previous_cwd, "resume").await;
@@ -1607,6 +1674,7 @@ pub(super) async fn event_loop(
                             term_events,
                             draw,
                             &mut pending_events,
+                            &mut term_rx,
                             async {
                                 let eng = engine_arc.lock().await;
                                 let _ = eng.fire_session_start_hooks().await;
@@ -2096,7 +2164,7 @@ pub(super) async fn event_loop(
 
         tokio::select! {
             // Terminal input.
-            maybe_ev = next_terminal_event(&mut pending_events, term_events) => {
+            maybe_ev = next_terminal_event(&mut pending_events, term_events, &mut term_rx) => {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) if is_cancel_chord(&key)
                         && app.resume.is_loading() =>
