@@ -1093,6 +1093,75 @@ pub(super) async fn event_loop(
             }
         }
 
+        // Apply a deferred `/provider` switch. Sets the provider's default
+        // base URL and a default model, so that a subsequent `/model` shows
+        // that provider's catalog. try_lock mirrors the `/model` handler.
+        if let Some(action) = app.take_pending_provider() {
+            let engine_arc = session.engine();
+            match engine_arc.try_lock() {
+                Ok(mut eng) => {
+                    let current = eng.state().config.api.model.clone();
+                    let base_url = eng.state().config.api.base_url.clone();
+                    let cur = agent_code_lib::llm::provider::detect_provider(&current, &base_url);
+                    let mut next_provider: Option<agent_code_lib::llm::provider::ProviderKind> =
+                        None;
+                    app.apply_provider_action(action, cur.as_name(), |p| next_provider = Some(p));
+                    if let Some(p) = next_provider {
+                        // Switching providers is only meaningful in the
+                        // API-key auth mode: OAuth-based modes (Codex ChatGPT,
+                        // xAI OAuth) bind credentials to a session object that
+                        // a base-URL swap can't repoint. Refuse rather than
+                        // silently sending one provider's model to another's
+                        // endpoint.
+                        if eng.state().config.api.auth_mode
+                            != agent_code_lib::config::ApiAuthMode::ApiKey
+                        {
+                            app.transcript.push(super::app::TranscriptItem::System(
+                                "Provider switching is only supported in api_key mode \
+                                 (the current OAuth login can't be repointed). \
+                                 Use a different key to change providers."
+                                    .into(),
+                            ));
+                            continue;
+                        }
+                        let Some(url) = p.default_base_url() else {
+                            app.transcript.push(super::app::TranscriptItem::System(
+                                format!(
+                                    "Provider `{}` has no default base URL; pass \
+                                     --api-base-url and a model to use it.",
+                                    p.as_name()
+                                ),
+                            ));
+                            continue;
+                        };
+                        eng.state_mut().config.api.base_url = url.to_string();
+                        if let Some(model) = p.default_model() {
+                            eng.state_mut().config.api.model = model.to_string();
+                            app.model = model.to_string();
+                        }
+                        // Rebuild the provider object so the next API request
+                        // hits the new endpoint — base_url/api_key are bound at
+                        // construction. The LLM is swapped between turns, never
+                        // mid-stream, so there's no in-flight request to cancel.
+                        eng.reload_llm().ok();
+                        app.status_message = format!(
+                            "provider → {} · {}",
+                            p.as_name(),
+                            eng.state().config.api.model
+                        );
+                        app.transcript.push(super::app::TranscriptItem::System(format!(
+                            "Provider changed to: {} ({}) — effective for the next request.",
+                            p.as_name(),
+                            eng.state().config.api.base_url
+                        )));
+                    }
+                }
+                Err(_) => {
+                    app.work.stage_provider(action);
+                }
+            }
+        }
+
         // Mirror a `/theme` selection into the engine config and persist
         // it, so `/config` agrees with the screen and the choice survives
         // a restart. The global theme was already switched by the picker.
