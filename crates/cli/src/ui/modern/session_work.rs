@@ -30,7 +30,7 @@
 //! deferred work where it meant to cancel it. Different verbs make that
 //! a choice at the call site instead of an accident.
 
-use super::app::PendingModelAction;
+use super::app::{PendingModelAction, PendingProviderAction};
 use super::resume_state::{ResumeState, WorkScope};
 
 /// A prompt the user submitted, with the words they actually typed.
@@ -73,6 +73,7 @@ impl Submission {
 pub struct SessionWork {
     submit: Option<Submission>,
     model: Option<PendingModelAction>,
+    provider: Option<PendingProviderAction>,
     clear: bool,
     slash: Option<String>,
     shell: Option<String>,
@@ -89,6 +90,10 @@ impl SessionWork {
 
     pub fn stage_model(&mut self, action: PendingModelAction) {
         self.model = Some(action);
+    }
+
+    pub fn stage_provider(&mut self, action: PendingProviderAction) {
+        self.provider = Some(action);
     }
 
     pub fn stage_clear(&mut self) {
@@ -113,6 +118,11 @@ impl SessionWork {
     /// Take a deferred `/model` action, unless a resume holds it.
     pub fn take_model(&mut self, resume: &ResumeState) -> Option<PendingModelAction> {
         self.gated(resume, |w| w.model.take())
+    }
+
+    /// Take a deferred `/provider` action, unless a resume holds it.
+    pub fn take_provider(&mut self, resume: &ResumeState) -> Option<PendingProviderAction> {
+        self.gated(resume, |w| w.provider.take())
     }
 
     /// Take a deferred bridged slash command, unless a resume holds it.
@@ -169,6 +179,11 @@ impl SessionWork {
         self.model.take().is_some()
     }
 
+    /// Drop a deferred `/provider`, reporting whether one was staged.
+    pub fn discard_provider(&mut self) -> bool {
+        self.provider.take().is_some()
+    }
+
     pub fn discard_slash(&mut self) -> Option<String> {
         self.slash.take()
     }
@@ -211,6 +226,10 @@ impl SessionWork {
 
     pub fn model_staged(&self) -> Option<&PendingModelAction> {
         self.model.as_ref()
+    }
+
+    pub fn provider_staged(&self) -> Option<&PendingProviderAction> {
+        self.provider.as_ref()
     }
 }
 
