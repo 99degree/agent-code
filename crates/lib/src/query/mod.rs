@@ -609,6 +609,37 @@ impl QueryEngine {
         &mut self.state
     }
 
+    /// Replace the active LLM provider object between turns.
+    ///
+    /// Used when `/provider` (or a config reload) changes `base_url` or
+    /// auth mode mid-session: the new provider takes effect before the
+    /// next API request, with no in-flight stream to cancel (turns run one
+    /// at a time under the engine lock). Callers must rebuild the
+    /// `Arc<dyn Provider>` from the new config — see
+    /// [`crate::llm::provider::create_provider_from_config`].
+    pub fn set_llm(&mut self, llm: Arc<dyn Provider>) {
+        self.llm = llm;
+    }
+
+    /// Rebuild the LLM provider object from the current config.
+    ///
+    /// `base_url` and `api_key` are baked into the provider at construction
+    /// time and never re-read between turns, so a `/provider` (or a
+    /// `/model`-driven base-URL change) that mutates `config.api` otherwise
+    /// won't repoint the live client. Call this between turns to make the new
+    /// endpoint/model effective for the next request. Safe to call only when
+    /// `auth_mode == ApiAuthMode::ApiKey` — OAuth-based modes carry session
+    /// credentials that this factory cannot reconstruct.
+    pub fn reload_llm(&mut self) -> Result<(), crate::llm::provider::ProviderError> {
+        let llm = crate::llm::provider::create_provider_from_config(
+            &self.state.config.api.model,
+            &self.state.config.api.base_url,
+            &self.state.config,
+        );
+        self.llm = llm;
+        Ok(())
+    }
+
     /// Get a reference to the active tool registry. Used by CLI
     /// surfaces that want to introspect which tools are available
     /// in the current session (e.g. `/tools` listings or doctor
