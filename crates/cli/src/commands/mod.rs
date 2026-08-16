@@ -75,6 +75,12 @@ pub const COMMANDS: &[Command] = &[
         hidden: false,
     },
     Command {
+        name: "provider",
+        aliases: &["p"],
+        description: "Show or switch the default LLM provider",
+        hidden: false,
+    },
+    Command {
         name: "diff",
         aliases: &[],
         description: "Show git diff of current changes",
@@ -1133,6 +1139,71 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             }
             CommandResult::Handled
         }
+        Some("provider") => {
+            let current_model = engine.state().config.api.model.clone();
+            let base_url = engine.state().config.api.base_url.clone();
+            let current = agent_code_lib::llm::provider::detect_provider(&current_model, &base_url);
+            if let Some(name) = args {
+                let kind = match agent_code_lib::llm::provider::ProviderKind::from_name(name) {
+                    Some(k) => k,
+                    None => {
+                        println!(
+                            "Unknown provider `{name}`. Run /provider to list available providers."
+                        );
+                        return CommandResult::Handled;
+                    }
+                };
+                if let Some(url) = kind.default_base_url() {
+                    engine.state_mut().config.api.base_url = url.to_string();
+                } else {
+                    println!(
+                        "Provider `{}` has no default base URL. Pass --api-base-url to use it.",
+                        kind.as_name()
+                    );
+                    return CommandResult::Handled;
+                }
+                if let Some(model) = kind.default_model() {
+                    engine.state_mut().config.api.model = model.to_string();
+                }
+                // The live provider object is built once at startup; repoint it
+                // before the next API request so the switch takes effect in
+                // this session. Only the API-key auth mode can be rebuilt here;
+                // OAuth sessions carry credentials that this factory can't
+                // reconstruct.
+                if engine.state().config.api.auth_mode
+                    == agent_code_lib::config::ApiAuthMode::ApiKey
+                {
+                    engine.reload_llm().ok();
+                }
+                engine.state_mut().messages.push(
+                    agent_code_lib::llm::message::Message::System(
+                        agent_code_lib::llm::message::SystemMessage {
+                            uuid: uuid::Uuid::new_v4(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            subtype: agent_code_lib::llm::message::SystemMessageType::Informational,
+                            content: format!("Provider changed to {}", kind.as_name()),
+                            level: agent_code_lib::llm::message::MessageLevel::Info,
+                        },
+                    ),
+                );
+                println!(
+                    "Provider changed to: {} ({})",
+                    kind.as_name(),
+                    engine.state().config.api.base_url
+                );
+            } else {
+                println!("Provider: {}", current.as_name());
+                println!("Available providers (/provider <name> to switch):");
+                for kind in agent_code_lib::llm::provider::ProviderKind::all() {
+                    let Some(url) = kind.default_base_url() else {
+                        continue;
+                    };
+                    let mark = if *kind == current { " ✔" } else { "" };
+                    println!("  {}  — {}{}", kind.as_name(), url, mark);
+                }
+            }
+            CommandResult::Handled
+        }
         Some("model") => {
             if let Some(new_model) = args {
                 // Find provider for this model using URL-first logic with fallback.
@@ -1141,7 +1212,11 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     agent_code_lib::llm::provider::get_provider_for_model(new_model, &base_url);
 
                 // Set base URL based on provider (clear if no default URL).
+                let mut base_url_changed = false;
                 if let Some(url) = provider_kind.default_base_url() {
+                    if engine.state().config.api.base_url != url {
+                        base_url_changed = true;
+                    }
                     engine.state_mut().config.api.base_url = url.to_string();
                 } else {
                     // Provider has no default URL — clear a stale base_url
@@ -1154,10 +1229,21 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     );
                     if stale {
                         engine.state_mut().config.api.base_url.clear();
+                        base_url_changed = true;
                     }
                 }
 
                 engine.state_mut().config.api.model = new_model.to_string();
+                // If the base URL changed, rebuild the provider object so the
+                // switch takes effect before the next API request (base_url is
+                // bound at provider construction). Only API-key auth can be
+                // rebuilt; OAuth sessions are left to be repointed on restart.
+                if base_url_changed
+                    && engine.state().config.api.auth_mode
+                        == agent_code_lib::config::ApiAuthMode::ApiKey
+                {
+                    engine.reload_llm().ok();
+                }
                 // Record model change in conversation history.
                 engine
                     .state_mut()

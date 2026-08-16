@@ -119,6 +119,43 @@ fn is_effort_level(s: &str) -> bool {
         .any(|l| l.eq_ignore_ascii_case(s.trim()))
 }
 
+/// Local `/provider` action deferred to the run loop (needs the engine lock).
+/// `Show` lists the available providers; `Set` switches the default provider
+/// (base URL + a default model), after which `/model` shows that provider's
+/// catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingProviderAction {
+    /// List available providers and the current one.
+    Show,
+    /// Switch the default provider to the given kind.
+    Set {
+        provider: agent_code_lib::llm::provider::ProviderKind,
+    },
+}
+
+/// Parse `/provider` / `/provider <name>` from a slash line.
+pub(crate) fn parse_provider_slash(input: &str) -> Option<PendingProviderAction> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let rest = trimmed.trim_start_matches('/');
+    let (cmd, args) = match rest.split_once(char::is_whitespace) {
+        Some((c, a)) => (c, Some(a.trim())),
+        None => (rest, None),
+    };
+    if !cmd.eq_ignore_ascii_case("provider") && !cmd.eq_ignore_ascii_case("p") {
+        return None;
+    }
+    match args {
+        None | Some("") => Some(PendingProviderAction::Show),
+        Some(name) => {
+            let kind = agent_code_lib::llm::provider::ProviderKind::from_name(name)?;
+            Some(PendingProviderAction::Set { provider: kind })
+        }
+    }
+}
+
 fn normalize_effort(s: &str) -> String {
     let t = s.trim().to_ascii_lowercase();
     if t == "max" { "xhigh".into() } else { t }
@@ -1943,6 +1980,14 @@ impl App {
             self.dirty = true;
             return;
         }
+        // /provider switches the default provider (engine lock needed).
+        if let Some(action) = parse_provider_slash(&text) {
+            self.work.stage_provider(action);
+            self.input.clear();
+            self.cursor = 0;
+            self.dirty = true;
+            return;
+        }
         // `!shell` passthrough — run loop captures output into history.
         if let Some(cmd) = text.strip_prefix('!').map(str::trim)
             && !cmd.is_empty()
@@ -2217,6 +2262,49 @@ impl App {
                     "Reasoning effort → {level} (model {})",
                     self.model
                 )));
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Apply a deferred `/provider` action against live engine state.
+    /// `set_provider` mutates the engine config (base URL + default model).
+    pub fn apply_provider_action(
+        &mut self,
+        action: PendingProviderAction,
+        current_provider: &str,
+        set_provider: impl FnOnce(agent_code_lib::llm::provider::ProviderKind),
+    ) {
+        match action {
+            PendingProviderAction::Show => {
+                let mut lines = vec![format!("Provider: {current_provider}")];
+                lines.push("Available providers (/provider <name> to switch):".into());
+                for kind in agent_code_lib::llm::provider::ProviderKind::all() {
+                    // Only list providers we can actually point at (a known
+                    // default base URL). Generic OpenAI-compatible endpoints
+                    // need a user-supplied base URL, so they are skipped.
+                    if kind.default_base_url().is_none() {
+                        continue;
+                    }
+                    let mark = if kind.as_name() == current_provider {
+                        " ✔"
+                    } else {
+                        ""
+                    };
+                    lines.push(format!(
+                        "  {}  — {}{}",
+                        kind.as_name(),
+                        kind.default_base_url().unwrap_or(""),
+                        mark
+                    ));
+                }
+                lines.push("Run /provider <name> to switch the default provider.".into());
+                for line in lines {
+                    self.transcript.push(TranscriptItem::System(line));
+                }
+            }
+            PendingProviderAction::Set { provider } => {
+                set_provider(provider);
             }
         }
         self.dirty = true;
@@ -3066,6 +3154,11 @@ impl App {
         self.work.take_model(&self.resume)
     }
 
+    /// Take a deferred `/provider` action, unless a resume holds it.
+    pub fn take_pending_provider(&mut self) -> Option<PendingProviderAction> {
+        self.work.take_provider(&self.resume)
+    }
+
     /// Take a deferred bridged slash command, unless a resume holds it.
     pub fn take_pending_slash(&mut self) -> Option<String> {
         self.work.take_slash(&self.resume)
@@ -3886,6 +3979,42 @@ mod tests {
         assert!(parse_model_slash("/help").is_none());
         assert!(parse_model_slash("model").is_none());
         assert!(parse_model_slash("hello").is_none());
+    }
+
+    #[test]
+    fn parse_provider_slash_show_and_set() {
+        use agent_code_lib::llm::provider::ProviderKind;
+        assert_eq!(
+            parse_provider_slash("/provider"),
+            Some(PendingProviderAction::Show)
+        );
+        assert_eq!(
+            parse_provider_slash("/provider  "),
+            Some(PendingProviderAction::Show)
+        );
+        assert_eq!(
+            parse_provider_slash("/provider kilo"),
+            Some(PendingProviderAction::Set {
+                provider: ProviderKind::Kilo
+            })
+        );
+        assert_eq!(
+            parse_provider_slash("/PROVIDER opencode"),
+            Some(PendingProviderAction::Set {
+                provider: ProviderKind::OpenCode
+            })
+        );
+        assert_eq!(
+            parse_provider_slash("/p zen"),
+            Some(PendingProviderAction::Set {
+                provider: ProviderKind::OpenCode
+            })
+        );
+        // Unknown provider names do not parse.
+        assert!(parse_provider_slash("/provider not-a-provider").is_none());
+        // Unrelated commands are not captured.
+        assert!(parse_provider_slash("/help").is_none());
+        assert!(parse_provider_slash("provider").is_none());
     }
 
     #[test]
