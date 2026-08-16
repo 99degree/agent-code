@@ -384,6 +384,13 @@ pub fn create_provider_from_config(
             base_url,
             &resolved_key,
         )),
+        ProviderKind::Kilo => std::sync::Arc::new(crate::llm::kilo::KiloProvider::new(
+            base_url,
+            &resolved_key,
+        )),
+        ProviderKind::OpenCode => std::sync::Arc::new(
+            crate::llm::opencode::OpenCodeProvider::new(base_url, &resolved_key),
+        ),
         _ => match kind.wire_format() {
             WireFormat::Anthropic => std::sync::Arc::new(
                 crate::llm::anthropic::AnthropicProvider::new(base_url, &resolved_key),
@@ -561,6 +568,72 @@ impl ProviderKind {
             Self::Novita => "NOVITA_API_KEY",
             Self::OpenAiCompatible => "OPENAI_API_KEY",
         }
+    }
+
+    /// Canonical CLI / slash-command name for this provider (e.g. `kilo`,
+    /// `opencode`, `anthropic`). Used by the `/provider` command and by
+    /// error messaging.
+    pub fn as_name(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::Bedrock => "bedrock",
+            Self::Vertex => "vertex",
+            Self::OpenAi => "openai",
+            Self::AzureOpenAi => "azure",
+            Self::Xai => "xai",
+            Self::Google => "google",
+            Self::DeepSeek => "deepseek",
+            Self::Groq => "groq",
+            Self::Mistral => "mistral",
+            Self::Together => "together",
+            Self::Zhipu => "zhipu",
+            Self::OpenRouter => "openrouter",
+            Self::Cohere => "cohere",
+            Self::Perplexity => "perplexity",
+            Self::Nvidia => "nvidia",
+            Self::Kilo => "kilo",
+            Self::Novita => "novita",
+            Self::OpenCode => "opencode",
+            Self::OpenCodeGo => "opencode-go",
+            Self::OpenAiCompatible => "openai-compatible",
+        }
+    }
+
+    /// Resolve a provider name (as typed to `--provider` or `/provider`)
+    /// to a `ProviderKind`, honoring the documented aliases. Returns
+    /// `None` for unrecognized names (the caller may then fall back to
+    /// `detect_provider`).
+    pub fn from_name(name: &str) -> Option<ProviderKind> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "anthropic" | "claude" => ProviderKind::Anthropic,
+            "openai" | "gpt" => ProviderKind::OpenAi,
+            "bedrock" | "aws" => ProviderKind::Bedrock,
+            "vertex" | "gcp" => ProviderKind::Vertex,
+            "xai" | "grok" => ProviderKind::Xai,
+            "google" | "gemini" => ProviderKind::Google,
+            "deepseek" => ProviderKind::DeepSeek,
+            "groq" => ProviderKind::Groq,
+            "mistral" => ProviderKind::Mistral,
+            "together" => ProviderKind::Together,
+            "zhipu" | "glm" | "z.ai" => ProviderKind::Zhipu,
+            "azure" | "azure-openai" => ProviderKind::AzureOpenAi,
+            "nvidia" | "nim" => ProviderKind::Nvidia,
+            "kilo" => ProviderKind::Kilo,
+            "novita" => ProviderKind::Novita,
+            "opencode" | "zen" => ProviderKind::OpenCode,
+            "opencode-go" | "zen-go" => ProviderKind::OpenCodeGo,
+            "openrouter" => ProviderKind::OpenRouter,
+            "cohere" => ProviderKind::Cohere,
+            "perplexity" => ProviderKind::Perplexity,
+            _ => return None,
+        })
+    }
+
+    /// A sensible default model for this provider (its first curated
+    /// catalog entry), or `None` when the provider has no catalog. Used
+    /// by the `/provider` command to seed a model when switching.
+    pub fn default_model(&self) -> Option<&'static str> {
+        models_for_provider(*self).first().map(|(m, _)| *m)
     }
 
     /// Resolve this provider's API key from its environment variables,
@@ -990,5 +1063,60 @@ mod tests {
     fn test_tool_choice_default_is_auto() {
         let tc = ToolChoice::default();
         assert!(matches!(tc, ToolChoice::Auto));
+    }
+
+    #[test]
+    fn test_from_name_resolves_aliases() {
+        // Canonical names and documented aliases all resolve.
+        assert_eq!(ProviderKind::from_name("anthropic"), Some(ProviderKind::Anthropic));
+        assert_eq!(ProviderKind::from_name("claude"), Some(ProviderKind::Anthropic));
+        assert_eq!(ProviderKind::from_name("openai"), Some(ProviderKind::OpenAi));
+        assert_eq!(ProviderKind::from_name("gpt"), Some(ProviderKind::OpenAi));
+        assert_eq!(ProviderKind::from_name("xai"), Some(ProviderKind::Xai));
+        assert_eq!(ProviderKind::from_name("grok"), Some(ProviderKind::Xai));
+        assert_eq!(ProviderKind::from_name("kilo"), Some(ProviderKind::Kilo));
+        assert_eq!(ProviderKind::from_name("opencode"), Some(ProviderKind::OpenCode));
+        assert_eq!(ProviderKind::from_name("zen"), Some(ProviderKind::OpenCode));
+        assert_eq!(
+            ProviderKind::from_name("opencode-go"),
+            Some(ProviderKind::OpenCodeGo)
+        );
+        assert_eq!(
+            ProviderKind::from_name("zen-go"),
+            Some(ProviderKind::OpenCodeGo)
+        );
+        assert_eq!(ProviderKind::from_name("zhipu"), Some(ProviderKind::Zhipu));
+        assert_eq!(ProviderKind::from_name("glm"), Some(ProviderKind::Zhipu));
+        // Unknown names do not resolve.
+        assert_eq!(ProviderKind::from_name("not-a-provider"), None);
+        // Resolution is case-insensitive.
+        assert_eq!(ProviderKind::from_name("Kilo"), Some(ProviderKind::Kilo));
+    }
+
+    #[test]
+    fn test_as_name_matches_from_name_round_trip() {
+        for &kind in ProviderKind::all() {
+            let name = kind.as_name();
+            // Every kind must round-trip through its canonical name, except
+            // the generic OpenAI-compatible fallback (not a switchable
+            // provider and therefore absent from the name table by design).
+            if kind == ProviderKind::OpenAiCompatible {
+                assert_eq!(name, "openai-compatible");
+                assert_eq!(ProviderKind::from_name(name), None);
+            } else {
+                assert_eq!(ProviderKind::from_name(name), Some(kind), "{kind:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_default_model_picks_first_catalog_entry() {
+        assert_eq!(ProviderKind::Kilo.default_model(), Some("kilo-alpha"));
+        assert_eq!(
+            ProviderKind::OpenCode.default_model(),
+            Some("big-pickle")
+        );
+        // Providers without a curated catalog have no default model.
+        assert_eq!(ProviderKind::OpenAiCompatible.default_model(), None);
     }
 }

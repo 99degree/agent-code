@@ -680,25 +680,11 @@ async fn async_main() -> anyhow::Result<()> {
     let provider_kind = match config.api.auth_mode {
         ApiAuthMode::CodexChatgpt => ProviderKind::OpenAi,
         ApiAuthMode::XaiOauth => ProviderKind::Xai,
-        ApiAuthMode::ApiKey => match cli.provider.as_str() {
-            "anthropic" => ProviderKind::Anthropic,
-            "openai" => ProviderKind::OpenAi,
-            "bedrock" | "aws" => ProviderKind::Bedrock,
-            "vertex" | "gcp" => ProviderKind::Vertex,
-            "xai" | "grok" => ProviderKind::Xai,
-            "google" | "gemini" => ProviderKind::Google,
-            "deepseek" => ProviderKind::DeepSeek,
-            "groq" => ProviderKind::Groq,
-            "mistral" => ProviderKind::Mistral,
-            "together" => ProviderKind::Together,
-            "zhipu" | "glm" | "z.ai" => ProviderKind::Zhipu,
-            "azure" | "azure-openai" => ProviderKind::AzureOpenAi,
-            "nvidia" | "nim" => ProviderKind::Nvidia,
-            "kilo" => ProviderKind::Kilo,
-            "novita" => ProviderKind::Novita,
-            "opencode" | "zen" => ProviderKind::OpenCode,
-            "opencode-go" | "zen-go" => ProviderKind::OpenCodeGo,
-            _ => detect_provider(&config.api.model, &config.api.base_url),
+        ApiAuthMode::ApiKey => match agent_code_lib::llm::provider::ProviderKind::from_name(
+            &cli.provider,
+        ) {
+            Some(kind) => kind,
+            None => detect_provider(&config.api.model, &config.api.base_url),
         },
     };
 
