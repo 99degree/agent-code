@@ -19,6 +19,7 @@ mod mode;
 mod model_picker;
 mod osc8;
 mod palette;
+mod provider_picker;
 mod render;
 pub mod resume_state;
 mod run;

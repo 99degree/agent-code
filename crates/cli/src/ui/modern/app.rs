@@ -120,12 +120,12 @@ fn is_effort_level(s: &str) -> bool {
 }
 
 /// Local `/provider` action deferred to the run loop (needs the engine lock).
-/// `Show` lists the available providers; `Set` switches the default provider
-/// (base URL + a default model), after which `/model` shows that provider's
-/// catalog.
+/// `Show` opens the in-TUI provider picker; `Set` switches the default
+/// provider (base URL + a default model), after which `/model` shows that
+/// provider's catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingProviderAction {
-    /// List available providers and the current one.
+    /// Open the in-TUI provider picker (Ctrl+/ `/provider`).
     Show,
     /// Switch the default provider to the given kind.
     Set {
@@ -185,6 +185,15 @@ pub(crate) fn model_catalog_entries(current: &str, base_url: &str) -> Vec<(Strin
         .iter()
         .map(|(n, d)| ((*n).to_string(), (*d).to_string()))
         .collect()
+}
+
+/// Fallback `/provider` catalog lines for the transcript when the picker is
+/// unavailable (no pointable providers).
+pub(crate) fn format_provider_catalog(current: &str) -> Vec<String> {
+    let mut lines = vec![format!("Provider: {current}")];
+    lines.push("No providers with a default base URL are available.".into());
+    lines.push("Run /provider <name> with --api-base-url to switch manually.".into());
+    lines
 }
 
 /// Result of expanding a user-invocable skill slash.
@@ -527,6 +536,8 @@ pub struct App {
     pub command_palette: Option<super::palette::CommandPalette>,
     /// Ctrl+M / `/model` in-TUI model picker.
     pub model_picker: Option<super::model_picker::ModelPicker>,
+    /// Ctrl+/ / `/provider` in-TUI provider picker.
+    pub provider_picker: Option<super::provider_picker::ProviderPicker>,
     /// `/resume` in-TUI session picker.
     pub session_picker: Option<super::session_picker::SessionPicker>,
     /// Session id the run loop should load.
@@ -974,6 +985,7 @@ impl App {
             pending_task_output: None,
             command_palette: None,
             model_picker: None,
+            provider_picker: None,
             session_picker: None,
             resume: Default::default(),
             pending_session_list: false,
@@ -2277,30 +2289,22 @@ impl App {
     ) {
         match action {
             PendingProviderAction::Show => {
-                let mut lines = vec![format!("Provider: {current_provider}")];
-                lines.push("Available providers (/provider <name> to switch):".into());
-                for kind in agent_code_lib::llm::provider::ProviderKind::all() {
-                    // Only list providers we can actually point at (a known
-                    // default base URL). Generic OpenAI-compatible endpoints
-                    // need a user-supplied base URL, so they are skipped.
-                    if kind.default_base_url().is_none() {
-                        continue;
+                // Build the catalog of pointable providers (known default URL).
+                let entries: Vec<(String, String)> =
+                    agent_code_lib::llm::provider::ProviderKind::all()
+                        .iter()
+                        .filter(|k| k.default_base_url().is_some())
+                        .map(|k| {
+                            let url = k.default_base_url().unwrap_or("");
+                            (k.as_name().to_string(), format!("— {url}"))
+                        })
+                        .collect();
+                if entries.is_empty() {
+                    for line in format_provider_catalog(current_provider) {
+                        self.transcript.push(TranscriptItem::System(line));
                     }
-                    let mark = if kind.as_name() == current_provider {
-                        " ✔"
-                    } else {
-                        ""
-                    };
-                    lines.push(format!(
-                        "  {}  — {}{}",
-                        kind.as_name(),
-                        kind.default_base_url().unwrap_or(""),
-                        mark
-                    ));
-                }
-                lines.push("Run /provider <name> to switch the default provider.".into());
-                for line in lines {
-                    self.transcript.push(TranscriptItem::System(line));
+                } else {
+                    self.open_provider_picker(current_provider, entries);
                 }
             }
             PendingProviderAction::Set { provider } => {
@@ -2343,6 +2347,38 @@ impl App {
 
     pub fn model_picker_open(&self) -> bool {
         self.model_picker.is_some()
+    }
+
+    /// Open the provider picker overlay (Ctrl+/ `/provider`).
+    pub fn open_provider_picker(&mut self, current: &str, entries: Vec<(String, String)>) {
+        if self.front_modal().is_some() {
+            return;
+        }
+        self.dismiss_completion();
+        self.command_palette = None;
+        self.show_shortcuts = false;
+        let selected = entries
+            .iter()
+            .position(|(id, _)| id == current)
+            .unwrap_or(0);
+        self.provider_picker = Some(super::provider_picker::ProviderPicker {
+            query: String::new(),
+            selected,
+            entries,
+            current: current.to_string(),
+        });
+        self.status_message = "provider picker · type to filter · Enter select · Esc close".into();
+        self.dirty = true;
+    }
+
+    pub fn close_provider_picker(&mut self) {
+        if self.provider_picker.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    pub fn provider_picker_open(&self) -> bool {
+        self.provider_picker.is_some()
     }
 
     /// Enqueue a prompt produced by a slash command (`CommandResult::Prompt`).

@@ -680,12 +680,12 @@ async fn async_main() -> anyhow::Result<()> {
     let provider_kind = match config.api.auth_mode {
         ApiAuthMode::CodexChatgpt => ProviderKind::OpenAi,
         ApiAuthMode::XaiOauth => ProviderKind::Xai,
-        ApiAuthMode::ApiKey => match agent_code_lib::llm::provider::ProviderKind::from_name(
-            &cli.provider,
-        ) {
-            Some(kind) => kind,
-            None => detect_provider(&config.api.model, &config.api.base_url),
-        },
+        ApiAuthMode::ApiKey => {
+            match agent_code_lib::llm::provider::ProviderKind::from_name(&cli.provider) {
+                Some(kind) => kind,
+                None => detect_provider(&config.api.model, &config.api.base_url),
+            }
+        }
     };
 
     // because none should be necessary on this path. Fall through
@@ -756,12 +756,10 @@ async fn async_main() -> anyhow::Result<()> {
                         api_key,
                     ))
                 }
-                ProviderKind::Novita => Arc::new(
-                    agent_code_lib::llm::novita::NovitaProvider::new(
-                        &config.api.base_url,
-                        api_key,
-                    ),
-                ),
+                ProviderKind::Novita => Arc::new(agent_code_lib::llm::novita::NovitaProvider::new(
+                    &config.api.base_url,
+                    api_key,
+                )),
                 _ => match provider_kind.wire_format() {
                     WireFormat::Anthropic => {
                         Arc::new(agent_code_lib::llm::anthropic::AnthropicProvider::new(
@@ -1178,7 +1176,11 @@ fn handle_schedule_list() -> anyhow::Result<()> {
             .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_else(|| "never".into());
         let prompt = if s.prompt.chars().count() > 30 {
-            let end = s.prompt.char_indices().nth(27).map_or(s.prompt.len(), |(i, _)| i);
+            let end = s
+                .prompt
+                .char_indices()
+                .nth(27)
+                .map_or(s.prompt.len(), |(i, _)| i);
             format!("{}...", &s.prompt[..end])
         } else {
             s.prompt.clone()

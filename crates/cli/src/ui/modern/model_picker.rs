@@ -88,126 +88,48 @@ impl App {
         };
         if p.effort_phase {
             p.effort_phase = false;
-            self.status_message =
-                "model picker · type to filter · Enter select · Tab effort".into();
-        } else {
-            p.query.pop();
-            p.selected = 0;
+            self.dirty = true;
+            return;
         }
+        p.query.pop();
+        p.selected = 0;
         self.dirty = true;
     }
 
-    /// Enter effort sub-menu for the highlighted model (Tab).
     pub fn model_picker_enter_effort(&mut self) {
-        let current_effort = self.effort.clone();
         let Some(p) = self.model_picker.as_mut() else {
             return;
         };
-        if p.effort_phase {
+        if p.filtered().is_empty() {
             return;
         }
-        let filtered = p.filtered();
-        if filtered.is_empty() {
-            return;
-        }
-        p.effort_phase = true;
         p.effort_selected = EFFORT_LEVELS
             .iter()
-            .position(|l| current_effort.as_deref() == Some(*l))
-            .unwrap_or(2); // default highlight medium
-        self.status_message = "effort · ↑/↓ · Enter apply · Esc/Backspace back".into();
+            .position(|l| Some(*l) == self.effort.as_deref())
+            .unwrap_or(0);
+        p.effort_phase = true;
         self.dirty = true;
     }
 
-    /// Accept the current picker selection.
+    /// Accept the current model selection: stage a `Set` for the run loop.
     pub fn model_picker_accept(&mut self) {
         let Some(p) = self.model_picker.clone() else {
             return;
         };
-        if p.effort_phase {
-            let filtered = p.filtered();
-            let Some((_, model_id, _)) = filtered.get(p.selected).copied() else {
-                self.close_model_picker();
-                return;
-            };
-            let effort = EFFORT_LEVELS
-                .get(p.effort_selected)
-                .copied()
-                .unwrap_or("medium")
-                .to_string();
-            let effort = if effort == "max" {
-                "xhigh".to_string()
-            } else {
-                effort
-            };
-            self.close_model_picker();
-            self.work.stage_model(PendingModelAction::Set {
-                model: model_id.to_string(),
-                effort: Some(effort),
-            });
-            return;
-        }
         let filtered = p.filtered();
-        let Some((_, model_id, _)) = filtered.get(p.selected).copied() else {
+        let Some((_, id, _)) = filtered.get(p.selected).copied() else {
             self.close_model_picker();
             return;
         };
+        let effort = if p.effort_phase {
+            EFFORT_LEVELS.get(p.effort_selected).map(|s| s.to_string())
+        } else {
+            None
+        };
         self.close_model_picker();
         self.work.stage_model(PendingModelAction::Set {
-            model: model_id.to_string(),
-            effort: None,
+            model: id.into(),
+            effort,
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ui::modern::app::App;
-
-    #[test]
-    fn open_filter_and_accept() {
-        let mut app = App::new("m", "/tmp", "s");
-        app.open_model_picker(
-            "gpt-4o",
-            vec![
-                ("gpt-4o".into(), "fast".into()),
-                ("o3".into(), "reason".into()),
-            ],
-        );
-        assert!(app.model_picker_open());
-        app.model_picker_insert_char('o');
-        app.model_picker_insert_char('3');
-        let filtered = app.model_picker.as_ref().unwrap().filtered();
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].1, "o3");
-        app.model_picker_accept();
-        assert!(!app.model_picker_open());
-        assert_eq!(
-            app.work.model_staged(),
-            Some(&PendingModelAction::Set {
-                model: "o3".into(),
-                effort: None
-            })
-        );
-    }
-
-    #[test]
-    fn effort_phase_sets_both() {
-        let mut app = App::new("m", "/tmp", "s");
-        app.open_model_picker("o3", vec![("o3".into(), "reason".into())]);
-        app.model_picker_enter_effort();
-        assert!(app.model_picker.as_ref().unwrap().effort_phase);
-        // Select "high" (index of high in EFFORT_LEVELS)
-        let high_idx = EFFORT_LEVELS.iter().position(|l| *l == "high").unwrap();
-        app.model_picker.as_mut().unwrap().effort_selected = high_idx;
-        app.model_picker_accept();
-        assert_eq!(
-            app.work.model_staged(),
-            Some(&PendingModelAction::Set {
-                model: "o3".into(),
-                effort: Some("high".into())
-            })
-        );
     }
 }

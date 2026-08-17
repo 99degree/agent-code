@@ -533,8 +533,11 @@ pub async fn run_modern_tui(
     let mut term_events = EventStream::new();
     // On Termux, read terminal input from a blocking thread so taps bring up
     // the on-screen keyboard (see term_reader_next / spawn_blocking_event_reader).
-    let mut term_rx: Option<mpsc::UnboundedReceiver<Event>> =
-        if is_termux() { Some(spawn_blocking_event_reader()) } else { None };
+    let mut term_rx: Option<mpsc::UnboundedReceiver<Event>> = if is_termux() {
+        Some(spawn_blocking_event_reader())
+    } else {
+        None
+    };
     let mut draw = |app: &mut App| draw_frame(&mut terminal, app, caps);
     let result = event_loop(
         &session,
@@ -1125,13 +1128,12 @@ pub(super) async fn event_loop(
                             continue;
                         }
                         let Some(url) = p.default_base_url() else {
-                            app.transcript.push(super::app::TranscriptItem::System(
-                                format!(
+                            app.transcript
+                                .push(super::app::TranscriptItem::System(format!(
                                     "Provider `{}` has no default base URL; pass \
                                      --api-base-url and a model to use it.",
                                     p.as_name()
-                                ),
-                            ));
+                                )));
                             continue;
                         };
                         eng.state_mut().config.api.base_url = url.to_string();
@@ -1149,11 +1151,12 @@ pub(super) async fn event_loop(
                             p.as_name(),
                             eng.state().config.api.model
                         );
-                        app.transcript.push(super::app::TranscriptItem::System(format!(
-                            "Provider changed to: {} ({}) — effective for the next request.",
-                            p.as_name(),
-                            eng.state().config.api.base_url
-                        )));
+                        app.transcript
+                            .push(super::app::TranscriptItem::System(format!(
+                                "Provider changed to: {} ({}) — effective for the next request.",
+                                p.as_name(),
+                                eng.state().config.api.base_url
+                            )));
                     }
                 }
                 Err(_) => {
@@ -1584,9 +1587,7 @@ pub(super) async fn event_loop(
                             // mixed tool-result users, mid-conversation
                             // system messages) — normalize strictly so the
                             // first call after resume does not 400.
-                            agent_code_lib::llm::normalize::normalize_strict(
-                                &mut data.messages,
-                            );
+                            agent_code_lib::llm::normalize::normalize_strict(&mut data.messages);
                             st.messages = data.messages;
                             st.turn_count = data.turn_count;
                             st.total_cost_usd = data.total_cost_usd;
@@ -1607,11 +1608,9 @@ pub(super) async fn event_loop(
                             // with the conversation.
                             st.brief_mode = data.brief_mode;
                             if !data.response_style.is_empty() {
-                                if let Some(style) =
-                                    agent_code_lib::state::ResponseStyle::from_name(
-                                        &data.response_style,
-                                    )
-                                {
+                                if let Some(style) = agent_code_lib::state::ResponseStyle::from_name(
+                                    &data.response_style,
+                                ) {
                                     st.response_style = style;
                                 }
                             }
@@ -2996,6 +2995,12 @@ fn handle_key_inner(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // Provider picker captures input when open (and no HITL modal is up).
+    if app.provider_picker_open() {
+        handle_provider_picker_key(app, key);
+        return;
+    }
+
     // Theme picker captures input when open (and no HITL modal is up).
     if app.theme_picker_open() {
         handle_theme_picker_key(app, key);
@@ -3452,6 +3457,17 @@ fn handle_key_inner(app: &mut App, key: KeyEvent) {
                 app.toggle_multiline_mode();
             }
         }
+        // Ctrl+/: Open provider picker (same slot as Ctrl+M for model).
+        (m, KeyCode::Char('/') | KeyCode::Char('?'))
+            if m.contains(KeyModifiers::CONTROL)
+                && !m.contains(KeyModifiers::ALT)
+                && !m.contains(KeyModifiers::SHIFT) =>
+        {
+            if app.input.is_empty() || app.selected_item.is_some() {
+                app.request_provider_picker();
+            }
+            // '/' in a non-empty composer navigates search; don't steal it.
+        }
         // Alt+Enter / Shift+Enter: newline in normal mode, submit in multiline mode.
         (m, KeyCode::Enter) if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::SHIFT) => {
             if app.multiline_mode {
@@ -3765,6 +3781,34 @@ fn handle_session_picker_key(app: &mut App, key: KeyEvent) {
                 && !key.modifiers.contains(KeyModifiers::ALT) =>
         {
             app.session_picker_insert_char(c);
+        }
+        _ => {}
+    }
+}
+
+/// Key handling for the Ctrl+/ `/provider` picker overlay.
+fn handle_provider_picker_key(app: &mut App, key: KeyEvent) {
+    // Ctrl+/ toggles closed; Esc / Ctrl+C dismiss.
+    if matches!(key.code, KeyCode::Char('/') | KeyCode::Char('?'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        app.close_provider_picker();
+        return;
+    }
+    if is_esc(&key) || is_cancel_chord(&key) {
+        app.close_provider_picker();
+        return;
+    }
+    match key.code {
+        KeyCode::Up => app.provider_picker_move(-1),
+        KeyCode::Down => app.provider_picker_move(1),
+        KeyCode::Enter => app.provider_picker_accept(),
+        KeyCode::Backspace => app.provider_picker_backspace(),
+        KeyCode::Char(c)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            app.provider_picker_insert_char(c);
         }
         _ => {}
     }

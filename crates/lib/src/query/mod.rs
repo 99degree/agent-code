@@ -1464,28 +1464,22 @@ impl QueryEngine {
                 // failed attempt. Only the *current* send is captured; the
                 // dump file is overwritten by the next failure, so storage
                 // stays bounded.
-                let dump_snapshot: Option<(
-                    String,
-                    Vec<serde_json::Value>,
-                    String,
-                    u64,
-                )> = if self.state.config.features.dump_failed_requests {
-                    let msgs: Vec<serde_json::Value> = request
-                        .messages
-                        .iter()
-                        .map(|m| {
-                            serde_json::to_value(m).unwrap_or(serde_json::Value::Null)
-                        })
-                        .collect();
-                    Some((
-                        request.model.clone(),
-                        msgs,
-                        request.system_prompt.clone(),
-                        request.max_tokens as u64,
-                    ))
-                } else {
-                    None
-                };
+                let dump_snapshot: Option<(String, Vec<serde_json::Value>, String, u64)> =
+                    if self.state.config.features.dump_failed_requests {
+                        let msgs: Vec<serde_json::Value> = request
+                            .messages
+                            .iter()
+                            .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null))
+                            .collect();
+                        Some((
+                            request.model.clone(),
+                            msgs,
+                            request.system_prompt.clone(),
+                            request.max_tokens as u64,
+                        ))
+                    } else {
+                        None
+                    };
 
                 match self.llm.stream(&request).await {
                     Ok(rx) => {
@@ -1566,13 +1560,9 @@ impl QueryEngine {
                                     let path = dir.join("last_failed_request.json");
                                     let _ = std::fs::write(
                                         &path,
-                                        serde_json::to_string_pretty(&dump)
-                                            .unwrap_or_default(),
+                                        serde_json::to_string_pretty(&dump).unwrap_or_default(),
                                     );
-                                    debug!(
-                                        "Dumped failed LLM request to {}",
-                                        path.display()
-                                    );
+                                    debug!("Dumped failed LLM request to {}", path.display());
                                 }
                                 // Unattended retry: in non-interactive mode, retry
                                 // capacity errors with longer backoff instead of
@@ -1657,8 +1647,8 @@ impl QueryEngine {
                                     content: reason.clone(),
                                     level: MessageLevel::Error,
                                 }));
-                                self.state.push_message(Message::Assistant(
-                                    AssistantMessage {
+                                self.state
+                                    .push_message(Message::Assistant(AssistantMessage {
                                         uuid: Uuid::new_v4(),
                                         timestamp: chrono::Utc::now().to_rfc3339(),
                                         content: vec![ContentBlock::Text {
@@ -1668,8 +1658,7 @@ impl QueryEngine {
                                         usage: None,
                                         stop_reason: None,
                                         request_id: None,
-                                    },
-                                ));
+                                    }));
                                 sink.on_error(&reason);
                                 self.state.is_query_active = false;
                                 // Error hooks fire once per turn that
@@ -1907,11 +1896,8 @@ impl QueryEngine {
                     // orphaned tool_calls.
                     for block in &content_blocks {
                         if let ContentBlock::ToolUse { id, name, .. } = block {
-                            let result_msg = crate::llm::message::tool_result_message(
-                                id,
-                                "(cancelled)",
-                                true,
-                            );
+                            let result_msg =
+                                crate::llm::message::tool_result_message(id, "(cancelled)", true);
                             self.state.push_message(result_msg);
                             sink.on_tool_call_result(
                                 id,

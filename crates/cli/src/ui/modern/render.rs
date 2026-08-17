@@ -174,6 +174,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         draw_session_picker(frame, area, app);
     } else if app.model_picker_open() && app.phase != Phase::Permission {
         draw_model_picker(frame, area, app);
+    } else if app.provider_picker_open() && app.phase != Phase::Permission {
+        draw_provider_picker(frame, area, app);
     } else if app.theme_picker_open() && app.phase != Phase::Permission {
         draw_theme_picker(frame, area, app);
     } else if app.command_palette_open() && app.phase != Phase::Permission {
@@ -630,6 +632,70 @@ fn draw_model_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Some(key_hint_line(
             "[↑↓] move   [Enter] select   [Tab] effort   [Esc] close",
         )),
+    );
+}
+
+/// Provider picker overlay: lists switchable providers, filterable.
+fn draw_provider_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let Some(p) = app.provider_picker.as_ref() else {
+        return;
+    };
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("filter: {}", p.query),
+        Style::default()
+            .fg(palette().accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("current: {}", p.current),
+        Style::default().fg(palette().muted),
+    )));
+    lines.push(Line::from(""));
+
+    let filtered = p.filtered();
+    const MAX_ROWS: usize = 12;
+    if filtered.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no matching providers",
+            Style::default().fg(palette().muted),
+        )));
+    } else {
+        let start = p
+            .selected
+            .saturating_sub(MAX_ROWS.saturating_sub(1).min(p.selected));
+        let end = (start + MAX_ROWS).min(filtered.len());
+        for (i, (_, id, desc)) in filtered.iter().enumerate().take(end).skip(start) {
+            let is_sel = i == p.selected;
+            let marker = if is_sel { "❯" } else { " " };
+            let style = if is_sel {
+                Style::default()
+                    .fg(palette().accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette().inactive)
+            };
+            let cur = if *id == p.current { " ✔" } else { "" };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{marker} {id}{cur}  "), style),
+                Span::styled((*desc).to_string(), Style::default().fg(palette().muted)),
+            ]));
+        }
+        if filtered.len() > MAX_ROWS {
+            lines.push(Line::from(Span::styled(
+                format!("  … {} total", filtered.len()),
+                Style::default().fg(palette().muted),
+            )));
+        }
+    }
+
+    draw_modal_box(
+        frame,
+        area,
+        lines,
+        " providers ",
+        palette().accent,
+        Some(key_hint_line("[↑↓] move   [Enter] select   [Esc] close")),
     );
 }
 

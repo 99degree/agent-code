@@ -1175,8 +1175,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 {
                     engine.reload_llm().ok();
                 }
-                engine.state_mut().messages.push(
-                    agent_code_lib::llm::message::Message::System(
+                engine
+                    .state_mut()
+                    .messages
+                    .push(agent_code_lib::llm::message::Message::System(
                         agent_code_lib::llm::message::SystemMessage {
                             uuid: uuid::Uuid::new_v4(),
                             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1184,22 +1186,83 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             content: format!("Provider changed to {}", kind.as_name()),
                             level: agent_code_lib::llm::message::MessageLevel::Info,
                         },
-                    ),
-                );
+                    ));
                 println!(
                     "Provider changed to: {} ({})",
                     kind.as_name(),
                     engine.state().config.api.base_url
                 );
             } else {
-                println!("Provider: {}", current.as_name());
-                println!("Available providers (/provider <name> to switch):");
-                for kind in agent_code_lib::llm::provider::ProviderKind::all() {
-                    let Some(url) = kind.default_base_url() else {
+                // Interactive provider picker — same style as /model.
+                let mut all_kinds: Vec<(
+                    String,
+                    String,
+                    agent_code_lib::llm::provider::ProviderKind,
+                )> = Vec::new();
+                for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
+                    if !kind.is_configured() {
                         continue;
-                    };
-                    let mark = if *kind == current { " ✔" } else { "" };
-                    println!("  {}  — {}{}", kind.as_name(), url, mark);
+                    }
+                    let url = kind.default_base_url().unwrap_or("");
+                    all_kinds.push((kind.as_name().to_string(), url.to_string(), kind));
+                }
+                if all_kinds.is_empty() {
+                    println!("Provider: {}", current.as_name());
+                    println!(
+                        "No providers configured. Set an API key (e.g. {}) to browse providers.",
+                        current.env_var_name()
+                    );
+                } else {
+                    println!();
+                    println!("  Select provider");
+                    println!();
+
+                    let options: Vec<crate::ui::selector::SelectOption> = all_kinds
+                        .iter()
+                        .map(|(name, url, kind)| {
+                            let check = if *kind == current { " ✔" } else { "" };
+                            crate::ui::selector::SelectOption {
+                                label: format!("{name}{check}"),
+                                description: url.clone(),
+                                value: name.to_string(),
+                                preview: None,
+                            }
+                        })
+                        .collect();
+
+                    let chosen = crate::ui::selector::select(&options);
+                    if !chosen.is_empty() {
+                        let found_kind = all_kinds
+                            .iter()
+                            .find(|(n, _, _)| n == &chosen)
+                            .map(|(_, _, k)| *k);
+                        if let Some(kind) = found_kind {
+                            if let Some(url) = kind.default_base_url() {
+                                engine.state_mut().config.api.base_url = url.to_string();
+                            }
+                            if let Some(model) = kind.default_model() {
+                                engine.state_mut().config.api.model = model.to_string();
+                            }
+                            if engine.state().config.api.auth_mode
+                                == agent_code_lib::config::ApiAuthMode::ApiKey
+                            {
+                                engine.reload_llm().ok();
+                            }
+                            println!("Provider changed to: {}", kind.as_name());
+                            engine.state_mut().messages.push(
+                                agent_code_lib::llm::message::Message::System(
+                                    agent_code_lib::llm::message::SystemMessage {
+                                        uuid: uuid::Uuid::new_v4(),
+                                        timestamp: chrono::Utc::now().to_rfc3339(),
+                                        subtype:
+                                            agent_code_lib::llm::message::SystemMessageType::Informational,
+                                        content: format!("Provider changed to {}", kind.as_name()),
+                                        level: agent_code_lib::llm::message::MessageLevel::Info,
+                                    },
+                                ),
+                            );
+                        }
+                    }
                 }
             }
             CommandResult::Handled
@@ -1221,12 +1284,9 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 } else {
                     // Provider has no default URL — clear a stale base_url
                     // that was auto-set from a different provider's default.
-                    let stale = agent_code_lib::llm::provider::ProviderKind::all().iter().any(
-                        |k| {
-                            k.default_base_url()
-                                .is_some_and(|u| u == base_url)
-                        },
-                    );
+                    let stale = agent_code_lib::llm::provider::ProviderKind::all()
+                        .iter()
+                        .any(|k| k.default_base_url().is_some_and(|u| u == base_url));
                     if stale {
                         engine.state_mut().config.api.base_url.clear();
                         base_url_changed = true;
@@ -1252,8 +1312,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         agent_code_lib::llm::message::SystemMessage {
                             uuid: uuid::Uuid::new_v4(),
                             timestamp: chrono::Utc::now().to_rfc3339(),
-                            subtype:
-                                agent_code_lib::llm::message::SystemMessageType::Informational,
+                            subtype: agent_code_lib::llm::message::SystemMessageType::Informational,
                             content: format!("Model changed to {new_model}"),
                             level: agent_code_lib::llm::message::MessageLevel::Info,
                         },
@@ -1326,17 +1385,19 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         engine.state_mut().config.api.model = chosen.clone();
                         println!("Model changed to: {chosen} [{found_kind:?}]");
                         // Record model change in conversation history.
-                        engine.state_mut().messages.push(
-                            agent_code_lib::llm::message::Message::System(
-                                agent_code_lib::llm::message::SystemMessage {
-                                    uuid: uuid::Uuid::new_v4(),
-                                    timestamp: chrono::Utc::now().to_rfc3339(),
-                                    subtype: agent_code_lib::llm::message::SystemMessageType::Informational,
-                                    content: format!("Model changed to {chosen}"),
-                                    level: agent_code_lib::llm::message::MessageLevel::Info,
-                                },
-                            ),
-                        );
+                        engine
+                            .state_mut()
+                            .messages
+                            .push(agent_code_lib::llm::message::Message::System(
+                            agent_code_lib::llm::message::SystemMessage {
+                                uuid: uuid::Uuid::new_v4(),
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                subtype:
+                                    agent_code_lib::llm::message::SystemMessageType::Informational,
+                                content: format!("Model changed to {chosen}"),
+                                level: agent_code_lib::llm::message::MessageLevel::Info,
+                            },
+                        ));
                     }
                 }
             }
@@ -1403,16 +1464,15 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
         }
         Some("sessions") => {
             // Optional filters: /sessions --tag <tag> [--all]
-            let filter_tag = args
-                .and_then(|a| {
-                    let after_tag = a.strip_prefix("--tag ")?.trim();
-                    // Don't treat --all as a tag name.
-                    let tag_val = after_tag
-                        .split_whitespace()
-                        .next()
-                        .filter(|t| !t.eq_ignore_ascii_case("all"));
-                    tag_val
-                });
+            let filter_tag = args.and_then(|a| {
+                let after_tag = a.strip_prefix("--tag ")?.trim();
+                // Don't treat --all as a tag name.
+                let tag_val = after_tag
+                    .split_whitespace()
+                    .next()
+                    .filter(|t| !t.eq_ignore_ascii_case("all"));
+                tag_val
+            });
             let show_all = args
                 .map(|a| a.contains("--all") || a.contains("-a"))
                 .unwrap_or(false);
@@ -1464,7 +1524,9 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         s.id, s.cwd, s.turn_count, s.message_count, s.updated_at,
                     );
                 }
-                println!("\nUse /resume <id> to restore, /sessions --tag <tag> to filter, or /sessions --all for every directory.");
+                println!(
+                    "\nUse /resume <id> to restore, /sessions --tag <tag> to filter, or /sessions --all for every directory."
+                );
             }
             CommandResult::Handled
         }
@@ -1489,8 +1551,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
         }
         Some("subagent") => {
             if let Some(new_model) = args {
-                engine.state_mut().config.api.subagent_model =
-                    Some(new_model.to_string());
+                engine.state_mut().config.api.subagent_model = Some(new_model.to_string());
                 println!("Sub-agent model changed to: {new_model}");
             } else {
                 let current = engine
@@ -2347,10 +2408,8 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 state.brief_mode,
                 state.response_style.name(),
                 &state.config.api.base_url,
-                &agent_code_lib::services::git::repo_name_sync(std::path::Path::new(
-                    &state.cwd,
-                ))
-                .unwrap_or_default(),
+                &agent_code_lib::services::git::repo_name_sync(std::path::Path::new(&state.cwd))
+                    .unwrap_or_default(),
             ) {
                 Ok(_) => {
                     println!("Forked conversation at message {msg_count} -> session {fork_id}",);
@@ -2409,10 +2468,8 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                                 .collect::<Vec<_>>()
                                 .join("");
                             let preview = if text.chars().count() > 120 {
-                                let end = text
-                                    .char_indices()
-                                    .nth(117)
-                                    .map_or(text.len(), |(i, _)| i);
+                                let end =
+                                    text.char_indices().nth(117).map_or(text.len(), |(i, _)| i);
                                 format!("{}...", &text[..end])
                             } else {
                                 text
@@ -2446,10 +2503,8 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                                 })
                                 .count();
                             let preview = if text.chars().count() > 120 {
-                                let end = text
-                                    .char_indices()
-                                    .nth(117)
-                                    .map_or(text.len(), |(i, _)| i);
+                                let end =
+                                    text.char_indices().nth(117).map_or(text.len(), |(i, _)| i);
                                 format!("{}...", &text[..end])
                             } else {
                                 text
