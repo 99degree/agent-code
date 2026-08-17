@@ -533,8 +533,11 @@ pub async fn run_modern_tui(
     let mut term_events = EventStream::new();
     // On Termux, read terminal input from a blocking thread so taps bring up
     // the on-screen keyboard (see term_reader_next / spawn_blocking_event_reader).
-    let mut term_rx: Option<mpsc::UnboundedReceiver<Event>> =
-        if is_termux() { Some(spawn_blocking_event_reader()) } else { None };
+    let mut term_rx: Option<mpsc::UnboundedReceiver<Event>> = if is_termux() {
+        Some(spawn_blocking_event_reader())
+    } else {
+        None
+    };
     let mut draw = |app: &mut App| draw_frame(&mut terminal, app, caps);
     let result = event_loop(
         &session,
@@ -1125,13 +1128,12 @@ pub(super) async fn event_loop(
                             continue;
                         }
                         let Some(url) = p.default_base_url() else {
-                            app.transcript.push(super::app::TranscriptItem::System(
-                                format!(
+                            app.transcript
+                                .push(super::app::TranscriptItem::System(format!(
                                     "Provider `{}` has no default base URL; pass \
                                      --api-base-url and a model to use it.",
                                     p.as_name()
-                                ),
-                            ));
+                                )));
                             continue;
                         };
                         eng.state_mut().config.api.base_url = url.to_string();
@@ -1149,11 +1151,12 @@ pub(super) async fn event_loop(
                             p.as_name(),
                             eng.state().config.api.model
                         );
-                        app.transcript.push(super::app::TranscriptItem::System(format!(
-                            "Provider changed to: {} ({}) — effective for the next request.",
-                            p.as_name(),
-                            eng.state().config.api.base_url
-                        )));
+                        app.transcript
+                            .push(super::app::TranscriptItem::System(format!(
+                                "Provider changed to: {} ({}) — effective for the next request.",
+                                p.as_name(),
+                                eng.state().config.api.base_url
+                            )));
                     }
                 }
                 Err(_) => {
@@ -1584,9 +1587,7 @@ pub(super) async fn event_loop(
                             // mixed tool-result users, mid-conversation
                             // system messages) — normalize strictly so the
                             // first call after resume does not 400.
-                            agent_code_lib::llm::normalize::normalize_strict(
-                                &mut data.messages,
-                            );
+                            agent_code_lib::llm::normalize::normalize_strict(&mut data.messages);
                             st.messages = data.messages;
                             st.turn_count = data.turn_count;
                             st.total_cost_usd = data.total_cost_usd;
@@ -1607,11 +1608,9 @@ pub(super) async fn event_loop(
                             // with the conversation.
                             st.brief_mode = data.brief_mode;
                             if !data.response_style.is_empty() {
-                                if let Some(style) =
-                                    agent_code_lib::state::ResponseStyle::from_name(
-                                        &data.response_style,
-                                    )
-                                {
+                                if let Some(style) = agent_code_lib::state::ResponseStyle::from_name(
+                                    &data.response_style,
+                                ) {
                                     st.response_style = style;
                                 }
                             }

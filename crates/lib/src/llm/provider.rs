@@ -170,10 +170,7 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
                 "nvidia/nemotron-3-ultra-550b-a55b",
                 "Nemotron 3 Ultra · Most capable",
             ),
-            (
-                "nvidia/nemotron-3-nano-30b-a3b",
-                "Nemotron 3 Nano · Fast",
-            ),
+            ("nvidia/nemotron-3-nano-30b-a3b", "Nemotron 3 Nano · Fast"),
             (
                 "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
                 "Nemotron 3 Nano Omni · Reasoning",
@@ -384,13 +381,13 @@ pub fn create_provider_from_config(
             base_url,
             &resolved_key,
         )),
-        ProviderKind::Kilo => std::sync::Arc::new(crate::llm::kilo::KiloProvider::new(
+        ProviderKind::Kilo => {
+            std::sync::Arc::new(crate::llm::kilo::KiloProvider::new(base_url, &resolved_key))
+        }
+        ProviderKind::OpenCode => std::sync::Arc::new(crate::llm::opencode::OpenCodeProvider::new(
             base_url,
             &resolved_key,
         )),
-        ProviderKind::OpenCode => std::sync::Arc::new(
-            crate::llm::opencode::OpenCodeProvider::new(base_url, &resolved_key),
-        ),
         _ => match kind.wire_format() {
             WireFormat::Anthropic => std::sync::Arc::new(
                 crate::llm::anthropic::AnthropicProvider::new(base_url, &resolved_key),
@@ -1068,14 +1065,26 @@ mod tests {
     #[test]
     fn test_from_name_resolves_aliases() {
         // Canonical names and documented aliases all resolve.
-        assert_eq!(ProviderKind::from_name("anthropic"), Some(ProviderKind::Anthropic));
-        assert_eq!(ProviderKind::from_name("claude"), Some(ProviderKind::Anthropic));
-        assert_eq!(ProviderKind::from_name("openai"), Some(ProviderKind::OpenAi));
+        assert_eq!(
+            ProviderKind::from_name("anthropic"),
+            Some(ProviderKind::Anthropic)
+        );
+        assert_eq!(
+            ProviderKind::from_name("claude"),
+            Some(ProviderKind::Anthropic)
+        );
+        assert_eq!(
+            ProviderKind::from_name("openai"),
+            Some(ProviderKind::OpenAi)
+        );
         assert_eq!(ProviderKind::from_name("gpt"), Some(ProviderKind::OpenAi));
         assert_eq!(ProviderKind::from_name("xai"), Some(ProviderKind::Xai));
         assert_eq!(ProviderKind::from_name("grok"), Some(ProviderKind::Xai));
         assert_eq!(ProviderKind::from_name("kilo"), Some(ProviderKind::Kilo));
-        assert_eq!(ProviderKind::from_name("opencode"), Some(ProviderKind::OpenCode));
+        assert_eq!(
+            ProviderKind::from_name("opencode"),
+            Some(ProviderKind::OpenCode)
+        );
         assert_eq!(ProviderKind::from_name("zen"), Some(ProviderKind::OpenCode));
         assert_eq!(
             ProviderKind::from_name("opencode-go"),
@@ -1112,10 +1121,7 @@ mod tests {
     #[test]
     fn test_default_model_picks_first_catalog_entry() {
         assert_eq!(ProviderKind::Kilo.default_model(), Some("kilo-alpha"));
-        assert_eq!(
-            ProviderKind::OpenCode.default_model(),
-            Some("big-pickle")
-        );
+        assert_eq!(ProviderKind::OpenCode.default_model(), Some("big-pickle"));
         // Providers without a curated catalog have no default model.
         assert_eq!(ProviderKind::OpenAiCompatible.default_model(), None);
     }

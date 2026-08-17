@@ -749,10 +749,7 @@ fn spawn_nemotron_stream(
                         let _ = tx
                             .send(StreamEvent::Done {
                                 usage: usage.clone(),
-                                stop_reason: Some(nemotron_stop_reason(
-                                    stop_reason,
-                                    saw_tool_call,
-                                )),
+                                stop_reason: Some(nemotron_stop_reason(stop_reason, saw_tool_call)),
                             })
                             .await;
                         return;
@@ -779,12 +776,8 @@ fn spawn_nemotron_stream(
                     if let Some(content) = delta.get("content").and_then(|c| c.as_str())
                         && !content.is_empty()
                     {
-                        forward_nemotron_events(
-                            &tx,
-                            &mut saw_tool_call,
-                            parser.push_text(content),
-                        )
-                        .await;
+                        forward_nemotron_events(&tx, &mut saw_tool_call, parser.push_text(content))
+                            .await;
                     }
 
                     if let Some(finish) = parsed
@@ -823,9 +816,7 @@ fn spawn_nemotron_stream(
                                     current_tool_name = name.to_string();
                                     current_tool_args.clear();
                                 }
-                                if let Some(args) =
-                                    func.get("arguments").and_then(|a| a.as_str())
-                                {
+                                if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
                                     current_tool_args.push_str(args);
                                 }
                             }
