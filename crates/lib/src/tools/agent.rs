@@ -25,21 +25,21 @@ use serde_json::json;
 use std::path::PathBuf;
 
 use super::{Tool, ToolContext, ToolResult};
-use crate::error::ToolError;
 use crate::config::{Config, PermissionMode, PermissionsConfig};
+use crate::error::ToolError;
 use crate::llm::message::{ContentBlock, Message};
 use crate::llm::provider::create_provider_from_config;
 use crate::output_styles::AgentKind;
 use crate::permissions::PermissionChecker;
 use crate::query::{NullSink, QueryEngine, QueryEngineConfig};
+use crate::services::background::{TaskKind, TaskPayload, TaskStatus};
 use crate::services::coordinator::{
     AgentDefinition, AgentRegistry, SubagentEndpoint, apply_agent_definition, compose_agent_prompt,
     effective_permissions, resolve_subagent_endpoint,
 };
+use crate::services::subagent_colors::SubagentColor;
 use crate::state::AppState;
 use crate::tools::registry::{ToolRegistry, ToolVisibilityFilter};
-use crate::services::background::{TaskKind, TaskPayload, TaskStatus};
-use crate::services::subagent_colors::SubagentColor;
 
 /// Pull a stable id out of the input, falling back to a fresh uuid.
 ///
@@ -445,20 +445,12 @@ impl Tool for AgentTool {
                     match result {
                         Ok(text) => {
                             let _ = tm.write_output(&task_id, &text).await;
-                            let _ = tm
-                                .set_status(
-                                    &task_id,
-                                    TaskStatus::Completed,
-                                )
-                                .await;
+                            let _ = tm.set_status(&task_id, TaskStatus::Completed).await;
                         }
                         Err(e) => {
                             let _ = tm.write_output(&task_id, &format!("Error: {e}")).await;
                             let _ = tm
-                                .set_status(
-                                    &task_id,
-                                    TaskStatus::Failed(e.to_string()),
-                                )
+                                .set_status(&task_id, TaskStatus::Failed(e.to_string()))
                                 .await;
                         }
                     }
@@ -597,11 +589,7 @@ fn last_assistant_text(messages: &[Message]) -> String {
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(text)
-                }
+                if text.is_empty() { None } else { Some(text) }
             }
             _ => None,
         })

@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::config::ApiAuthMode;
 use crate::config::atomic::atomic_write_secret;
-use crate::llm::message::Message;
+use crate::llm::message::{ContentBlock, Message};
 use crate::services::secret_masker;
 
 /// The resolved provider a session conversation was run against.
@@ -339,10 +339,55 @@ pub fn load_session(session_id: &str) -> Result<SessionData, String> {
         return Err(format!("Session '{session_id}' not found"));
     }
     let data = load_session_at(&path)?;
+    // Create a preview of the last 3 messages (or fewer) for the log
+    let preview = data
+        .messages
+        .iter()
+        .rev()
+        .take(3)
+        .rev()
+        .map(|m| {
+            let text = match m {
+                Message::User(u) => u
+                    .content
+                    .iter()
+                    .find_map(|b| {
+                        if let ContentBlock::Text { text: t } = b {
+                            Some(t.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("[non-text]"),
+                Message::Assistant(a) => a
+                    .content
+                    .iter()
+                    .find_map(|b| {
+                        if let ContentBlock::Text { text: t } = b {
+                            Some(t.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("[non-text]"),
+                Message::System(_) => "[system]",
+            };
+            // Truncate each message preview to 50 characters
+            let truncated = text.chars().take(50).collect::<String>();
+            if text.len() > 50 {
+                format!("{}...", truncated)
+            } else {
+                truncated
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+
     info!(
-        "Session loaded: {} ({} messages)",
+        "Session loaded: {} ({} messages) - preview: {}",
         session_id,
-        data.messages.len()
+        data.messages.len(),
+        preview
     );
     Ok(data)
 }

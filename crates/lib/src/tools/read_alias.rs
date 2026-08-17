@@ -56,13 +56,14 @@ impl Tool for ReadTool {
         let mut mapped_input = input.clone();
 
         // If "path" exists but "file_path" doesn't, map it
-        if mapped_input.get("path").is_some() && mapped_input.get("file_path").is_none() {
-            if let Some(path_val) = mapped_input.get("path").cloned() {
-                mapped_input
-                    .as_object_mut()
-                    .ok_or_else(|| ToolError::InvalidInput("Expected JSON object".into()))?
-                    .insert("file_path".to_string(), path_val);
-            }
+        if mapped_input.get("path").is_some()
+            && mapped_input.get("file_path").is_none()
+            && let Some(path_val) = mapped_input.get("path").cloned()
+        {
+            mapped_input
+                .as_object_mut()
+                .ok_or_else(|| ToolError::InvalidInput("Expected JSON object".into()))?
+                .insert("file_path".to_string(), path_val);
         }
 
         let file_read = super::file_read::FileReadTool;
