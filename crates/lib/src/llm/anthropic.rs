@@ -13,7 +13,9 @@ use tracing::{debug, warn};
 
 use super::message::{messages_to_api_params, messages_to_api_params_cached};
 use super::provider::{Provider, ProviderError, ProviderRequest};
-use super::stream::{RawSseEvent, StreamEvent, StreamParser, stream_timeout_error, wait_for_stream_timeout};
+use super::stream::{
+    RawSseEvent, StreamEvent, StreamParser, stream_timeout_error, wait_for_stream_timeout,
+};
 
 /// Anthropic Messages API provider (Claude models, Bedrock, Vertex).
 pub struct AnthropicProvider {
