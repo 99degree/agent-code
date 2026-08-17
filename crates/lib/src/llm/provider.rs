@@ -535,7 +535,7 @@ impl ProviderKind {
             Self::Cohere => Some("https://api.cohere.com/v2"),
             Self::Perplexity => Some("https://api.perplexity.ai"),
             Self::Nvidia => Some("https://integrate.api.nvidia.com/v1"),
-            Self::Kilo => Some("https://api.kilo.ai"),
+            Self::Kilo => Some("https://api.kilo.ai/api/gateway"),
             Self::Novita => Some("https://api.novita.ai/openai/v1"),
             // These require user-supplied URLs.
             Self::Bedrock | Self::Vertex | Self::AzureOpenAi | Self::OpenAiCompatible => None,

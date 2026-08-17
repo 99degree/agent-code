@@ -1,7 +1,7 @@
 //! Kilo AI provider (OpenAI-compatible API)
 //!
 //! Kilo AI provides an OpenAI-compatible chat completions API at
-//! https://api.kilo.ai. It supports models like `kilo-alpha`.
+//! https://api.kilo.ai/api/gateway. It supports models like `kilo-alpha`.
 //!
 //! This provider is a thin wrapper around the OpenAI provider because the API
 //! is compatible. We reuse the OpenAI provider's logic but allow a different
@@ -58,8 +58,8 @@ mod tests {
 
     #[test]
     fn test_new_with_base_url_and_api_key() {
-        let provider = KiloProvider::new("https://api.kilo.ai", "test-key");
-        assert_eq!(provider.base_url(), "https://api.kilo.ai");
+        let provider = KiloProvider::new("https://api.kilo.ai/api/gateway", "test-key");
+        assert_eq!(provider.base_url(), "https://api.kilo.ai/api/gateway");
         assert_eq!(provider.api_key(), "test-key");
     }
 }
