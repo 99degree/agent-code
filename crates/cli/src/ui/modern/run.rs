@@ -530,6 +530,11 @@ pub async fn run_modern_tui(
     KEYBOARD_ENHANCEMENT_WANTED.store(caps.kitty_keyboard_safe, Ordering::Relaxed);
 
     let mut terminal = setup_terminal()?;
+    // Set the window title once at startup. Updating it on every paint or
+    // animation tick rewrites the title constantly during streaming, which
+    // is distracting in Termux (Android) terminal tabs — and carries no
+    // information the screen itself does not already show.
+    update_terminal_title(&app);
     let mut term_events = EventStream::new();
     // On Termux, read terminal input from a blocking thread so taps bring up
     // the on-screen keyboard (see term_reader_next / spawn_blocking_event_reader).
@@ -2212,7 +2217,9 @@ pub(super) async fn event_loop(
             // Keep OSC window title in sync with phase on every paint so
             // idle after a turn/HITL resets the spinner / "action required"
             // title (anim_tick alone stops once needs_anim_tick is false).
-            update_terminal_title(app);
+            // (Title is set once at startup; deliberately not rewritten
+            // here — updating it every frame during streaming is noisy on
+            // Termux and adds no information the screen does not show.)
             // Arm HITL answer keys only after the user has seen a paint of
             // the modal (+ grace). Stops mid-type keystrokes from auto-allow.
             if app.phase == super::app::Phase::Permission {
@@ -2523,10 +2530,13 @@ pub(super) async fn event_loop(
                 app.sync_background_tasks(rows);
             }
             // Micro-animations: spinner, action-required blink, toast decay.
+            // The on-screen spinner handles animation; the window title is
+            // set once at startup and not rewritten here, because doing so
+            // on every tick during streaming spams the title bar (noisy on
+            // Termux) without adding information the screen already shows.
             _ = anim_tick.tick(), if live || app.needs_anim_tick() => {
                 if app.needs_anim_tick() {
                     app.tick();
-                    update_terminal_title(app);
                 }
             }
         }
