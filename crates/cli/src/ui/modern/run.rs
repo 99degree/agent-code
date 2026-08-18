@@ -1094,6 +1094,8 @@ pub(super) async fn event_loop(
                     if let Some(effort) = next_effort {
                         eng.state_mut().config.api.effort = effort;
                     }
+                    // Reflect the new model in the terminal tab title.
+                    update_terminal_title(&app);
                 }
                 Err(_) => {
                     app.work.stage_model(action);
