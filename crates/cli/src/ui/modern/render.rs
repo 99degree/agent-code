@@ -659,7 +659,10 @@ fn draw_provider_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // the screen height and ratatui clips the bottom rows, so a selection
     // near the end lands in the clipped region and the picker looks stuck.
     // Derive the cap from the live height (header 3 + border 2 + footer 1 +
-    // total line 1 + padding).
+    // total line 1 + padding). The scroll offset (`top`) is maintained by
+    // the move handler in the user's scroll direction, then clamped here so
+    // the window stays inside the filtered list and the highlight is always
+    // visible.
     let max_rows = (area.height.saturating_sub(10) as usize).clamp(3, 12);
     if filtered.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -667,10 +670,18 @@ fn draw_provider_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Style::default().fg(palette().muted),
         )));
     } else {
-        let start = p
-            .selected
-            .saturating_sub(max_rows.saturating_sub(1).min(p.selected));
-        let end = (start + max_rows).min(filtered.len());
+        let total = filtered.len();
+        // Keep `top` within a page of the selection so the highlight never
+        // sits in the clipped region regardless of how the list changed.
+        let mut top = p.top.min(total.saturating_sub(1));
+        if p.selected < top {
+            top = p.selected;
+        }
+        if p.selected >= top.saturating_add(max_rows) {
+            top = p.selected + 1 - max_rows;
+        }
+        let start = top;
+        let end = (start + max_rows).min(total);
         for (i, (_, id, desc)) in filtered.iter().enumerate().take(end).skip(start) {
             let is_sel = i == p.selected;
             let marker = if is_sel { "❯" } else { " " };
@@ -687,9 +698,9 @@ fn draw_provider_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Span::styled((*desc).to_string(), Style::default().fg(palette().muted)),
             ]));
         }
-        if filtered.len() > max_rows {
+        if total > max_rows {
             lines.push(Line::from(Span::styled(
-                format!("  … {} total", filtered.len()),
+                format!("  … {} total", total),
                 Style::default().fg(palette().muted),
             )));
         }
