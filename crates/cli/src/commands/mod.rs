@@ -1463,10 +1463,11 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             .iter()
                             .find(|(n, _, _)| n == &chosen)
                             .map(|(_, _, k)| *k);
-                        if let Some(kind) = found_kind {
-                            if let Some(url) = kind.default_base_url() {
-                                engine.state_mut().config.api.base_url = url.to_string();
-                            }
+                        if let Some(kind) = found_kind
+                            && kind.default_base_url().is_some()
+                        {
+                            let url = kind.default_base_url().unwrap();
+                            engine.state_mut().config.api.base_url = url.to_string();
                         }
                         engine.state_mut().config.api.model = chosen.clone();
                         println!("Model changed to: {chosen} [{found_kind:?}]");
@@ -1551,13 +1552,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
         Some("sessions") => {
             // Optional filters: /sessions --tag <tag> [--all]
             let filter_tag = args.and_then(|a| {
-                let after_tag = a.strip_prefix("--tag ")?.trim();
-                // Don't treat --all as a tag name.
-                let tag_val = after_tag
+                a.strip_prefix("--tag ")?
                     .split_whitespace()
                     .next()
-                    .filter(|t| !t.eq_ignore_ascii_case("all"));
-                tag_val
+                    .filter(|t| !t.eq_ignore_ascii_case("all"))
             });
             let show_all = args
                 .map(|a| a.contains("--all") || a.contains("-a"))

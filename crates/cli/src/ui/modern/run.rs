@@ -934,7 +934,7 @@ pub(super) async fn event_loop(
     cli_permissions: &CliPermissionOverride,
     notifier: &mut NotifierService,
     term_events: &mut (impl futures::Stream<Item = std::io::Result<Event>> + Unpin),
-    mut term_rx: &mut Option<mpsc::UnboundedReceiver<Event>>,
+    term_rx: &mut Option<mpsc::UnboundedReceiver<Event>>,
     draw: &mut dyn FnMut(&mut App) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let mut turn: Option<TurnHandle> = None;
@@ -1435,7 +1435,7 @@ pub(super) async fn event_loop(
                                     term_events,
                                     draw,
                                     &mut pending_events,
-                                    &mut term_rx,
+                                    term_rx,
                                     async {
                                         let mut eng = engine_arc.lock().await;
                                         // The scope Ctrl+C just cancelled
@@ -1513,7 +1513,7 @@ pub(super) async fn event_loop(
                                 term_events,
                                 draw,
                                 &mut pending_events,
-                                &mut term_rx,
+                                term_rx,
                                 async {
                                     let mut eng = engine_arc.lock().await;
                                     // The working set was announced as
@@ -1614,12 +1614,12 @@ pub(super) async fn event_loop(
                             // Restore per-session presentation state saved
                             // with the conversation.
                             st.brief_mode = data.brief_mode;
-                            if !data.response_style.is_empty() {
-                                if let Some(style) = agent_code_lib::state::ResponseStyle::from_name(
+                            if !data.response_style.is_empty()
+                                && let Some(style) = agent_code_lib::state::ResponseStyle::from_name(
                                     &data.response_style,
-                                ) {
-                                    st.response_style = style;
-                                }
+                                )
+                            {
+                                st.response_style = style;
                             }
                             if !data.base_url.is_empty() {
                                 st.config.api.base_url = data.base_url.clone();
@@ -1721,7 +1721,7 @@ pub(super) async fn event_loop(
                                 term_events,
                                 draw,
                                 &mut pending_events,
-                                &mut term_rx,
+                                term_rx,
                                 async {
                                     let _ =
                                         eng.fire_cwd_changed_hooks(&previous_cwd, "resume").await;
@@ -1749,7 +1749,7 @@ pub(super) async fn event_loop(
                             term_events,
                             draw,
                             &mut pending_events,
-                            &mut term_rx,
+                            term_rx,
                             async {
                                 let eng = engine_arc.lock().await;
                                 let _ = eng.fire_session_start_hooks().await;
@@ -2241,7 +2241,7 @@ pub(super) async fn event_loop(
 
         tokio::select! {
             // Terminal input.
-            maybe_ev = next_terminal_event(&mut pending_events, term_events, &mut term_rx) => {
+            maybe_ev = next_terminal_event(&mut pending_events, term_events, term_rx) => {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) if is_cancel_chord(&key)
                         && app.resume.is_loading() =>
