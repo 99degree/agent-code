@@ -6,6 +6,8 @@
 use std::time::{Duration, Instant};
 
 use agent_code_lib::services::notifier::NotificationKind;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use super::layout::LayoutCache;
 use super::mode::SessionMode;
@@ -909,6 +911,22 @@ fn word_start_col(line: &str, col: usize) -> usize {
     start
 }
 
+fn git_short_sha(dir: &str) -> Option<String> {
+    std::process::Command::new("git")
+        .arg("rev-parse")
+        .arg("--short")
+        .arg("HEAD")
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            String::from_utf8(output.stdout)
+                .ok()
+                .map(|s| s.trim().to_string())
+        })
+}
+
 impl App {
     pub fn new(
         model: impl Into<String>,
@@ -926,12 +944,19 @@ impl App {
         session_id: impl Into<String>,
         disable_skill_shell: bool,
     ) -> Self {
+        let cwd_str: String = cwd.into();
+        let version_str = if let Some(sha) = git_short_sha(&cwd_str) {
+            format!("{}+{}", env!("CARGO_PKG_VERSION"), sha)
+        } else {
+            env!("CARGO_PKG_VERSION").to_string()
+        };
+
         Self {
             model: model.into(),
-            cwd: cwd.into(),
+            cwd: cwd_str,
             session_id: session_id.into(),
             session_views: Default::default(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: version_str,
             launch: super::launch::LaunchSurface::default(),
             disable_skill_shell,
             mode: SessionMode::Normal,
@@ -1581,25 +1606,153 @@ impl App {
         }
     }
 
-    /// Move cursor to the previous visual line (same column when possible).
+    /// Move cursor to the previous visual row (wrapped). Uses display columns
+    /// so Up/Down land on the intended position inside a long wrapped draft,
+    /// not on a hard `\n` line (issue #558: arrow keys must move by wrap row).
     pub fn move_up_line(&mut self) {
-        let (line, col) = self.cursor_line_col();
-        if line == 0 {
+        let (row, col) = self.cursor_line_col_visual();
+        if row == 0 {
             return;
         }
-        self.cursor = self.byte_at_line_col(line - 1, col);
+        self.cursor = self.byte_at_visual(row - 1, col);
         self.dirty = true;
     }
 
-    /// Move cursor to the next visual line (same column when possible).
+    /// Move cursor to the next visual row (wrapped).
     pub fn move_down_line(&mut self) {
-        let (line, col) = self.cursor_line_col();
-        let lines = self.input_line_count();
-        if line + 1 >= lines {
+        let (row, col) = self.cursor_line_col_visual();
+        let rows = self.visual_row_count();
+        if row + 1 >= rows {
             return;
         }
-        self.cursor = self.byte_at_line_col(line + 1, col);
+        self.cursor = self.byte_at_visual(row + 1, col);
         self.dirty = true;
+    }
+
+    /// Total visual rows the composer renders to, counting wrapped lines.
+    pub fn visual_row_count(&self) -> usize {
+        self.visual_rows().len()
+    }
+
+    /// (visual_row, display_col) of the cursor. `display_col` is a column in
+    /// the wrapped layout (the widest of the row's prefix and its own indent).
+    pub fn cursor_line_col_visual(&self) -> (usize, usize) {
+        self.byte_to_visual(self.cursor)
+    }
+
+    /// Map the composer's hard-newline `input` into wrapped visual rows.
+    ///
+    /// The input is split on hard `\n` into segments; each segment is wrapped
+    /// into one or more visual rows at [`COMPOSER_WRAP_W`] columns. Empty
+    /// segments (a blank line, including a trailing `\n`) become a single empty
+    /// visual row so it stays reachable by the arrow keys. The result is the
+    /// flattened list of `(byte_start, byte_end)` ranges, one per visual row.
+    fn visual_rows(&self) -> Vec<(usize, usize)> {
+        let wrap_w = Self::COMPOSER_WRAP_W;
+        let bytes: Vec<(usize, char)> = self.input.char_indices().collect();
+        if self.input.is_empty() {
+            return vec![(0, 0)];
+        }
+        let len = self.input.len();
+        let mut rows = Vec::new();
+        let mut p = 0usize; // index into `bytes`
+        let mut seg_start = 0usize;
+        loop {
+            // End of the current segment: next '\n' or EOF.
+            let mut seg_end = seg_start;
+            while seg_end < len && !self.input[seg_end..].starts_with('\n') {
+                seg_end += self.input[seg_end..].chars().next().unwrap().len_utf8();
+            }
+            if seg_start == seg_end {
+                // Empty segment (blank line): one empty visual row.
+                rows.push((seg_start, seg_start));
+            } else {
+                // Wrap [seg_start, seg_end) into visual rows.
+                let mut row_start = seg_start;
+                while row_start < seg_end {
+                    let mut end = row_start;
+                    let mut c = 0usize;
+                    while end < seg_end {
+                        let (_, ch) = bytes[p];
+                        let gw = UnicodeWidthStr::width(ch.to_string().as_str()).max(1);
+                        if c + gw > wrap_w && c > 0 {
+                            break;
+                        }
+                        c += gw;
+                        end += ch.len_utf8();
+                        p += 1;
+                    }
+                    if end == row_start {
+                        // One grapheme wider than the wrap column: place alone.
+                        let (_, ch) = bytes[p];
+                        end += ch.len_utf8();
+                        p += 1;
+                    }
+                    rows.push((row_start, end));
+                    row_start = end;
+                }
+            }
+            if seg_end < len {
+                // Consume the hard newline; the next segment starts a fresh row.
+                debug_assert_eq!(bytes[p].1, '\n');
+                p += 1;
+                seg_start = seg_end + 1;
+            } else {
+                break;
+            }
+        }
+        rows
+    }
+
+    /// Wrap width in display columns: body width minus the "❯ " (2) prefix.
+    const COMPOSER_WRAP_W: usize = 76;
+
+    fn byte_to_visual(&self, byte: usize) -> (usize, usize) {
+        let rows = self.visual_rows();
+        if rows.is_empty() {
+            return (0, 0);
+        }
+        let byte = byte.min(self.input.len());
+        for (ri, (start, end)) in rows.iter().enumerate() {
+            if byte >= *start && byte < *end {
+                // Column within this visual row.
+                let col = UnicodeWidthStr::width(&self.input[*start..byte]);
+                return (ri, col);
+            }
+        }
+        // Past the last row: clamp to last row, end column.
+        let n = rows.len() - 1;
+        let (s, e) = rows[n];
+        (n, UnicodeWidthStr::width(&self.input[s..e]))
+    }
+
+    fn byte_at_visual(&self, row: usize, col: usize) -> usize {
+        let rows = self.visual_rows();
+        if rows.is_empty() {
+            return 0;
+        }
+        let row = row.min(rows.len() - 1);
+        let (start, end) = rows[row];
+        let text = &self.input[start..end];
+        // Walk the row's graphemes, accumulating display width, and stop once
+        // we reach/pass `col`. This lands the cursor at the end of the last
+        // grapheme whose start is at or before `col` — the natural position for
+        // vertical movement (so "cd" col 2 -> end of "ab" at col 2).
+        let mut cur_col = 0usize;
+        let mut byte_in_row = 0usize;
+        for g in text.graphemes(true) {
+            let gw = UnicodeWidthStr::width(g).max(1);
+            if cur_col >= col {
+                break;
+            }
+            cur_col += gw;
+            byte_in_row += g.len();
+        }
+        if byte_in_row == 0 && !text.is_empty() {
+            // Keep col 0 at the very start of the row.
+            return start;
+        }
+        start + byte_in_row
     }
 
     /// Home of current line (not whole buffer).
@@ -4436,20 +4589,77 @@ mod tests {
     }
 
     #[test]
-    fn insert_newline_and_line_col_tracking() {
+    fn move_by_visual_row_preserves_column() {
         let mut app = App::new("m", "/tmp", "s");
+        // Two short lines: up/down move across the hard newline by visual row,
+        // preserving the display column so the caret lands on the intended char.
         app.insert_str("ab");
         app.insert_newline();
         app.insert_str("cd");
         assert_eq!(app.input, "ab\ncd");
-        assert_eq!(app.input_line_count(), 2);
         assert_eq!(app.cursor_line_col(), (1, 2));
+        // Up from col 2 of "cd" keeps col 2 -> end of "ab" (byte 2).
         app.move_up_line();
+        assert_eq!(app.cursor, 2);
         assert_eq!(app.cursor_line_col(), (0, 2));
-        app.move_line_start();
-        assert_eq!(app.cursor_line_col(), (0, 0));
-        app.move_line_end();
-        assert_eq!(app.cursor_line_col(), (0, 2));
+        // Up again is a no-op (already at the first row).
+        app.move_up_line();
+        assert_eq!(app.cursor, 2);
+        // Down from the start of "ab" (col 0) keeps col 0 -> start of "cd".
+        app.cursor = 0;
+        app.move_down_line();
+        assert_eq!(app.cursor, 3);
+        assert_eq!(app.cursor_line_col(), (1, 0));
+    }
+
+    #[test]
+    fn move_by_visual_row_wrapped() {
+        let mut app = App::new("m", "/tmp", "s");
+        // A single long line that wraps to 2 visual rows. Cursor at the end is
+        // on row 1; Up should drop to row 0 at the same column.
+        let text = "a".repeat(100); // wraps at 76 -> rows of 76 and 24
+        app.input = text.clone();
+        app.cursor = text.len();
+        let (r, c) = app.cursor_line_col_visual();
+        assert_eq!(r, 1);
+        assert_eq!(c, 24);
+        app.move_up_line();
+        let (r2, c2) = app.cursor_line_col_visual();
+        assert_eq!(r2, 0);
+        assert_eq!(c2, 24);
+        // Down back to row 1, same column.
+        app.move_down_line();
+        let (r3, c3) = app.cursor_line_col_visual();
+        assert_eq!(r3, 1);
+        assert_eq!(c3, 24);
+    }
+
+    #[test]
+    fn visual_rows_wrap_and_hard_newline() {
+        let mut app = App::new("m", "/tmp", "s");
+        // 80 'a's at wrap width 76 -> two visual rows (76 + 4).
+        app.input = "a".repeat(80);
+        let rows = app.visual_rows();
+        assert_eq!(rows.len(), 2, "expected 2 wrapped rows, got {:?}", rows);
+        // Hard newline splits into separate visual-row groups.
+        app.input = format!("{}\n{}", "a".repeat(40), "b".repeat(40));
+        let rows = app.visual_rows();
+        // Each is < 76 wide, so one row each = 2 visual rows (no phantom blank).
+        assert_eq!(rows.len(), 2, "expected 2 rows, got {:?}", rows);
+        // Trailing newline keeps an empty trailing visual row.
+        app.input = "ab\n".to_string();
+        let rows = app.visual_rows();
+        assert_eq!(
+            rows.len(),
+            2,
+            "expected 2 rows (incl empty), got {:?}",
+            rows
+        );
+        assert_eq!(
+            rows[1].0, rows[1].1,
+            "trailing row should be empty: {:?}",
+            rows
+        );
     }
 
     #[test]
