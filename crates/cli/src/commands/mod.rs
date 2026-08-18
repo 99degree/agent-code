@@ -15,6 +15,17 @@ mod settings_sync;
 mod uninstall;
 
 use agent_code_lib::query::QueryEngine;
+use agent_code_lib::llm::provider::ProviderKind;
+
+use tokio::task::block_in_place;
+use tokio::runtime::Handle;
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+static MODEL_CACHE: Lazy<Mutex<HashMap<ProviderKind, Vec<(String, String)>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 
 /// Result of executing a command.
 pub enum CommandResult {
@@ -1320,7 +1331,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
 
                 println!("Model changed to: {new_model} [{provider_kind:?}]");
             } else {
-                // Interactive model selector showing all configured providers.
+                // Interactive model selector showing all configured providers with dynamic model fetching.
                 let current = engine.state().config.api.model.clone();
 
                 // Collect (model_name, description, provider_kind) tuples.
@@ -1333,12 +1344,87 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     if !kind.is_configured() {
                         continue;
                     }
-                    let models = agent_code_lib::llm::provider::models_for_provider(kind);
-                    if models.is_empty() {
+                    // Determine the base URL to use for fetching models.
+                    let base_url = match kind.default_base_url() {
+                        Some(url) => url.to_string(),
+                        None => {
+                            // Use the engine's configured base_url if set, otherwise skip dynamic fetch and use static list.
+                            let engine_base_url = engine.state().config.api.base_url.clone();
+                            if engine_base_url.is_empty() {
+                                // Skip dynamic fetch, use static list.
+                                let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                                for (name, desc) in models {
+                                    all_models.push((name.to_string(), desc.to_string(), kind));
+                                }
+                                continue;
+                            } else {
+                                engine_base_url
+                            }
+                        }
+                    };
+                    // Resolve the API key for this provider.
+                    let api_key = agent_code_lib::llm::provider::resolve_api_key(kind, &engine.state().config)
+                        .unwrap_or_default();
+                    if api_key.is_empty() {
+                        // Skip dynamic fetch, use static list.
+                        let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                        for (name, desc) in models {
+                            all_models.push((name.to_string(), desc.to_string(), kind));
+                        }
                         continue;
                     }
+                    // Create a temporary provider for fetching models.
+                    let provider: Option<std::sync::Arc<dyn agent_code_lib::llm::provider::Provider>> = match kind {
+                        agent_code_lib::llm::provider::ProviderKind::AzureOpenAi => {
+                            Some(std::sync::Arc::new(agent_code_lib::llm::azure_openai::AzureOpenAiProvider::new(
+                                &base_url,
+                                &api_key,
+                            )))
+                        }
+                        _ => match kind.wire_format() {
+                            agent_code_lib::llm::provider::WireFormat::Anthropic => {
+                                Some(std::sync::Arc::new(agent_code_lib::llm::anthropic::AnthropicProvider::new(
+                                    &base_url,
+                                    &api_key,
+                                )))
+                            }
+                            agent_code_lib::llm::provider::WireFormat::OpenAiCompatible => {
+                                Some(std::sync::Arc::new(agent_code_lib::llm::openai::OpenAiProvider::new(
+                                    &base_url,
+                                    &api_key,
+                                )))
+                            }
+                        },
+                    };
+                    // Fetch models from the provider, or fall back to static list on failure.
+                    // Try to get cached models for this provider.
+                    let cached = {
+                        let lock = MODEL_CACHE.lock().unwrap();
+                        lock.get(&kind).cloned()
+                    };
+                    let models = if let Some(cached_models) = cached {
+                        cached_models
+                    } else {
+                        // Fetch models from the provider, or fall back to static list on failure.
+                        let fetched = if let Some(provider) = provider {
+                            match block_in_place(|| { let handle = Handle::current(); handle.block_on(provider.fetch_models()) }) {
+                                Ok(models) => models,
+                                Err(e) => {
+                                    eprintln!("Failed to fetch models for {:?}: {}", kind, e);
+                                    agent_code_lib::llm::provider::models_for_provider(kind).iter().map(|(n, d)| (n.to_string(), d.to_string())).collect()
+                                }
+                            }
+                        } else {
+                            // We couldn't create a provider (e.g., missing implementation for this kind), fall back to static list.
+                            agent_code_lib::llm::provider::models_for_provider(kind).iter().map(|(n, d)| (n.to_string(), d.to_string())).collect()
+                        };
+                        // Cache the fetched models (even if empty? we cache what we got).
+                        let mut lock = MODEL_CACHE.lock().unwrap();
+                        lock.insert(kind, fetched.clone());
+                        fetched
+                    };
                     for (name, desc) in models {
-                        all_models.push((name.to_string(), desc.to_string(), kind));
+                        all_models.push((name, desc, kind));
                     }
                 }
 

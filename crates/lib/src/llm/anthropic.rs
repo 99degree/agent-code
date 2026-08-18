@@ -259,6 +259,13 @@ impl Provider for AnthropicProvider {
 
         Ok(rx)
     }
+
+    /// Fetch the list of available models from the Anthropic API.
+    /// Anthropic doesn't have a public models endpoint, so we return an empty list
+    /// and rely on the static model list in models_for_provider.
+    async fn fetch_models(&self) -> Result<Vec<(String, String)>, ProviderError> {
+        Ok(vec![])
+    }
 }
 
 fn extract_sse_data(event_text: &str) -> Option<&str> {
