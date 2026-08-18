@@ -188,9 +188,6 @@ mod hex_hash {
     }
 }
 
-/// Buffer tokens before auto-compact fires.
-const AUTOCOMPACT_BUFFER_TOKENS: u64 = 13_000;
-
 /// Tokens reserved for the compact summary output.
 const MAX_OUTPUT_TOKENS_FOR_SUMMARY: u64 = 20_000;
 
@@ -232,9 +229,19 @@ pub fn effective_context_window(model: &str) -> u64 {
     context.saturating_sub(reserved)
 }
 
-/// Calculate the auto-compact threshold.
+/// Fraction of the full context window that may be filled before
+/// auto-compact fires. Compaction is triggered at this fill level so the
+/// model's context budget is used (the UI was previously microcompacting
+/// far too early); the output reservation inside `effective_context_window`
+/// plus the reactive compaction paths still guard against request-overflow.
+const AUTO_COMPACT_FILL_RATIO: f64 = 0.90;
+
+/// Calculate the auto-compact threshold as a fill ratio of the effective
+/// context window (total minus the output reservation), so the model's
+/// full context budget is used instead of leaving a fixed slack.
 pub fn auto_compact_threshold(model: &str) -> u64 {
-    effective_context_window(model).saturating_sub(AUTOCOMPACT_BUFFER_TOKENS)
+    let effective = effective_context_window(model) as f64;
+    (effective * AUTO_COMPACT_FILL_RATIO).round() as u64
 }
 
 /// Calculate token warning state for the current conversation.
@@ -1130,10 +1137,10 @@ mod tests {
 
     #[test]
     fn test_auto_compact_threshold() {
-        // Sonnet: 200K context, 16K max output (capped at 20K), effective = 180K
-        // Threshold = 180K - 13K = 167K
+        // Fills 90% of the effective window (200K context - 16K output = 184K).
         let threshold = auto_compact_threshold("claude-sonnet");
-        assert_eq!(threshold, 200_000 - 16_384 - 13_000);
+        let effective = 200_000 - 16_384;
+        assert_eq!(threshold, (effective as f64 * 0.90).round() as u64);
     }
 
     #[test]
@@ -1354,8 +1361,10 @@ mod tests {
 
     #[test]
     fn test_auto_compact_threshold_gpt_model() {
+        // Fills 90% of the effective window (128K context - 16K output = 112K).
         let threshold = auto_compact_threshold("gpt-4o");
-        assert_eq!(threshold, 128_000 - 16_384 - 13_000);
+        let effective = 128_000 - 16_384;
+        assert_eq!(threshold, (effective as f64 * 0.90).round() as u64);
     }
 
     #[test]
