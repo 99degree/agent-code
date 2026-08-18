@@ -274,19 +274,18 @@ fn held_back_len(s: &str) -> usize {
     let max = MARKER_PREFIXES.iter().map(|m| m.len()).max().unwrap_or(0);
     let mut best = 0;
     let max_len = n.min(max);
-    
+
     // Precompute the marker prefixes as byte slices for efficiency
-    let marker_prefixes: [&[u8]; 3] = [
-        b"<think",
-        b"<function",
-        b"{\"tool",
-    ];
-    
+    let marker_prefixes: [&[u8]; 3] = [b"<think", b"<function", b"{\"tool"];
+
     for len in 1..=max_len {
         let start = n - len;
         // Check if the suffix s_bytes[start..] matches the start of any marker prefix
         let suffix = &s_bytes[start..];
-        if marker_prefixes.iter().any(|&prefix| prefix.starts_with(suffix)) {
+        if marker_prefixes
+            .iter()
+            .any(|&prefix| prefix.starts_with(suffix))
+        {
             best = len;
         }
     }
