@@ -1379,6 +1379,7 @@ impl QueryEngine {
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 self.state.config.api.model.hash(&mut h);
                 self.state.cwd.hash(&mut h);
+                self.state.session_id.hash(&mut h);
                 self.state.config.mcp_servers.len().hash(&mut h);
                 self.tools.all().len().hash(&mut h);
                 // Include response_style so the cache invalidates
@@ -2667,6 +2668,14 @@ pub fn build_system_prompt(
          by reading, writing, and searching code. Use the tools available to you to \
          accomplish tasks.\n\n",
     );
+
+    // Session boundary marker: a unique per-session ID prepended so that
+    // compacted history (which may contain identical AGENTS.md-derived content
+    // across sessions) is always disambiguated at the inference slot level.
+    prompt.push_str(&format!(
+        "# Session Boundary\nSession ID: {}\n\n",
+        state.session_id,
+    ));
 
     // Environment context.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
