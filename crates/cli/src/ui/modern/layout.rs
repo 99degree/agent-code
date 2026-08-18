@@ -509,23 +509,12 @@ fn render_item_with_links(
             lines.push(Line::from(""));
         }
         TranscriptItem::Assistant(t) => {
+            // Model responses are always shown in full — never truncate a
+            // reply the user asked for. Only tool calls/results are capped
+            // (see render_tool_card) so the transcript stays scannable.
             let md = super::markdown::render_markdown(t);
             let mut body = md.lines;
             let mut body_links = md.links;
-            if !expanded {
-                let max = 12;
-                let total = body.len();
-                if total > max {
-                    body.truncate(max);
-                    body_links.retain(|l| l.line < max);
-                    body.push(Line::from(Span::styled(
-                        "  … folded · press e to expand".to_string(),
-                        Style::default()
-                            .fg(palette().muted)
-                            .add_modifier(Modifier::ITALIC),
-                    )));
-                }
-            }
             // Selection gutter on the first body line shifts columns by one.
             for l in &mut body_links {
                 if l.line == 0 {
