@@ -9,8 +9,12 @@
 
 use std::time::Duration;
 
-/// Flush cadence: at most one text repaint per this interval.
-pub const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
+/// Flush cadence: at most one text repaint per this interval. 400 ms ≈ 2.5
+/// fps — 4x slower than the original 100 ms, so streaming text repaints at
+/// the same calm cadence as the spinner instead of a 10 fps heartbeat that
+/// dominated idle/streaming CPU (the main cost vs. the line-oriented classic
+/// REPL). The 8 KiB size cap still releases large bursts promptly.
+pub const FLUSH_INTERVAL: Duration = Duration::from_millis(400);
 /// Size cap: flush early once this many bytes have accumulated.
 pub const FLUSH_BYTES: usize = 8 * 1024;
 

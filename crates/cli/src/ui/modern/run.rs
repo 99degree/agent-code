@@ -544,6 +544,15 @@ pub async fn run_modern_tui(
         None
     };
     let mut draw = |app: &mut App| draw_frame(&mut terminal, app, caps);
+    // Paint the launch surface immediately at startup so the splash is on
+    // screen before the first select! parks waiting for input — an idle
+    // frame with `dirty` set would otherwise not be drawn until some event
+    // arrives (or, on Termux, until the blocking reader thread wakes).
+    if let Err(e) = draw(&mut app) {
+        restore_terminal(&mut terminal)?;
+        return Err(e);
+    }
+    app.dirty = false;
     let result = event_loop(
         &session,
         &mut app,
@@ -945,10 +954,13 @@ pub(super) async fn event_loop(
     // swallowing it.
     let mut pending_events: std::collections::VecDeque<Event> = std::collections::VecDeque::new();
 
-    // Spinner animation (~12 fps) and coalescer flush deadline (~10 fps).
+    // Spinner animation (~3 fps) and coalescer flush deadline (~2.5 fps).
     // Both are only *polled* while a turn is live / text is buffered, so an
-    // idle session never wakes on them.
-    let mut anim_tick = tokio::time::interval(Duration::from_millis(80));
+    // idle session never wakes on them. The cadence is deliberately slow
+    // (4x quieter than the original 80ms/100ms) to cut idle/streaming CPU:
+    // the screen refresh heartbeat was the main cost vs. the line-oriented
+    // classic REPL, which only repainted on new input/output.
+    let mut anim_tick = tokio::time::interval(Duration::from_millis(320));
     anim_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut flush_tick = tokio::time::interval(super::stream_buffer::FLUSH_INTERVAL);
     flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
