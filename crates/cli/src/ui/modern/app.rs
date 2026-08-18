@@ -2364,6 +2364,7 @@ impl App {
         self.provider_picker = Some(super::provider_picker::ProviderPicker {
             query: String::new(),
             selected,
+            top: 0,
             entries,
             current: current.to_string(),
         });

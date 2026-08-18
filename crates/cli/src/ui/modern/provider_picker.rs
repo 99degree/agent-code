@@ -13,6 +13,8 @@ pub struct ProviderPicker {
     pub query: String,
     /// Highlighted row into the filtered list.
     pub selected: usize,
+    /// First visible row of the filtered list (scroll offset).
+    pub top: usize,
     /// Full catalog: (name, description).
     pub entries: Vec<(String, String)>,
     /// Provider active when the picker opened.
@@ -37,6 +39,11 @@ impl ProviderPicker {
     }
 }
 
+/// Largest viewport the picker can show; the actual rows are clamped to the
+/// terminal height at draw time, but move-scrolling uses this so the window
+/// advances in the user's scroll direction before the height is known.
+const SCROLL_WINDOW: usize = 12;
+
 impl App {
     /// Request opening the provider picker (run loop fills catalog via pending Show).
     pub fn request_provider_picker(&mut self) {
@@ -54,10 +61,22 @@ impl App {
         let n = p.filtered().len() as i32;
         if n == 0 {
             p.selected = 0;
-        } else {
-            let cur = p.selected as i32;
-            p.selected = (cur + delta).rem_euclid(n) as usize;
+            p.top = 0;
+            self.dirty = true;
+            return;
         }
+        let cur = p.selected as i32;
+        let new_sel = (cur + delta).rem_euclid(n) as usize;
+        // Advance the scroll offset in the direction the user moved so the
+        // highlighted row stays pinned to the edge it approached: scrolling
+        // down grows `top` until the selection sits at the window bottom,
+        // scrolling up shrinks `top` until it sits at the window top.
+        if delta > 0 && new_sel >= p.top.saturating_add(SCROLL_WINDOW) {
+            p.top = new_sel + 1 - SCROLL_WINDOW;
+        } else if delta < 0 && new_sel < p.top {
+            p.top = new_sel;
+        }
+        p.selected = new_sel;
         self.dirty = true;
     }
 
@@ -70,6 +89,7 @@ impl App {
         }
         p.query.push(c);
         p.selected = 0;
+        p.top = 0;
         self.dirty = true;
     }
 
@@ -79,6 +99,7 @@ impl App {
         };
         p.query.pop();
         p.selected = 0;
+        p.top = 0;
         self.dirty = true;
     }
 
