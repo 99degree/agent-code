@@ -8,99 +8,116 @@
 use super::message::*;
 use uuid::Uuid;
 
-/// Repair tool_use / tool_result pairing so strict providers accept
-/// the history.
-///
-/// Malformed histories (crash mid-turn, imported sessions, permissive
-/// upstream models) show up three ways, all rejected with a 400 by
-/// strict OpenAI-compatible and local backends:
-///
-/// - a `tool_use` with no answering `tool_result` → a synthetic error
-///   result is appended (long-standing behavior);
-/// - a `tool_result` with no preceding `tool_use` for its id
-///   (out-of-order or truly orphaned) → the block is dropped;
-/// - several `tool_result`s for the same id → the first is kept, the
-///   rest are dropped (the first is the one the model actually
-///   continued from).
-///
-/// Blocks emptied by the drops are cleaned up by the
-/// `remove_empty_messages` step that follows in the pipeline.
+/// Ensure every tool_use block has a matching tool_result in the
+/// subsequent user message. Orphaned tool_use blocks cause API errors.
+/// Deduplicates tool_results for the same tool_use_id by preferring
+/// LATER occurrences. Also removes tool_results that appear before
+/// any tool_use with that ID (out-of-order corruption).
 pub fn ensure_tool_result_pairing(messages: &mut Vec<Message>) {
-    use std::collections::HashSet;
+    // First pass: collect all tool_use IDs in order and count occurrences per ID.
+    let mut tool_use_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut tool_use_order: Vec<String> = Vec::new();
+    for msg in messages.iter() {
+        if let Message::Assistant(a) = msg {
+            for block in &a.content {
+                if let ContentBlock::ToolUse { id, .. } = block {
+                    if !tool_use_counts.contains_key(id) {
+                        tool_use_order.push(id.clone());
+                    }
+                    *tool_use_counts.entry(id.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
 
-    // IDs of tool_use blocks seen so far in the walk (a result is only
-    // valid when its call precedes it), and IDs already answered.
-    let mut seen_use_ids: HashSet<String> = HashSet::new();
-    let mut answered_ids: HashSet<String> = HashSet::new();
-    // Preserves emission order for the synthetic results appended below.
-    let mut pending_tool_ids: Vec<String> = Vec::new();
-
-    for msg in messages.iter_mut() {
-        match msg {
-            Message::Assistant(a) => {
-                for block in &a.content {
-                    if let ContentBlock::ToolUse { id, .. } = block
-                        && seen_use_ids.insert(id.clone())
-                    {
-                        pending_tool_ids.push(id.clone());
+    // Second pass (forward): pair tool_results with PRECEDING tool_uses in order.
+    // Track how many tool_uses we've seen so far per ID.
+    let mut seen_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut to_remove_forward: Vec<(usize, usize)> = Vec::new();
+    for (msg_idx, msg) in messages.iter().enumerate() {
+        if let Message::Assistant(a) = msg {
+            for block in &a.content {
+                if let ContentBlock::ToolUse { id, .. } = block {
+                    *seen_counts.entry(id.clone()).or_insert(0) += 1;
+                }
+            }
+        } else if let Message::User(u) = msg {
+            for (content_idx, block) in u.content.iter().enumerate() {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                    let seen = seen_counts.get(tool_use_id).copied().unwrap_or(0);
+                    if seen == 0 {
+                        // Tool_result appears before any tool_use with this ID - mark for removal.
+                        to_remove_forward.push((msg_idx, content_idx));
                     }
                 }
             }
-            Message::User(u) => {
-                u.content.retain(|block| {
-                    let ContentBlock::ToolResult { tool_use_id, .. } = block else {
-                        return true;
-                    };
-                    if !seen_use_ids.contains(tool_use_id) {
-                        // Out-of-order or orphaned result — no call to
-                        // pair with; keeping it guarantees a 400.
-                        return false;
+        }
+    }
+    // Remove marked (from highest index to lowest).
+    to_remove_forward.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    for (msg_idx, content_idx) in to_remove_forward {
+        if let Message::User(u) = &mut messages[msg_idx] {
+            u.content.remove(content_idx);
+        }
+    }
+
+    // Third pass (backward): from the end, keep up to N tool_results per ID
+    // where N is the total tool_use count. This handles duplicate IDs.
+    let mut kept_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut to_remove_backward: Vec<(usize, usize)> = Vec::new();
+    for (msg_idx, msg) in messages.iter().enumerate().rev() {
+        if let Message::User(u) = msg {
+            for (content_idx, block) in u.content.iter().enumerate().rev() {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                    let max_allowed = tool_use_counts.get(tool_use_id).copied().unwrap_or(0);
+                    let already_kept = kept_counts.get(tool_use_id).copied().unwrap_or(0);
+                    if already_kept < max_allowed {
+                        *kept_counts.entry(tool_use_id.clone()).or_insert(0) += 1;
+                    } else {
+                        to_remove_backward.push((msg_idx, content_idx));
                     }
-                    // Keep only the first result per id.
-                    answered_ids.insert(tool_use_id.clone())
-                });
+                }
             }
-            _ => {}
+        }
+    }
+    // Remove marked (from highest index to lowest).
+    to_remove_backward.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    for (msg_idx, content_idx) in to_remove_backward {
+        if let Message::User(u) = &mut messages[msg_idx] {
+            u.content.remove(content_idx);
         }
     }
 
-    // Any calls still unanswered get synthetic error results.
-    pending_tool_ids.retain(|id| !answered_ids.contains(id));
-    for id in pending_tool_ids {
-        messages.push(tool_result_message(
-            &id,
-            "(tool execution was interrupted)",
-            true,
-        ));
-    }
-}
-
-/// Replace `tool_use` inputs that are not JSON objects.
-///
-/// Providers require tool-call arguments to be an object; some models
-/// emit `null` or the arguments as a JSON-encoded *string*. A string
-/// that parses to an object is adopted (the arguments were merely
-/// double-encoded); anything else non-object becomes `{}` so the
-/// request is not rejected outright.
-pub fn sanitize_tool_use_input(messages: &mut [Message]) {
-    for msg in messages.iter_mut() {
-        let Message::Assistant(a) = msg else { continue };
-        for block in a.content.iter_mut() {
-            let ContentBlock::ToolUse { input, .. } = block else {
-                continue;
-            };
-            if input.is_object() {
-                continue;
-            }
-            if let serde_json::Value::String(s) = &input
-                && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
-                && parsed.is_object()
-            {
-                *input = parsed;
-                continue;
-            }
-            *input = serde_json::json!({});
-        }
+    // Any remaining unpaired tool_use_ids need synthetic error results.
+    // Iterate in tool_use_order to preserve original insertion order.
+    let unpaired: Vec<String> = tool_use_order
+        .into_iter()
+        .flat_map(|id| {
+            let count = tool_use_counts.get(&id).copied().unwrap_or(0);
+            let kept = kept_counts.get(&id).copied().unwrap_or(0);
+            (0..count.saturating_sub(kept)).map(move |_| id.clone())
+        })
+        .collect();
+    if !unpaired.is_empty() {
+        let blocks: Vec<ContentBlock> = unpaired
+            .iter()
+            .map(|id| ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: "(tool execution was interrupted)".to_string(),
+                is_error: true,
+                extra_content: vec![],
+            })
+            .collect();
+        messages.push(Message::User(UserMessage {
+            uuid: Uuid::new_v4(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            content: blocks,
+            is_meta: true,
+            is_compact_summary: false,
+        }));
     }
 }
 
@@ -121,6 +138,24 @@ pub fn strip_empty_blocks(messages: &mut [Message]) {
                 });
             }
             _ => {}
+        }
+    }
+}
+
+/// Replace null/missing tool_use input with empty object.
+/// Some providers reject tool calls with null input or non-object input.
+pub fn clean_tool_use_input(messages: &mut [Message]) {
+    for msg in messages.iter_mut() {
+        if let Message::Assistant(a) = msg {
+            for block in a.content.iter_mut() {
+                if let ContentBlock::ToolUse { input, .. } = block
+                    && (input.is_null() || !input.is_object())
+                {
+                    // Null or non-object input (string, number, bool, array) is invalid
+                    // for function calling — normalize to empty object.
+                    *input = serde_json::json!({});
+                }
+            }
         }
     }
 }
@@ -149,6 +184,42 @@ pub fn validate_alternation(messages: &[Message]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Convenience wrapper: run the full normalization suite on a message
+/// vector. Call this after loading messages from disk (session resume,
+/// history import) to guarantee API-compatible alternation.
+pub fn normalize_messages(messages: &mut Vec<Message>) {
+    normalize_strict(messages);
+}
+
+/// Drop every message before the last compaction summary, returning the
+/// dropped prefix.
+///
+/// A compaction summary (`is_compact_summary`) distills everything that
+/// preceded it, so re-loading those earlier messages on resume is pure
+/// context bloat that inflates the first turn's input tokens (and trips
+/// the high-token-usage warning). Keeping only the summary and everything
+/// after it shrinks the *active* history to the meaningful tail, which is
+/// what the LLM and token accounting see.
+///
+/// The dropped prefix is returned so the caller can preserve it for
+/// on-disk persistence of the *full* history (the active tail alone would
+/// lose the distilled precedent). Returns an empty vector when the history
+/// holds no compaction summary or the summary is already first.
+pub fn truncate_to_last_summary(messages: &mut Vec<Message>) -> Vec<Message> {
+    let last_summary = messages
+        .iter()
+        .rposition(|m| matches!(m, Message::User(u) if u.is_compact_summary));
+    match last_summary {
+        Some(idx) if idx > 0 => {
+            // split_off(idx) leaves `messages` holding [0, idx) (the dropped
+            // head) and returns [idx, end) (the active tail, summary first).
+            let active = messages.split_off(idx);
+            std::mem::replace(messages, active)
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Remove empty messages (messages with no content blocks after stripping).
@@ -181,77 +252,6 @@ pub fn cap_document_blocks(messages: &mut [Message], max_bytes: usize) {
                 };
             }
         }
-    }
-}
-
-/// Merge consecutive user messages into a single message.
-/// The API requires strict user/assistant alternation.
-///
-/// **Exception**: User messages that contain *only* `ToolResult` blocks
-/// are never merged because each must map to a separate `tool` role
-/// message with its own `tool_call_id` in the OpenAI wire format.
-pub fn merge_consecutive_user_messages(messages: &mut Vec<Message>) {
-    let mut i = 0;
-    while i + 1 < messages.len() {
-        let current_is_tool_only = matches!(&messages[i], Message::User(u)
-            if u.content.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. })));
-        let next_is_tool_only = matches!(&messages[i + 1], Message::User(u)
-            if u.content.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. })));
-
-        // Never merge two tool-result-only messages — each needs its own
-        // tool_call_id in the OpenAI wire format.
-        if current_is_tool_only && next_is_tool_only {
-            i += 1;
-            continue;
-        }
-
-        let both_user = matches!(&messages[i], Message::User(_))
-            && matches!(&messages[i + 1], Message::User(_));
-
-        if both_user {
-            // Merge content from i+1 into i.
-            if let Message::User(next) = messages.remove(i + 1)
-                && let Message::User(ref mut current) = messages[i]
-            {
-                current.content.extend(next.content);
-            }
-        } else {
-            i += 1;
-        }
-    }
-}
-
-/// Run the strict normalization pipeline on the given messages.
-pub fn normalize_messages(messages: &mut Vec<Message>) {
-    normalize_strict(messages);
-}
-
-/// Drop every message before the last compaction summary, returning the
-/// dropped prefix.
-///
-/// A compaction summary (`is_compact_summary`) distills everything that
-/// preceded it, so re-loading those earlier messages on resume is pure
-/// context bloat that inflates the first turn's input tokens (and trips
-/// the high-token-usage warning). Keeping only the summary and everything
-/// after it shrinks the *active* history to the meaningful tail, which is
-/// what the LLM and token accounting see.
-///
-/// The dropped prefix is returned so the caller can preserve it for
-/// on-disk persistence of the *full* history (the active tail alone would
-/// lose the distilled precedent). Returns an empty vector when the history
-/// holds no compaction summary or the summary is already first.
-pub fn truncate_to_last_summary(messages: &mut Vec<Message>) -> Vec<Message> {
-    let last_summary = messages
-        .iter()
-        .rposition(|m| matches!(m, Message::User(u) if u.is_compact_summary));
-    match last_summary {
-        Some(idx) if idx > 0 => {
-            // split_off(idx) leaves `messages` holding [0, idx) (the dropped
-            // head) and returns [idx, end) (the active tail, summary first).
-            let active = messages.split_off(idx);
-            std::mem::replace(messages, active)
-        }
-        _ => Vec::new(),
     }
 }
 
@@ -561,6 +561,43 @@ pub fn split_mixed_tool_result_users(messages: &mut Vec<Message>) {
     *messages = expanded;
 }
 
+/// Merge consecutive user messages into a single message.
+/// The API requires strict user/assistant alternation.
+///
+/// **Exception**: User messages that contain *only* `ToolResult` blocks
+/// are never merged because each must map to a separate `tool` role
+/// message with its own `tool_call_id` in the OpenAI wire format.
+pub fn merge_consecutive_user_messages(messages: &mut Vec<Message>) {
+    let mut i = 0;
+    while i + 1 < messages.len() {
+        let current_is_tool_only = matches!(&messages[i], Message::User(u)
+            if u.content.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. })));
+        let next_is_tool_only = matches!(&messages[i + 1], Message::User(u)
+            if u.content.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. })));
+
+        // Never merge two tool-result-only messages — each needs its own
+        // tool_call_id in the OpenAI wire format.
+        if current_is_tool_only && next_is_tool_only {
+            i += 1;
+            continue;
+        }
+
+        let both_user = matches!(&messages[i], Message::User(_))
+            && matches!(&messages[i + 1], Message::User(_));
+
+        if both_user {
+            // Merge content from i+1 into i.
+            if let Message::User(next) = messages.remove(i + 1)
+                && let Message::User(ref mut current) = messages[i]
+            {
+                current.content.extend(next.content);
+            }
+        } else {
+            i += 1;
+        }
+    }
+}
+
 /// Insert a synthetic assistant text message between any two consecutive
 /// user messages to maintain strict alternation.  Unlike
 /// [`ensure_alternation_after_tool_result`], which only handles the
@@ -751,8 +788,8 @@ pub fn normalize_all(messages: &mut Vec<Message>) -> NormalizeReport {
     strip_empty_blocks(messages);
     report.empty_blocks_removed = before.saturating_sub(count_text_blocks(messages));
 
-    // 2.5. Sanitize tool_use blocks with null/invalid input.
-    sanitize_tool_use_input(messages);
+    // 2.5. Clean tool_use blocks with null input.
+    clean_tool_use_input(messages);
 
     // 3. Remove empty messages.
     let before = messages.len();
@@ -883,6 +920,153 @@ fn count_document_blocks(messages: &[Message]) -> usize {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn test_clean_tool_use_input_null_input() {
+        // Regression test: tool_use with null input should be cleaned to empty object.
+        let mut messages = vec![
+            Message::System(SystemMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                subtype: SystemMessageType::Informational,
+                content: String::new(),
+                level: MessageLevel::Info,
+            }),
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::Text {
+                    text: "do it".into(),
+                }],
+                is_meta: false,
+                is_compact_summary: false,
+            }),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "Write".into(),
+                    input: serde_json::Value::Null,
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+
+        clean_tool_use_input(&mut messages);
+
+        // The tool_use input should now be an empty object, not null
+        if let Message::Assistant(a) = &messages[2] {
+            for block in &a.content {
+                if let ContentBlock::ToolUse { input, .. } = block {
+                    assert!(!input.is_null(), "tool_use input should not be null");
+                    assert!(input.is_object(), "tool_use input should be an object");
+                    assert_eq!(*input, serde_json::json!({}));
+                    // Note: deref input before comparing
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_clean_tool_use_input_non_object_input() {
+        // Regression test: tool_use with non-object input (string, number, bool) should be cleaned.
+        let mut messages = vec![
+            Message::System(SystemMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                subtype: SystemMessageType::Informational,
+                content: String::new(),
+                level: MessageLevel::Info,
+            }),
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::Text {
+                    text: "do it".into(),
+                }],
+                is_meta: false,
+                is_compact_summary: false,
+            }),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_2".into(),
+                    name: "Bash".into(),
+                    input: serde_json::Value::String("not an object".into()),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+
+        clean_tool_use_input(&mut messages);
+
+        // The tool_use input should now be an empty object
+        if let Message::Assistant(a) = &messages[2] {
+            for block in &a.content {
+                if let ContentBlock::ToolUse { input, .. } = block {
+                    assert!(input.is_object(), "tool_use input should be an object");
+                    assert_eq!(*input, serde_json::json!({}));
+                    // Note: deref input before comparing
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_clean_tool_use_input_empty_object_preserved() {
+        // Empty object input should be preserved (not double-cleaned)
+        let mut messages = vec![
+            Message::System(SystemMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                subtype: SystemMessageType::Informational,
+                content: String::new(),
+                level: MessageLevel::Info,
+            }),
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::Text {
+                    text: "do it".into(),
+                }],
+                is_meta: false,
+                is_compact_summary: false,
+            }),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_3".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({}),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+
+        clean_tool_use_input(&mut messages);
+
+        // The tool_use input should remain an empty object
+        if let Message::Assistant(a) = &messages[2] {
+            for block in &a.content {
+                if let ContentBlock::ToolUse { input, .. } = block {
+                    assert!(input.is_object(), "tool_use input should be an object");
+                    assert_eq!(*input, serde_json::json!({}));
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_tool_result_pairing() {
@@ -1106,211 +1290,20 @@ mod tests {
         })];
 
         ensure_tool_result_pairing(&mut messages);
-        // Should add two synthetic error results (one per orphan).
-        assert_eq!(messages.len(), 3);
-        for msg in &messages[1..] {
-            if let Message::User(u) = msg {
+        // All orphaned tool results are combined into a single user message
+        // so build_body produces contiguous role:"tool" messages.
+        assert_eq!(messages.len(), 2);
+        if let Message::User(u) = &messages[1] {
+            assert_eq!(u.content.len(), 2, "both tool results in one message");
+            for block in &u.content {
                 assert!(matches!(
-                    &u.content[0],
+                    block,
                     ContentBlock::ToolResult { is_error: true, .. }
                 ));
-            } else {
-                panic!("Expected user message with tool result");
             }
+        } else {
+            panic!("Expected single user message with both tool results");
         }
-    }
-
-    fn assistant_with_use(id: &str, input: serde_json::Value) -> Message {
-        Message::Assistant(AssistantMessage {
-            uuid: Uuid::new_v4(),
-            timestamp: String::new(),
-            content: vec![ContentBlock::ToolUse {
-                id: id.into(),
-                name: "Bash".into(),
-                input,
-            }],
-            model: None,
-            usage: None,
-            stop_reason: None,
-            request_id: None,
-        })
-    }
-
-    fn result_content(msg: &Message) -> Vec<(&str, &str)> {
-        match msg {
-            Message::User(u) => u
-                .content
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        ..
-                    } => Some((tool_use_id.as_str(), content.as_str())),
-                    _ => None,
-                })
-                .collect(),
-            _ => vec![],
-        }
-    }
-
-    #[test]
-    fn orphan_result_with_no_preceding_use_is_dropped() {
-        let mut messages = vec![
-            user_message("hi"),
-            // Result arrives before any tool_use with this id exists.
-            tool_result_message("never_called", "stale", false),
-            assistant_with_use("call_1", serde_json::json!({})),
-            tool_result_message("call_1", "ok", false),
-        ];
-        ensure_tool_result_pairing(&mut messages);
-        let all_results: Vec<_> = messages.iter().flat_map(result_content).collect();
-        assert_eq!(
-            all_results,
-            vec![("call_1", "ok")],
-            "orphan result must be dropped, valid pair preserved"
-        );
-    }
-
-    #[test]
-    fn out_of_order_result_before_its_use_is_dropped_then_synthesized() {
-        let mut messages = vec![
-            // Result precedes its own tool_use — invalid ordering.
-            tool_result_message("call_1", "too early", false),
-            assistant_with_use("call_1", serde_json::json!({})),
-        ];
-        ensure_tool_result_pairing(&mut messages);
-        let all_results: Vec<_> = messages.iter().flat_map(result_content).collect();
-        // The early result is dropped; the now-unanswered call gets a
-        // synthetic error result appended.
-        assert_eq!(all_results.len(), 1);
-        assert_eq!(all_results[0].0, "call_1");
-        assert_ne!(all_results[0].1, "too early");
-    }
-
-    #[test]
-    fn duplicate_results_keep_only_the_first() {
-        let mut messages = vec![
-            assistant_with_use("call_1", serde_json::json!({})),
-            tool_result_message("call_1", "first", false),
-            tool_result_message("call_1", "second", false),
-            tool_result_message("call_1", "third", false),
-        ];
-        ensure_tool_result_pairing(&mut messages);
-        let all_results: Vec<_> = messages.iter().flat_map(result_content).collect();
-        assert_eq!(
-            all_results,
-            vec![("call_1", "first")],
-            "only the first result per id survives"
-        );
-    }
-
-    #[test]
-    fn duplicate_result_inside_one_message_is_deduplicated() {
-        let mut messages = vec![
-            assistant_with_use("call_1", serde_json::json!({})),
-            Message::User(UserMessage {
-                uuid: Uuid::new_v4(),
-                timestamp: String::new(),
-                content: vec![
-                    ContentBlock::ToolResult {
-                        tool_use_id: "call_1".into(),
-                        content: "first".into(),
-                        is_error: false,
-                        extra_content: vec![],
-                    },
-                    ContentBlock::ToolResult {
-                        tool_use_id: "call_1".into(),
-                        content: "second".into(),
-                        is_error: false,
-                        extra_content: vec![],
-                    },
-                ],
-                is_meta: true,
-                is_compact_summary: false,
-            }),
-        ];
-        ensure_tool_result_pairing(&mut messages);
-        let all_results: Vec<_> = messages.iter().flat_map(result_content).collect();
-        assert_eq!(all_results, vec![("call_1", "first")]);
-    }
-
-    #[test]
-    fn sanitize_null_input_becomes_empty_object() {
-        let mut messages = vec![assistant_with_use("call_1", serde_json::Value::Null)];
-        sanitize_tool_use_input(&mut messages);
-        let Message::Assistant(a) = &messages[0] else {
-            panic!("expected assistant");
-        };
-        let ContentBlock::ToolUse { input, .. } = &a.content[0] else {
-            panic!("expected tool_use");
-        };
-        assert_eq!(input, &serde_json::json!({}));
-    }
-
-    #[test]
-    fn sanitize_stringified_object_is_recovered() {
-        let mut messages = vec![assistant_with_use(
-            "call_1",
-            serde_json::Value::String(r#"{"command":"ls"}"#.into()),
-        )];
-        sanitize_tool_use_input(&mut messages);
-        let Message::Assistant(a) = &messages[0] else {
-            panic!("expected assistant");
-        };
-        let ContentBlock::ToolUse { input, .. } = &a.content[0] else {
-            panic!("expected tool_use");
-        };
-        assert_eq!(input, &serde_json::json!({"command": "ls"}));
-    }
-
-    #[test]
-    fn sanitize_non_object_values_become_empty_object() {
-        for bad in [
-            serde_json::json!("not json at all"),
-            serde_json::json!([1, 2, 3]),
-            serde_json::json!(42),
-            serde_json::json!("[1,2]"), // parses, but not to an object
-        ] {
-            let mut messages = vec![assistant_with_use("call_1", bad)];
-            sanitize_tool_use_input(&mut messages);
-            let Message::Assistant(a) = &messages[0] else {
-                panic!("expected assistant");
-            };
-            let ContentBlock::ToolUse { input, .. } = &a.content[0] else {
-                panic!("expected tool_use");
-            };
-            assert_eq!(input, &serde_json::json!({}));
-        }
-    }
-
-    #[test]
-    fn well_formed_history_passes_through_unchanged() {
-        let original = vec![
-            user_message("run ls"),
-            assistant_with_use("call_1", serde_json::json!({"command": "ls"})),
-            tool_result_message("call_1", "file.txt", false),
-            Message::Assistant(AssistantMessage {
-                uuid: Uuid::new_v4(),
-                timestamp: String::new(),
-                content: vec![ContentBlock::Text {
-                    text: "done".into(),
-                }],
-                model: None,
-                usage: None,
-                stop_reason: None,
-                request_id: None,
-            }),
-        ];
-        let mut messages = original.clone();
-        sanitize_tool_use_input(&mut messages);
-        ensure_tool_result_pairing(&mut messages);
-        assert_eq!(messages.len(), original.len());
-        assert_eq!(
-            serde_json::to_string(&messages).unwrap(),
-            serde_json::to_string(&original).unwrap(),
-            "valid history must not be altered"
-        );
     }
 
     #[test]
@@ -1456,6 +1449,563 @@ mod tests {
                 assert!(text.contains("too large"));
             } else {
                 panic!("Expected text block after capping");
+            }
+        }
+    }
+
+    #[test]
+    fn test_normalize_all_orphaned_tool_calls() {
+        let mut messages = vec![Message::Assistant(AssistantMessage {
+            uuid: Uuid::new_v4(),
+            timestamp: String::new(),
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "Bash".into(),
+                    input: serde_json::json!({}),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_2".into(),
+                    name: "FileRead".into(),
+                    input: serde_json::json!({}),
+                },
+            ],
+            model: None,
+            usage: None,
+            stop_reason: None,
+            request_id: None,
+        })];
+
+        let report = normalize_all(&mut messages);
+        // Now combined into single user message with both tool results.
+        assert_eq!(report.tool_results_added, 1);
+        assert_eq!(messages.len(), 2);
+        if let Message::User(u) = &messages[1] {
+            assert_eq!(u.content.len(), 2);
+        } else {
+            panic!("expected user message with combined tool results");
+        }
+    }
+
+    #[test]
+    fn test_normalize_all_empty_blocks_and_messages() {
+        let mut messages = vec![
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![
+                    ContentBlock::Text { text: "".into() },
+                    ContentBlock::Text {
+                        text: "keep".into(),
+                    },
+                ],
+                is_meta: false,
+                is_compact_summary: false,
+            }),
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![],
+                is_meta: false,
+                is_compact_summary: false,
+            }),
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::Text {
+                    text: "also keep".into(),
+                }],
+                is_meta: false,
+                is_compact_summary: false,
+            }),
+        ];
+
+        let report = normalize_all(&mut messages);
+        assert!(report.empty_blocks_removed >= 1);
+        assert!(report.empty_messages_removed >= 1);
+        assert!(report.consecutive_user_merged >= 1);
+    }
+
+    #[test]
+    fn test_normalize_all_already_clean() {
+        let mut messages = vec![
+            user_message("hello"),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::Text { text: "hi".into() }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+            user_message("bye"),
+        ];
+
+        let report = normalize_all(&mut messages);
+        assert_eq!(report.tool_results_added, 0);
+        assert_eq!(report.empty_blocks_removed, 0);
+        assert_eq!(report.empty_messages_removed, 0);
+        assert_eq!(report.consecutive_user_merged, 0);
+    }
+
+    #[test]
+    fn test_normalize_report_display() {
+        let report = NormalizeReport {
+            tool_results_added: 2,
+            empty_blocks_removed: 1,
+            empty_messages_removed: 0,
+            documents_capped: 0,
+            consecutive_user_merged: 3,
+        };
+        let s = report.to_string();
+        assert!(s.contains("2 orphaned tool calls repaired"));
+        assert!(s.contains("1 empty blocks removed"));
+        assert!(s.contains("3 consecutive user messages merged"));
+    }
+
+    #[test]
+    fn test_normalize_report_display_clean() {
+        let report = NormalizeReport::default();
+        assert_eq!(
+            report.to_string(),
+            "Session messages are already normalized."
+        );
+    }
+
+    #[test]
+    fn test_truncate_to_last_summary_drops_head_keeps_summary() {
+        let summary = Message::User(UserMessage {
+            uuid: Uuid::new_v4(),
+            timestamp: String::new(),
+            content: vec![ContentBlock::Text {
+                text: "prior context summary".into(),
+            }],
+            is_meta: true,
+            is_compact_summary: true,
+        });
+        let mut messages = vec![
+            user_message("old message before summary"),
+            user_message("another old message"),
+            summary,
+            user_message("recent message after summary"),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::Text {
+                    text: "reply".into(),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+
+        let head = truncate_to_last_summary(&mut messages);
+        // Two pre-summary messages dropped and returned.
+        assert_eq!(head.len(), 2);
+        // Active tail keeps the summary as the first message.
+        assert_eq!(messages.len(), 3);
+        if let Message::User(u) = &messages[0] {
+            assert!(u.is_compact_summary);
+        } else {
+            panic!("expected summary first");
+        }
+    }
+
+    #[test]
+    fn test_truncate_to_last_summary_no_summary_is_noop() {
+        let mut messages = vec![user_message("a"), user_message("b")];
+        let head = truncate_to_last_summary(&mut messages);
+        assert!(head.is_empty());
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn test_normalize_strict_inserts_dummy_assistant() {
+        let mut messages = vec![user_message("one"), user_message("two")];
+        normalize_strict(&mut messages);
+        assert!(validate_alternation(&messages).is_ok());
+    }
+
+    #[test]
+    fn test_normalize_lenient_merges_consecutive_users() {
+        let mut messages = vec![user_message("one"), user_message("two")];
+        normalize_lenient(&mut messages);
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn test_ensure_system_message_adds_when_missing() {
+        let mut messages = vec![user_message("hello")];
+        ensure_system_message(&mut messages);
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(&messages[0], Message::System(_)));
+    }
+
+    #[test]
+    fn test_ensure_system_message_no_op_when_present() {
+        let mut messages = vec![
+            Message::System(SystemMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                subtype: SystemMessageType::Informational,
+                content: "existing".into(),
+                level: MessageLevel::Info,
+            }),
+            user_message("hello"),
+        ];
+        ensure_system_message(&mut messages);
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn test_insert_dummy_assistant_for_consecutive_users() {
+        let mut messages = vec![user_message("a"), user_message("b"), user_message("c")];
+        insert_dummy_assistant_for_consecutive_users(&mut messages);
+        assert_eq!(messages.len(), 5);
+        assert!(validate_alternation(&messages).is_ok());
+    }
+
+    #[test]
+    fn test_strict_config_fields() {
+        let config = strict_config();
+        assert_eq!(
+            config.consecutive_user_strategy,
+            ConsecutiveUserStrategy::InsertDummyAssistant
+        );
+        assert_eq!(
+            config.system_message_strategy,
+            SystemMessageStrategy::EnsureDefault
+        );
+        assert!(config.validate_alternation);
+        assert!(config.ensure_tool_result_pairing);
+        assert_eq!(config.max_document_bytes, 500_000);
+    }
+
+    #[test]
+    fn test_lenient_config_fields() {
+        let config = lenient_config();
+        assert_eq!(
+            config.consecutive_user_strategy,
+            ConsecutiveUserStrategy::Merge
+        );
+        assert_eq!(
+            config.system_message_strategy,
+            SystemMessageStrategy::KeepExisting
+        );
+        assert!(!config.validate_alternation);
+        assert!(config.ensure_tool_result_pairing);
+        assert_eq!(config.max_document_bytes, 500_000);
+    }
+
+    #[test]
+    fn test_normalize_with_config_remove_all_system() {
+        let mut messages = vec![
+            Message::System(SystemMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                subtype: SystemMessageType::Informational,
+                content: "remove me".into(),
+                level: MessageLevel::Info,
+            }),
+            user_message("hello"),
+            Message::System(SystemMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                subtype: SystemMessageType::Informational,
+                content: "also remove".into(),
+                level: MessageLevel::Info,
+            }),
+        ];
+        let config = NormalizationConfig {
+            system_message_strategy: SystemMessageStrategy::RemoveAll,
+            ..strict_config()
+        };
+        normalize_with_config(&mut messages, &config);
+        assert!(!messages.iter().any(|m| matches!(m, Message::System(_))));
+    }
+
+    #[test]
+    fn test_tool_result_pairing_combines_into_single_message() {
+        // Two orphaned tool_uses in one assistant → one user message with both results.
+        let mut messages = vec![Message::Assistant(AssistantMessage {
+            uuid: Uuid::new_v4(),
+            timestamp: String::new(),
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    name: "Bash".into(),
+                    input: serde_json::json!({}),
+                },
+                ContentBlock::ToolUse {
+                    id: "c2".into(),
+                    name: "FileRead".into(),
+                    input: serde_json::json!({}),
+                },
+                ContentBlock::ToolUse {
+                    id: "c3".into(),
+                    name: "Grep".into(),
+                    input: serde_json::json!({}),
+                },
+            ],
+            model: None,
+            usage: None,
+            stop_reason: None,
+            request_id: None,
+        })];
+
+        ensure_tool_result_pairing(&mut messages);
+
+        // 1 assistant + 1 combined user message = 2 total.
+        assert_eq!(messages.len(), 2);
+        if let Message::User(u) = &messages[1] {
+            assert_eq!(u.content.len(), 3);
+            let ids: Vec<&str> = u
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(ids, vec!["c1", "c2", "c3"]);
+        } else {
+            panic!("expected user message");
+        }
+    }
+
+    #[test]
+    fn test_ensure_alternation_skips_between_tool_only_messages() {
+        // Two consecutive tool-result-only user messages should NOT get a
+        // dummy assistant between them.
+        let mut messages = vec![
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "a".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                    extra_content: vec![],
+                }],
+                is_meta: true,
+                is_compact_summary: false,
+            }),
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "b".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                    extra_content: vec![],
+                }],
+                is_meta: true,
+                is_compact_summary: false,
+            }),
+        ];
+
+        ensure_alternation_after_tool_result(&mut messages);
+        // No dummy assistant inserted — both are tool-result-only.
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(|m| matches!(m, Message::User(_))));
+    }
+
+    #[test]
+    fn test_ensure_alternation_still_inserts_for_mixed_content() {
+        // Tool-result user followed by a text user → dummy should be inserted.
+        let mut messages = vec![
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "a".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                    extra_content: vec![],
+                }],
+                is_meta: true,
+                is_compact_summary: false,
+            }),
+            user_message("follow-up question"),
+        ];
+
+        ensure_alternation_after_tool_result(&mut messages);
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(&messages[1], Message::Assistant(_)));
+    }
+
+    #[test]
+    fn test_strict_normalize_with_multiple_orphaned_tool_uses() {
+        // End-to-end: normalize_strict with 2 orphaned tool_uses produces
+        // valid alternation and contiguous tool results.
+        let mut messages = vec![
+            user_message("run tests"),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "Bash".into(),
+                        input: serde_json::json!({}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t2".into(),
+                        name: "Bash".into(),
+                        input: serde_json::json!({}),
+                    },
+                ],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+
+        normalize_strict(&mut messages);
+
+        // Must have valid alternation.
+        assert!(validate_alternation(&messages).is_ok());
+
+        // The tool-result user message must contain both results (no dummy
+        // assistant between them).
+        let tool_user = messages
+            .iter()
+            .find(|m| matches!(m, Message::User(u) if u.content.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. }))));
+        match tool_user {
+            Some(Message::User(u)) => {
+                assert_eq!(
+                    u.content.len(),
+                    2,
+                    "both tool results in one message, no dummy split"
+                );
+            }
+            _ => panic!("expected combined tool-result user message"),
+        }
+    }
+
+    #[test]
+    fn test_split_mixed_tool_result_users() {
+        // A user message mixing a tool result with steered text (the
+        // cancel-during-tool pattern) must be split into two user messages:
+        // first the tool result, then the text. Without this, the OpenAI wire
+        // builder emits `role: tool` followed by `role: user`, which both
+        // Mistral and MiMo chat templates reject with 400 "Unexpected role".
+        let mut messages = vec![
+            user_message("run the build"),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    name: "Bash".into(),
+                    input: serde_json::json!({}),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "c1".into(),
+                        content: "(tool execution was interrupted)".into(),
+                        is_error: true,
+                        extra_content: vec![],
+                    },
+                    ContentBlock::Text { text: "go".into() },
+                ],
+                is_meta: true,
+                is_compact_summary: false,
+            }),
+        ];
+
+        split_mixed_tool_result_users(&mut messages);
+
+        // user + assistant + tool-result user + text user = 4 messages.
+        assert_eq!(messages.len(), 4);
+        if let Message::User(u) = &messages[2] {
+            assert!(
+                u.content
+                    .iter()
+                    .all(|b| matches!(b, ContentBlock::ToolResult { .. })),
+                "first split half keeps only the tool result"
+            );
+        } else {
+            panic!("expected tool-result user message at index 2");
+        }
+        if let Message::User(u) = &messages[3] {
+            assert_eq!(u.content.len(), 1);
+            assert!(matches!(u.content[0], ContentBlock::Text { .. }));
+        } else {
+            panic!("expected text user message at index 3");
+        }
+    }
+
+    #[test]
+    fn test_strict_normalize_fixes_mixed_tool_result_user() {
+        // End-to-end: a mixed tool-result/user message after a tool_use must
+        // normalize to valid alternation with no `tool` → `user` transition.
+        let mut messages = vec![
+            user_message("run the build"),
+            Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    name: "Bash".into(),
+                    input: serde_json::json!({}),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+            Message::User(UserMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "c1".into(),
+                        content: "(cancelled)".into(),
+                        is_error: true,
+                        extra_content: vec![],
+                    },
+                    ContentBlock::Text { text: "go".into() },
+                ],
+                is_meta: true,
+                is_compact_summary: false,
+            }),
+        ];
+
+        normalize_strict(&mut messages);
+
+        // Split produces a tool-result user then a text user; the consecutive
+        // user strategy inserts a synthetic assistant between them, yielding
+        // valid alternation (tool → assistant → user).
+        assert!(validate_alternation(&messages).is_ok());
+
+        // No user message may mix a tool result with other block types.
+        for m in &messages {
+            if let Message::User(u) = m {
+                let has_tr = u
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+                let has_other = u
+                    .content
+                    .iter()
+                    .any(|b| !matches!(b, ContentBlock::ToolResult { .. }));
+                assert!(
+                    !(has_tr && has_other),
+                    "mixed user message survived normalization"
+                );
             }
         }
     }
