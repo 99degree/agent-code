@@ -2289,11 +2289,15 @@ impl App {
     ) {
         match action {
             PendingProviderAction::Show => {
-                // Build the catalog of pointable providers (known default URL).
+                // Build the catalog of pointable providers. Only include
+                // providers that have a known default URL *and* are
+                // configured (API key set or OAuth) so the picker never
+                // offers an unusable entry — mirrors the `/model` picker
+                // and the CLI `/provider` flow.
                 let entries: Vec<(String, String)> =
                     agent_code_lib::llm::provider::ProviderKind::all()
                         .iter()
-                        .filter(|k| k.default_base_url().is_some())
+                        .filter(|k| k.default_base_url().is_some() && k.is_configured())
                         .map(|k| {
                             let url = k.default_base_url().unwrap_or("");
                             (k.as_name().to_string(), format!("— {url}"))
