@@ -25,6 +25,7 @@ dependencies = [
  "ignore",
  "indicatif",
  "libc",
+ "once_cell",
  "predicates",
  "pulldown-cmark",
  "ratatui",

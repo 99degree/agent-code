@@ -27,6 +27,13 @@ pub trait Provider: Send + Sync {
         &self,
         request: &ProviderRequest,
     ) -> Result<mpsc::Receiver<StreamEvent>, ProviderError>;
+
+    /// Fetch the list of available models from the provider.
+    /// Returns a vector of (model_id, description) pairs.
+    /// The default implementation returns an empty list.
+    async fn fetch_models(&self) -> Result<Vec<(String, String)>, ProviderError> {
+        Ok(vec![])
+    }
 }
 
 /// Tool choice mode for controlling tool usage.
@@ -423,7 +430,7 @@ pub enum WireFormat {
 }
 
 /// Provider kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderKind {
     Anthropic,
     Bedrock,
