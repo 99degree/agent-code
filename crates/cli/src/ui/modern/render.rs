@@ -2164,11 +2164,10 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 /// Height of the prompt region given content and skin.
 fn prompt_area_height(app: &App, minimal: bool, total_h: u16) -> u16 {
     let lines = app.input_line_count() as u16;
-    // Cap growth so the transcript keeps room; leave at least 8 rows above.
-    let max_body = total_h
-        .saturating_sub(header_and_chrome_reserve(minimal))
-        .min(10);
-    let body = lines.clamp(1, max_body.max(1));
+    // The composer shows at most 3 text lines so it can never grow past the
+    // screen on small terminals. Taller drafts scroll inside the box and
+    // only their last 3 lines are visible.
+    let body = lines.clamp(1, 3);
     if minimal {
         body
     } else {
@@ -2196,7 +2195,7 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let prompt_marker = if app.in_normal_mode() { "▪ " } else { "❯ " };
 
     // Build per-line display with ❯ only on the first row.
-    let input_lines: Vec<&str> = if app.input.is_empty() {
+    let all_lines: Vec<&str> = if app.input.is_empty() {
         vec![""]
     } else {
         // Keep trailing empty line when the draft ends with \n.
@@ -2209,6 +2208,21 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         }
         v
     };
+    // The composer shows at most 3 lines; when the draft is taller, only the
+    // last 3 lines stay visible (the box scrolls its content internally).
+    let visible_start = all_lines.len().saturating_sub(3);
+    // Byte offset of the first visible line, so selection math below lines up.
+    let mut byte_at = 0usize;
+    for (i, seg) in all_lines.iter().enumerate() {
+        if i == visible_start {
+            break;
+        }
+        byte_at += seg.len();
+        if i + 1 < all_lines.len() || app.input.ends_with('\n') {
+            byte_at = byte_at.saturating_add(1);
+        }
+    }
+    let input_lines: Vec<&str> = all_lines[visible_start..].to_vec();
 
     let sel = app.composer_sel;
     let fill = Style::default()
@@ -2216,7 +2230,6 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         .bg(border)
         .add_modifier(Modifier::BOLD);
     let mut display_lines: Vec<Line<'static>> = Vec::with_capacity(input_lines.len());
-    let mut byte_at = 0usize;
     for (i, segment) in input_lines.iter().enumerate() {
         let mut spans = Vec::new();
         if i == 0 {
