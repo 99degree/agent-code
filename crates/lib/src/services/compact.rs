@@ -234,7 +234,7 @@ pub fn effective_context_window(model: &str) -> u64 {
 /// model's context budget is used (the UI was previously microcompacting
 /// far too early); the output reservation inside `effective_context_window`
 /// plus the reactive compaction paths still guard against request-overflow.
-const AUTO_COMPACT_FILL_RATIO: f64 = 0.90;
+const AUTO_COMPACT_FILL_RATIO: f64 = 0.95;
 
 /// Calculate the auto-compact threshold as a fill ratio of the effective
 /// context window (total minus the output reservation), so the model's
@@ -1137,10 +1137,10 @@ mod tests {
 
     #[test]
     fn test_auto_compact_threshold() {
-        // Fills 90% of the effective window (200K context - 16K output = 184K).
         let threshold = auto_compact_threshold("claude-sonnet");
+        // Fills 95% of the effective window (200K context - 16K output = 184K).
         let effective = 200_000 - 16_384;
-        assert_eq!(threshold, (effective as f64 * 0.90).round() as u64);
+        assert_eq!(threshold, (effective as f64 * 0.95).round() as u64);
     }
 
     #[test]
@@ -1361,10 +1361,10 @@ mod tests {
 
     #[test]
     fn test_auto_compact_threshold_gpt_model() {
-        // Fills 90% of the effective window (128K context - 16K output = 112K).
+        // Fills 95% of the effective window (128K context - 16K output = 112K).
         let threshold = auto_compact_threshold("gpt-4o");
         let effective = 128_000 - 16_384;
-        assert_eq!(threshold, (effective as f64 * 0.90).round() as u64);
+        assert_eq!(threshold, (effective as f64 * 0.95).round() as u64);
     }
 
     #[test]
