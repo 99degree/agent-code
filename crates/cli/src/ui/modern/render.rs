@@ -654,7 +654,13 @@ fn draw_provider_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
     lines.push(Line::from(""));
 
     let filtered = p.filtered();
-    const MAX_ROWS: usize = 12;
+    // Window the list to what the modal can actually show. A fixed row
+    // count overflows a short terminal: `draw_modal_box` caps the box at
+    // the screen height and ratatui clips the bottom rows, so a selection
+    // near the end lands in the clipped region and the picker looks stuck.
+    // Derive the cap from the live height (header 3 + border 2 + footer 1 +
+    // total line 1 + padding).
+    let max_rows = (area.height.saturating_sub(10) as usize).clamp(3, 12);
     if filtered.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no matching providers",
@@ -663,8 +669,8 @@ fn draw_provider_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         let start = p
             .selected
-            .saturating_sub(MAX_ROWS.saturating_sub(1).min(p.selected));
-        let end = (start + MAX_ROWS).min(filtered.len());
+            .saturating_sub(max_rows.saturating_sub(1).min(p.selected));
+        let end = (start + max_rows).min(filtered.len());
         for (i, (_, id, desc)) in filtered.iter().enumerate().take(end).skip(start) {
             let is_sel = i == p.selected;
             let marker = if is_sel { "❯" } else { " " };
@@ -681,7 +687,7 @@ fn draw_provider_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Span::styled((*desc).to_string(), Style::default().fg(palette().muted)),
             ]));
         }
-        if filtered.len() > MAX_ROWS {
+        if filtered.len() > max_rows {
             lines.push(Line::from(Span::styled(
                 format!("  … {} total", filtered.len()),
                 Style::default().fg(palette().muted),
