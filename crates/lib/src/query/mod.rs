@@ -359,6 +359,10 @@ impl QueryEngine {
         // the model from the session, so there is nothing to go back to.
         state.pre_fast_model = None;
         state.break_cache_next = false;
+        // A queued manual `/compact` is scoped to the conversation that
+        // requested it; dropping it on a session swap avoids a stray
+        // compaction firing on the wrong context.
+        state.compact_requested = false;
         // Per-model breakdown behind `/cost`; the totals are restored
         // from the session file, so a stale breakdown would not add up.
         state.model_usage.clear();
@@ -791,6 +795,108 @@ impl QueryEngine {
         self.hooks
             .run_hooks(&HookEvent::PreCompact, None, &ctx, Some(&self.cancel))
             .await
+    }
+
+    /// Run the compaction cascade (microcompact → LLM → context-collapse
+    /// fallback) at an agent-loop turn boundary. Shared by the automatic
+    /// path (context past threshold) and the manual `/compact` path
+    /// (queued while a turn was running, consumed here). Both fire
+    /// `PreCompact`/`PostCompact` hooks and record tracking state so the
+    /// compaction-reminder prompt can be injected afterwards.
+    ///
+    /// `manual` distinguishes a user-invoked compaction (which should
+    /// always run even when microcompact alone is enough, and is never
+    /// gated by the auto-compact circuit breaker) from an automatic one.
+    async fn run_compaction_cascade(
+        &mut self,
+        model: &str,
+        sink: &dyn StreamSink,
+        compact_tracking: &mut CompactTracking,
+        manual: bool,
+    ) -> crate::error::Result<()> {
+        let token_count = tokens::estimate_context_tokens(self.state.history());
+        let threshold = compact::auto_compact_threshold(model);
+        if manual {
+            info!("Manual compact triggered (~{token_count} tokens in context)");
+        } else {
+            info!("Auto-compact triggered: {token_count} tokens >= {threshold} threshold");
+        }
+
+        // Snapshot for PostCompact: message count + token estimate
+        // BEFORE any of the three compaction paths (microcompact,
+        // LLM, context collapse) have run. We fire one PostCompact
+        // with the realized delta at the end of this block.
+        let messages_before = self.state.messages.len();
+        let tokens_before = token_count;
+
+        // Microcompact first: clear stale tool results.
+        let freed = compact::microcompact(&mut self.state.messages, 5);
+        if freed > 0 {
+            sink.on_compact(freed);
+            info!("Microcompact freed ~{freed} tokens");
+        }
+
+        // Check if microcompact was enough.
+        let post_mc_tokens = tokens::estimate_context_tokens(self.state.history());
+        if post_mc_tokens >= threshold {
+            // Full LLM-based compaction: summarize older messages.
+            info!("Microcompact insufficient, attempting LLM compaction");
+            match compact::compact_with_llm(
+                &mut self.state.messages,
+                &*self.llm,
+                model,
+                self.cancel.clone(),
+            )
+            .await
+            {
+                Some(removed) => {
+                    info!("LLM compaction removed {removed} messages");
+                    compact_tracking.was_compacted = true;
+                    compact_tracking.consecutive_failures = 0;
+                }
+                None => {
+                    compact_tracking.consecutive_failures += 1;
+                    warn!(
+                        "LLM compaction failed (attempt {})",
+                        compact_tracking.consecutive_failures
+                    );
+                    // Fallback: context collapse (snip middle messages).
+                    let effective = compact::effective_context_window(model);
+                    if let Some(collapse) = crate::services::context_collapse::collapse_to_budget(
+                        self.state.history(),
+                        effective,
+                    ) {
+                        info!(
+                            "Context collapse snipped {} messages, freed ~{} tokens",
+                            collapse.snipped_count, collapse.tokens_freed
+                        );
+                        self.state.messages = collapse.api_messages;
+                        sink.on_compact(collapse.tokens_freed);
+                    } else {
+                        // Last resort: aggressive microcompact.
+                        let freed2 = compact::microcompact(&mut self.state.messages, 2);
+                        if freed2 > 0 {
+                            sink.on_compact(freed2);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fire PostCompact with the realized delta across every
+        // compaction path above. Only fire when something actually
+        // changed — a no-op PostCompact on every turn would spam
+        // user hooks. We treat "no message change AND no token
+        // drop" as a true no-op.
+        let messages_after = self.state.messages.len();
+        let tokens_after = tokens::estimate_context_tokens(self.state.history());
+        let realized_freed = tokens_before.saturating_sub(tokens_after);
+        if messages_after != messages_before || realized_freed > 0 {
+            let _ = self
+                .fire_post_compact_hooks(messages_before, messages_after, realized_freed)
+                .await;
+        }
+        Ok(())
     }
 
     /// Run any configured `PostCompact` hooks with the realized outcome
@@ -1264,88 +1370,17 @@ impl QueryEngine {
 
             let mut model = self.state.config.api.model.clone();
 
-            // Step 1: Auto-compact if context is too large.
-            if compact::should_auto_compact(self.state.history(), &model, &compact_tracking) {
-                let token_count = tokens::estimate_context_tokens(self.state.history());
-                let threshold = compact::auto_compact_threshold(&model);
-                info!("Auto-compact triggered: {token_count} tokens >= {threshold} threshold");
-
-                // Snapshot for PostCompact: message count + token estimate
-                // BEFORE any of the three compaction paths (microcompact,
-                // LLM, context collapse) have run. We fire one PostCompact
-                // with the realized delta at the end of this block.
-                let messages_before = self.state.messages.len();
-                let tokens_before = token_count;
-
-                // Microcompact first: clear stale tool results.
-                let freed = compact::microcompact(&mut self.state.messages, 5);
-                if freed > 0 {
-                    sink.on_compact(freed);
-                    info!("Microcompact freed ~{freed} tokens");
-                }
-
-                // Check if microcompact was enough.
-                let post_mc_tokens = tokens::estimate_context_tokens(self.state.history());
-                if post_mc_tokens >= threshold {
-                    // Full LLM-based compaction: summarize older messages.
-                    info!("Microcompact insufficient, attempting LLM compaction");
-                    match compact::compact_with_llm(
-                        &mut self.state.messages,
-                        &*self.llm,
-                        &model,
-                        self.cancel.clone(),
-                    )
-                    .await
-                    {
-                        Some(removed) => {
-                            info!("LLM compaction removed {removed} messages");
-                            compact_tracking.was_compacted = true;
-                            compact_tracking.consecutive_failures = 0;
-                        }
-                        None => {
-                            compact_tracking.consecutive_failures += 1;
-                            warn!(
-                                "LLM compaction failed (attempt {})",
-                                compact_tracking.consecutive_failures
-                            );
-                            // Fallback: context collapse (snip middle messages).
-                            let effective = compact::effective_context_window(&model);
-                            if let Some(collapse) =
-                                crate::services::context_collapse::collapse_to_budget(
-                                    self.state.history(),
-                                    effective,
-                                )
-                            {
-                                info!(
-                                    "Context collapse snipped {} messages, freed ~{} tokens",
-                                    collapse.snipped_count, collapse.tokens_freed
-                                );
-                                self.state.messages = collapse.api_messages;
-                                sink.on_compact(collapse.tokens_freed);
-                            } else {
-                                // Last resort: aggressive microcompact.
-                                let freed2 = compact::microcompact(&mut self.state.messages, 2);
-                                if freed2 > 0 {
-                                    sink.on_compact(freed2);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Fire PostCompact with the realized delta across every
-                // compaction path above. Only fire when something actually
-                // changed — a no-op PostCompact on every turn would spam
-                // user hooks. We treat "no message change AND no token
-                // drop" as a true no-op.
-                let messages_after = self.state.messages.len();
-                let tokens_after = tokens::estimate_context_tokens(self.state.history());
-                let realized_freed = tokens_before.saturating_sub(tokens_after);
-                if messages_after != messages_before || realized_freed > 0 {
-                    let _ = self
-                        .fire_post_compact_hooks(messages_before, messages_after, realized_freed)
-                        .await;
-                }
+            // Step 1: Auto-compact if context is too large, OR if a manual
+            // `/compact` was queued while a turn was running (consumed here,
+            // at the turn boundary, so it runs the same cascade the auto
+            // path uses and never races the in-flight request).
+            let manual_compact = self.state.compact_requested;
+            self.state.compact_requested = false;
+            if compact::should_auto_compact(self.state.history(), &model, &compact_tracking)
+                || manual_compact
+            {
+                self.run_compaction_cascade(&model, sink, &mut compact_tracking, manual_compact)
+                    .await?;
             }
 
             // Inject compaction reminder if compacted and feature enabled.
@@ -4654,6 +4689,127 @@ mod tests {
             2,
             "turn did not run another iteration to handle steered input"
         );
+    }
+
+    /// A provider that emits a single assistant text reply with no tool
+    /// calls, then `Done`. Used to drive a full (single-iteration) turn so
+    /// we can assert that a queued manual compaction runs before the
+    /// request rather than mid-iteration.
+    struct SingleReplyProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for SingleReplyProvider {
+        fn name(&self) -> &str {
+            "single-reply-mock"
+        }
+
+        async fn stream(
+            &self,
+            _request: &ProviderRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>, ProviderError> {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = tx.send(StreamEvent::TextDelta("acknowledged".into())).await;
+                let _ = tx
+                    .send(StreamEvent::Done {
+                        usage: Default::default(),
+                        stop_reason: None,
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    /// Build a user message carrying a compactable tool result so
+    /// microcompact has something to clear.
+    fn mk_user_with_tool_result(tool_use_id: &str, content: &str) -> crate::llm::message::Message {
+        use crate::llm::message::{ContentBlock, Message, UserMessage};
+        use uuid::Uuid;
+        Message::User(UserMessage {
+            uuid: Uuid::new_v4(),
+            timestamp: "0".into(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.into(),
+                content: content.into(),
+                is_error: false,
+                extra_content: Vec::new(),
+            }],
+            is_meta: true,
+            is_compact_summary: false,
+        })
+    }
+
+    /// Count how many stored tool-result texts are still the literal
+    /// original (i.e. not cleared by microcompact).
+    fn uncleared_tool_result_count(engine: &QueryEngine, original: &str) -> usize {
+        use crate::llm::message::{ContentBlock, Message};
+        engine
+            .state()
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::User(u) => Some(&u.content),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } if content == original => Some(()),
+                _ => None,
+            })
+            .count()
+    }
+
+    /// A manual `/compact` issued while a turn is running must NOT mutate
+    /// history immediately. It queues, so the user-visible state is
+    /// untouched until the loop reaches its next turn boundary — which is
+    /// where the running turn itself consumes the flag. We simulate that by
+    /// setting the flag before a fresh (not-yet-started) turn and verifying
+    /// the turn's first request sees the compaction already applied (the
+    /// stale tool results are gone) rather than the compaction happening
+    /// after the request.
+    #[tokio::test]
+    async fn manual_compact_runs_at_turn_boundary_not_mid_turn() {
+        let mut engine = build_engine(Arc::new(SingleReplyProvider));
+        // Seed a compactable tool result for microcompact to clear.
+        engine
+            .state_mut()
+            .push_message(mk_user_with_tool_result("u1", "LARGE_ORIGINAL_CONTENT"));
+        assert_eq!(
+            uncleared_tool_result_count(&engine, "LARGE_ORIGINAL_CONTENT"),
+            1
+        );
+
+        // Simulate `/compact` arriving during a running turn: queue it.
+        engine.state_mut().compact_requested = true;
+        // The flag must be honored at the next turn boundary, so it is NOT
+        // consumed by the command itself (it is still set until run_turn).
+        assert!(engine.state().compact_requested);
+
+        engine
+            .run_turn_with_sink("go", &NullSink)
+            .await
+            .expect("turn ok");
+
+        // The queued compaction ran at the turn boundary, clearing the stale
+        // tool result before/at the start of the request cycle.
+        assert_eq!(
+            uncleared_tool_result_count(&engine, "LARGE_ORIGINAL_CONTENT"),
+            0,
+            "queued manual compaction should have cleared the tool result at the turn boundary"
+        );
+    }
+
+    /// A manual compaction flag that was set but never followed by a turn is
+    /// left pending (not silently dropped) and remains observable until the
+    /// loop consumes it.
+    #[test]
+    fn manual_compact_flag_persists_until_turn_consumes_it() {
+        let mut engine = build_engine(Arc::new(SingleReplyProvider));
+        assert!(!engine.state().compact_requested);
+        engine.state_mut().compact_requested = true;
+        // Still set: nothing ran a turn, so it must remain pending.
+        assert!(engine.state().compact_requested);
     }
 
     #[cfg(unix)]

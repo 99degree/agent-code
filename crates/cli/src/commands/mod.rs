@@ -1073,34 +1073,46 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             CommandResult::Handled
         }
         Some("compact") => {
-            // Snapshot the stats the user would see, then fire PreCompact
-            // hooks before we mutate history. This lets users archive or
-            // export before compaction replaces older messages.
-            let pre_len = engine.state().messages.len();
-            let estimated = agent_code_lib::services::compact::estimate_compactable_tokens(
-                engine.state().messages.as_slice(),
-                2,
-            );
-            let handle = tokio::runtime::Handle::try_current();
-            if let Ok(ref h) = handle {
-                let _ = h.block_on(engine.fire_pre_compact_hooks(pre_len, estimated));
-            }
-            let freed = agent_code_lib::services::compact::microcompact(
-                &mut engine.state_mut().messages,
-                2,
-            );
-            if freed > 0 {
-                println!("Freed ~{freed} estimated tokens.");
+            let is_running = engine.state().is_query_active;
+            if is_running {
+                // A turn is in flight. Queue the full compaction cascade to
+                // run at the next loop turn boundary (right before the next
+                // API request) so it reuses the auto-compact path — including
+                // the LLM summary and context-collapse fallback — and never
+                // mutates history in the middle of an iteration. The flag is
+                // consumed in `QueryEngine::run_turn_inner`.
+                engine.state_mut().compact_requested = true;
+                println!("Compaction queued — it will run before the next API request.");
             } else {
-                println!("Nothing to compact.");
-            }
-            // PostCompact fires with the realized outcome so audit hooks
-            // can pair the estimate with ground truth. Even when nothing
-            // was freed (freed == 0), firing gives hooks a chance to log
-            // the no-op — /compact was still user-invoked.
-            let post_len = engine.state().messages.len();
-            if let Ok(h) = handle {
-                let _ = h.block_on(engine.fire_post_compact_hooks(pre_len, post_len, freed));
+                // No turn running: fire PreCompact hooks before mutating
+                // history so users can archive/export first, then run the
+                // microcompact pass they expect from a manual invocation.
+                let pre_len = engine.state().messages.len();
+                let estimated = agent_code_lib::services::compact::estimate_compactable_tokens(
+                    engine.state().messages.as_slice(),
+                    2,
+                );
+                let handle = tokio::runtime::Handle::try_current();
+                if let Ok(ref h) = handle {
+                    let _ = h.block_on(engine.fire_pre_compact_hooks(pre_len, estimated));
+                }
+                let freed = agent_code_lib::services::compact::microcompact(
+                    &mut engine.state_mut().messages,
+                    2,
+                );
+                if freed > 0 {
+                    println!("Freed ~{freed} estimated tokens.");
+                } else {
+                    println!("Nothing to compact.");
+                }
+                // PostCompact fires with the realized outcome so audit hooks
+                // can pair the estimate with ground truth. Even when nothing
+                // was freed (freed == 0), firing gives hooks a chance to log
+                // the no-op — /compact was still user-invoked.
+                let post_len = engine.state().messages.len();
+                if let Ok(h) = handle {
+                    let _ = h.block_on(engine.fire_post_compact_hooks(pre_len, post_len, freed));
+                }
             }
             CommandResult::Handled
         }

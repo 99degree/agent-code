@@ -117,6 +117,12 @@ pub struct AppState {
     /// cache prefix is rebuilt from scratch. Consumed (reset to false)
     /// after the next request. Set by `/break-cache`.
     pub break_cache_next: bool,
+    /// When true, the agent loop runs the full compaction cascade at its
+    /// next turn boundary (right before the next API request) instead of
+    /// mutating history mid-iteration. Set by `/compact` while a query is
+    /// active; consumed at the start of the next loop iteration. Session-
+    /// local — not persisted.
+    pub compact_requested: bool,
     /// Extra directories the user has explicitly added to the working
     /// set with `/add-dir`. Surfaced in the system prompt so the agent
     /// knows it's allowed to read/edit files outside `cwd` without
@@ -165,6 +171,7 @@ impl AppState {
             subagent_colors: crate::services::subagent_colors::SubagentColorManager::shared(),
             session_id: crate::services::session::new_session_id(),
             break_cache_next: false,
+            compact_requested: false,
             additional_dirs: Vec::new(),
             brief_mode: false,
             response_style: ResponseStyle::default(),
