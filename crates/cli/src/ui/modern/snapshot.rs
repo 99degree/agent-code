@@ -87,6 +87,10 @@ fn trim_end(s: &mut String) {
 /// — which is exactly what happened at 0.28.0. The padding is
 /// preserved (same byte length) so column alignment, and therefore the
 /// style rows, stay comparable across versions of differing width.
+///
+/// The version may carry a build-time `+<gitsha>` suffix (see build.rs);
+/// that fragment is also stripped so a commit on main doesn't invalidate
+/// every golden.
 fn mask_version(frame: &str) -> String {
     const PLACEHOLDER: &str = "x.y.z";
     let version = env!("CARGO_PKG_VERSION");
@@ -102,6 +106,9 @@ fn mask_version(frame: &str) -> String {
         std::cmp::Ordering::Less => replacement.truncate(version.len()),
         std::cmp::Ordering::Equal => {}
     }
+    // Drop a "+<sha>" suffix everywhere (glyph line *and* its mirrored style
+    // row) so the git revision doesn't churn the goldens.
+    let frame = frame.replace(&format!("+{}", env!("AGENT_CODE_GIT_SHA")), "");
     frame.replace(version, &replacement)
 }
 
@@ -249,6 +256,10 @@ mod frames {
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).unwrap();
         let mut app = App::new("test-model", "/w", "sess1234");
+        // Keep the frame deterministic: drop the build-time `+<gitsha>` suffix
+        // so a commit on main doesn't churn every golden (the live binary
+        // still shows it). Individual tests may override `app.version`.
+        app.version = env!("CARGO_PKG_VERSION").to_string();
         build(&mut app);
         term.draw(|f| draw(f, &mut app)).unwrap();
         buffer_snapshot(term.backend().buffer())

@@ -2638,7 +2638,12 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             CommandResult::Handled
         }
         Some("version") => {
-            println!("agent {}", env!("CARGO_PKG_VERSION"));
+            let sha = env!("AGENT_CODE_GIT_SHA");
+            if sha.is_empty() {
+                println!("agent {}", env!("CARGO_PKG_VERSION"));
+            } else {
+                println!("agent {}+{}", env!("CARGO_PKG_VERSION"), sha);
+            }
             CommandResult::Handled
         }
         Some("update") => {

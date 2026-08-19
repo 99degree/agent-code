@@ -918,22 +918,6 @@ fn word_start_col(line: &str, col: usize) -> usize {
     start
 }
 
-fn git_short_sha(dir: &str) -> Option<String> {
-    std::process::Command::new("git")
-        .arg("rev-parse")
-        .arg("--short")
-        .arg("HEAD")
-        .current_dir(dir)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| {
-            String::from_utf8(output.stdout)
-                .ok()
-                .map(|s| s.trim().to_string())
-        })
-}
-
 impl App {
     pub fn new(
         model: impl Into<String>,
@@ -952,10 +936,14 @@ impl App {
         disable_skill_shell: bool,
     ) -> Self {
         let cwd_str: String = cwd.into();
-        let version_str = if let Some(sha) = git_short_sha(&cwd_str) {
-            format!("{}+{}", env!("CARGO_PKG_VERSION"), sha)
+        // Static "version+sha" baked at build time (see build.rs), not a
+        // runtime `git` spawn — keeps launch cheap and offline-safe.
+        let pkg = env!("CARGO_PKG_VERSION");
+        let sha = env!("AGENT_CODE_GIT_SHA");
+        let version_str = if sha.is_empty() {
+            pkg.to_string()
         } else {
-            env!("CARGO_PKG_VERSION").to_string()
+            format!("{pkg}+{sha}")
         };
 
         Self {
