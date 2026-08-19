@@ -449,6 +449,13 @@ pub struct App {
     /// Byte range selected inside the composer (`start..end`), from a
     /// double/triple-click. Cleared on single click and typing.
     pub composer_sel: Option<(usize, usize)>,
+    /// Live composer wrap width in display columns (body width minus the
+    /// "❯ "/"▪ " prefix), refreshed every frame from the real terminal width
+    /// in `draw` so wrapping follows font/resize. Shared by the draw path and
+    /// the caret math so the rendered rows and the visual-row table agree.
+    /// Defaults to 76 before the first draw, so wrap math is sensible even when
+    /// the real terminal width is not yet known (e.g. in unit tests).
+    pub composer_wrap_w: usize,
     /// When true: Enter inserts newline; Alt/Shift+Enter submit.
     /// When false (default): Enter submits; Alt/Shift+Enter insert newline.
     /// Toggle with Ctrl+M (prompt-focused).
@@ -979,6 +986,7 @@ impl App {
             composer_click_at: None,
             composer_click_pos: None,
             composer_sel: None,
+            composer_wrap_w: 76,
             multiline_mode: false,
             prompt_history: Vec::new(),
             history_browse: None,
@@ -1641,71 +1649,15 @@ impl App {
     }
 
     /// Map the composer's hard-newline `input` into wrapped visual rows.
-    ///
-    /// The input is split on hard `\n` into segments; each segment is wrapped
-    /// into one or more visual rows at [`COMPOSER_WRAP_W`] columns. Empty
-    /// segments (a blank line, including a trailing `\n`) become a single empty
-    /// visual row so it stays reachable by the arrow keys. The result is the
-    /// flattened list of `(byte_start, byte_end)` ranges, one per visual row.
+    /// Map the composer draft into wrapped visual rows (one entry per soft or
+    /// hard-wrapped row), each carrying its byte range. Hard `\n` splits into
+    /// separate row groups; empty segments (a blank line, including a trailing
+    /// `\n`) become a single empty visual row so they stay reachable by the
+    /// arrow keys. The wrap width comes from `composer_wrap_w`, refreshed every
+    /// frame from the real terminal width so wrapping follows font/resize.
     fn visual_rows(&self) -> Vec<(usize, usize)> {
-        let wrap_w = Self::COMPOSER_WRAP_W;
-        let bytes: Vec<(usize, char)> = self.input.char_indices().collect();
-        if self.input.is_empty() {
-            return vec![(0, 0)];
-        }
-        let len = self.input.len();
-        let mut rows = Vec::new();
-        let mut p = 0usize; // index into `bytes`
-        let mut seg_start = 0usize;
-        loop {
-            // End of the current segment: next '\n' or EOF.
-            let mut seg_end = seg_start;
-            while seg_end < len && !self.input[seg_end..].starts_with('\n') {
-                seg_end += self.input[seg_end..].chars().next().unwrap().len_utf8();
-            }
-            if seg_start == seg_end {
-                // Empty segment (blank line): one empty visual row.
-                rows.push((seg_start, seg_start));
-            } else {
-                // Wrap [seg_start, seg_end) into visual rows.
-                let mut row_start = seg_start;
-                while row_start < seg_end {
-                    let mut end = row_start;
-                    let mut c = 0usize;
-                    while end < seg_end {
-                        let (_, ch) = bytes[p];
-                        let gw = UnicodeWidthStr::width(ch.to_string().as_str()).max(1);
-                        if c + gw > wrap_w && c > 0 {
-                            break;
-                        }
-                        c += gw;
-                        end += ch.len_utf8();
-                        p += 1;
-                    }
-                    if end == row_start {
-                        // One grapheme wider than the wrap column: place alone.
-                        let (_, ch) = bytes[p];
-                        end += ch.len_utf8();
-                        p += 1;
-                    }
-                    rows.push((row_start, end));
-                    row_start = end;
-                }
-            }
-            if seg_end < len {
-                // Consume the hard newline; the next segment starts a fresh row.
-                debug_assert_eq!(bytes[p].1, '\n');
-                p += 1;
-                seg_start = seg_end + 1;
-            } else {
-                break;
-            }
-        }
-        rows
+        super::render::wrap_composer_rows(&self.input, self.composer_wrap_w.max(1))
     }
-
-    /// Wrap width in display columns: body width minus the "❯ " (2) prefix.
-    const COMPOSER_WRAP_W: usize = 76;
 
     fn byte_to_visual(&self, byte: usize) -> (usize, usize) {
         let rows = self.visual_rows();

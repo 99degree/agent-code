@@ -29,8 +29,18 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     // compact look — same block model, render config only.
     let minimal = app.skin == crate::ui::modern::app::Skin::Minimal;
     let header_h = if minimal { 0 } else { 3 };
-    // Composer grows with content (capped); bordered fullscreen needs +2 for
-    // the box, +1 for the mode/hint info line under the text.
+    // Track the live composer wrap width from the real terminal width (body
+    // width minus the "❯ "/"▪ " prefix) before the layout reads it, so the
+    // reserved height (prompt_area_height → visual_row_count) and the caret
+    // both use the exact width the text will wrap at.
+    let body_text_w = if minimal {
+        area.width.saturating_sub(2)
+    } else {
+        area.width.saturating_sub(4)
+    } as usize;
+    app.composer_wrap_w = body_text_w.max(1);
+    // Reserved height reads the live wrap width set just above, so the box
+    // grows on the exact row the caret enters.
     let prompt_h = prompt_area_height(app, minimal, area.height, area.width);
     // Queue: compact chips when non-empty, or a full pane when toggled open.
     let chips_h = if app.queue.is_empty() || app.show_queue_pane {
@@ -326,8 +336,7 @@ fn draw_search_bar(frame: &mut Frame<'_>, bar: Rect, app: &App) {
     } else {
         Style::default().fg(p.accent)
     };
-    use unicode_segmentation::UnicodeSegmentation;
-    use unicode_width::UnicodeWidthStr;
+        use unicode_width::UnicodeWidthStr;
     let prefix = "  find: ";
     // Editing happens at the end of the query, so when it outgrows the
     // row show a horizontally scrolled tail with a leading ellipsis —
@@ -1840,8 +1849,7 @@ fn paint_col_range_on_line(
     end: u16,
     fill: Style,
 ) -> Line<'static> {
-    use unicode_segmentation::UnicodeSegmentation;
-    use unicode_width::UnicodeWidthStr;
+        use unicode_width::UnicodeWidthStr;
     let mut out: Vec<Span<'static>> = Vec::new();
     let mut col = 0u16;
     let line_style = line.style;
@@ -2184,50 +2192,14 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 /// (#558 D5-21) so a huge paste cannot eat the whole screen.
 const COMPOSER_MAX_ROWS: u16 = 8;
 
-/// Rendered text rows the composer needs for `input`, accounting for the
-/// "❯ " prefix (2 columns) and word-wrap at `body_text_w` columns.
-///
-/// This is an over-estimate of ratatui's word-wrap (it breaks long runs
-/// per grapheme), which keeps us safely on the "reserve too many, never
-/// clip" side so the caret is never cut off.
-fn composer_wrapped_rows(input: &str, body_text_w: u16) -> usize {
-    if input.is_empty() {
-        return 1;
-    }
-    let w = (body_text_w as usize).max(1);
-    let mut rows = 0usize;
-    for raw in input.split('\n') {
-        if raw.is_empty() {
-            rows += 1;
-            continue;
-        }
-        let mut col = 0usize;
-        let mut line_rows = 0usize;
-        for g in raw.graphemes(true) {
-            let gw = UnicodeWidthStr::width(g).max(1);
-            if col + gw > w && col > 0 {
-                line_rows += 1;
-                col = gw;
-            } else {
-                col += gw;
-            }
-        }
-        rows += line_rows.max(1);
-    }
-    rows.max(1)
-}
-
 /// Height of the prompt region given content and skin. Grows with the
 /// wrapped line count (capped at [`COMPOSER_MAX_ROWS`]) so a long draft
 /// extends the box automatically instead of needing Alt+Enter (#558).
-fn prompt_area_height(app: &App, minimal: bool, total_h: u16, total_w: u16) -> u16 {
-    // Columns available for wrapped body text after the "❯ " prefix.
-    let body_text_w = if minimal {
-        total_w.saturating_sub(2)
-    } else {
-        total_w.saturating_sub(4)
-    };
-    let lines = composer_wrapped_rows(&app.input, body_text_w) as u16;
+fn prompt_area_height(app: &App, minimal: bool, total_h: u16, _total_w: u16) -> u16 {
+    // Same wrapped rows the composer actually renders (and the caret is
+    // placed from), so the reserved height always matches the drawn text —
+    // the box grows exactly on the row the caret enters.
+    let lines = app.visual_row_count() as u16;
     let body = lines.clamp(1, COMPOSER_MAX_ROWS);
     if minimal {
         body
@@ -2240,6 +2212,71 @@ fn prompt_area_height(app: &App, minimal: bool, total_h: u16, total_w: u16) -> u
 fn header_and_chrome_reserve(minimal: bool) -> u16 {
     // header + status + min transcript
     if minimal { 1 + 1 + 8 } else { 3 + 1 + 8 }
+}
+
+/// Wrap the composer `input` into visual rows of at most `wrap_w` display
+/// columns, returning `(byte_start, byte_end)` ranges — one per soft-wrapped
+/// or hard-newline row. Hard `\n` always starts a fresh row group; an empty
+/// segment (a blank line, or a trailing `\n`) becomes a single empty row so
+/// it stays reachable by the arrow keys. Shared by the draw path and the caret
+/// math (via `App::visual_rows`) so the rendered rows and the visual-row table
+/// always agree — a single newline-free draft longer than the screen width
+/// wraps into matching rows and the caret lands on the row the text occupies.
+pub(crate) fn wrap_composer_rows(input: &str, wrap_w: usize) -> Vec<(usize, usize)> {
+    let wrap_w = wrap_w.max(1);
+    if input.is_empty() {
+        return vec![(0, 0)];
+    }
+    let bytes: Vec<(usize, char)> = input.char_indices().collect();
+    let len = input.len();
+    let mut rows = Vec::new();
+    let mut p = 0usize; // index into `bytes`
+    let mut seg_start = 0usize;
+    loop {
+        // End of the current segment: next '\n' or EOF.
+        let mut seg_end = seg_start;
+        while seg_end < len && !input[seg_end..].starts_with('\n') {
+            seg_end += input[seg_end..].chars().next().unwrap().len_utf8();
+        }
+        if seg_start == seg_end {
+            // Empty segment (blank line): one empty visual row.
+            rows.push((seg_start, seg_start));
+        } else {
+            // Wrap [seg_start, seg_end) into visual rows.
+            let mut row_start = seg_start;
+            while row_start < seg_end {
+                let mut end = row_start;
+                let mut c = 0usize;
+                while end < seg_end {
+                    let (_, ch) = bytes[p];
+                    let gw = UnicodeWidthStr::width(ch.to_string().as_str()).max(1);
+                    if c + gw > wrap_w && c > 0 {
+                        break;
+                    }
+                    c += gw;
+                    end += ch.len_utf8();
+                    p += 1;
+                }
+                if end == row_start {
+                    // One grapheme wider than the wrap column: place alone.
+                    let (_, ch) = bytes[p];
+                    end += ch.len_utf8();
+                    p += 1;
+                }
+                rows.push((row_start, end));
+                row_start = end;
+            }
+        }
+        if seg_end < len {
+            // Consume the hard newline; the next segment starts a fresh row.
+            debug_assert_eq!(bytes[p].1, '\n');
+            p += 1;
+            seg_start = seg_end + 1;
+        } else {
+            break;
+        }
+    }
+    rows
 }
 
 fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
@@ -2255,55 +2292,39 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     // how you delete a line you meant to type.
     let prompt_marker = if app.in_normal_mode() { "▪ " } else { "❯ " };
 
-    // Build per-line display with ❯ only on the first row.
-    let all_lines: Vec<&str> = if app.input.is_empty() {
-        vec![""]
-    } else {
-        // Keep trailing empty line when the draft ends with \n.
-        let mut v: Vec<&str> = app.input.split('\n').collect();
-        if app.input.ends_with('\n') {
-            // split already yields trailing "" for trailing newline
-        }
-        if v.is_empty() {
-            v.push("");
-        }
-        v
-    };
-    // The composer shows at most COMPOSER_MAX_ROWS lines; when the draft is
-    // taller, only the last rows stay visible (the box scrolls internally).
-    let visible_start = all_lines.len().saturating_sub(COMPOSER_MAX_ROWS as usize);
-    // Byte offset of the first visible line, so selection math below lines up.
-    let mut byte_at = 0usize;
-    for (i, seg) in all_lines.iter().enumerate() {
-        if i == visible_start {
-            break;
-        }
-        byte_at += seg.len();
-        if i + 1 < all_lines.len() || app.input.ends_with('\n') {
-            byte_at = byte_at.saturating_add(1);
-        }
-    }
-    let input_lines: Vec<&str> = all_lines[visible_start..].to_vec();
+    // Apply the same wrap width the caret math uses so the drawn rows and the
+    // visual-row table (visual_rows) always line up — a single newline-free
+    // draft longer than the screen width must wrap into matching visual rows
+    // and the caret must land on the row the text actually occupies.
+    let wrap_w = app.composer_wrap_w.max(1);
+    // Map the composer draft into wrapped visual rows (one entry per soft or
+    // hard-wrapped row), each carrying its byte range, then render only the
+    // tail that fits the capped box height.
+    let rows = super::render::wrap_composer_rows(&app.input, wrap_w);
+    // The composer box caps at COMPOSER_MAX_ROWS; when the draft is taller the
+    // box scrolls internally and only the last rows stay visible.
+    let visible_start = rows.len().saturating_sub(COMPOSER_MAX_ROWS as usize);
 
     let sel = app.composer_sel;
     let fill = Style::default()
         .fg(super::colors::on_fill(border))
         .bg(border)
         .add_modifier(Modifier::BOLD);
-    let mut display_lines: Vec<Line<'static>> = Vec::with_capacity(input_lines.len());
-    for (i, segment) in input_lines.iter().enumerate() {
+    let mut display_lines: Vec<Line<'static>> = Vec::with_capacity(rows.len());
+    for (i, &(start, end)) in rows[visible_start..].iter().enumerate() {
+        let segment = &app.input[start..end];
         let mut spans = Vec::new();
         if i == 0 {
             spans.push(Span::styled(prompt_marker.to_string(), prefix_style));
         } else {
             spans.push(Span::raw("  ".to_string())); // indent continuation
         }
-        // Highlight composer_sel when it overlaps this line's bytes.
+        // Highlight composer_sel when it overlaps this row's bytes.
         if let Some((a, b)) = sel {
             let lo = a.min(b);
             let hi = a.max(b);
-            let line_start = byte_at;
-            let line_end = byte_at + segment.len();
+            let line_start = start;
+            let line_end = end;
             if hi > line_start && lo < line_end {
                 let s0 = lo.saturating_sub(line_start).min(segment.len());
                 let s1 = hi.saturating_sub(line_start).min(segment.len());
@@ -2323,16 +2344,11 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             spans.push(Span::styled((*segment).to_string(), body_style));
         }
         display_lines.push(Line::from(spans));
-        byte_at += segment.len();
-        if i + 1 < input_lines.len() || app.input.ends_with('\n') {
-            // Account for the newline separator between lines.
-            byte_at = byte_at.saturating_add(1);
-        }
     }
 
     if app.skin == crate::ui::modern::app::Skin::Minimal {
         app.composer_body = Some(area);
-        frame.render_widget(Paragraph::new(display_lines), area);
+        frame.render_widget(Paragraph::new(display_lines).wrap(Wrap { trim: false }), area);
         set_prompt_cursor(frame, area, app, /*bordered*/ false);
         return;
     }
@@ -2595,6 +2611,61 @@ mod tests {
         // Header (3) + transcript(min 5) + status(1) + composer(≤11) = 20 ≤ 24.
         // If the composer ate the screen, the status line would be gone.
         assert!(s.contains("Enter send"), "hint must still render: {s}");
+    }
+
+    /// #949 regression: when the composer text wraps past one row and the box
+    /// grows, the caret must land on the visual row the text actually occupies
+    /// (not one row too high because the reserved height was computed with a
+    /// different wrap than the drawn text). We check both skins.
+    #[test]
+    fn caret_lands_on_the_wrapped_row_the_text_occupies() {
+        for minimal in [false, true] {
+            let backend = TestBackend::new(80, 24);
+            let mut term = Terminal::new(backend).unwrap();
+            let mut app = App::new("m", "/tmp", "s");
+            if minimal {
+                app.skin = crate::ui::modern::app::Skin::Minimal;
+            }
+            // 200 single-width chars wrap to 3 rows at both the fullscreen
+            // body width (76) and the minimal body width (78). One or two
+            // rows would clip the tail.
+            let input = "a".repeat(200);
+            app.input = input.clone();
+            app.cursor = input.len();
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            let buf = term.backend().buffer().clone();
+
+            // The box must have grown to hold the wrapped text.
+            let body = app.composer_body.expect("composer body must be set");
+            let body_rows = if minimal {
+                body.height as usize
+            } else {
+                // bordered body excludes the hint row
+                body.height as usize
+            };
+            assert!(
+                body_rows >= 3,
+                "composer must grow to >=3 rows for wrapped input (got {body_rows})"
+            );
+
+            let cur = term.get_cursor_position().unwrap();
+            // The caret must be on the last text row (row 2: prefix + 2 wrap
+            // rows of 76/76/48 'a's), not on the first row. A terminal cursor
+            // sits *after* the last typed grapheme, so the cell under it is a
+            // space — the cell just before it holds the final 'a'.
+            assert_eq!(
+                cur.y,
+                body.y + 2,
+                "caret must be 2 rows down (prefix + 2 wrap rows) (minimal={minimal}, cur={cur:?})"
+            );
+            if cur.x > 0 {
+                assert_eq!(
+                    buf[(cur.x - 1, cur.y)].symbol(),
+                    "a",
+                    "cell before caret must be the last typed 'a' (minimal={minimal}, cur={cur:?})"
+                );
+            }
+        }
     }
 
     #[test]
@@ -4384,4 +4455,27 @@ mod tests {
         );
         assert_eq!(s, "gpt · turn 3");
     }
+    #[test]
+    fn diag_newline_cursor2() {
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut app = App::new("m", "/tmp", "s");
+        app.input = "a".repeat(160);
+        app.cursor = 160;
+        app.insert_newline();
+        app.insert_char('b');
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let body = app.composer_body.unwrap();
+        eprintln!("composer_wrap_w={} body.x={} body.width={} body.y={} body.height={}",
+            app.composer_wrap_w, body.x, body.width, body.y, body.height);
+        eprintln!("visual_row_count={} cursor_line_col_visual={:?}",
+            app.visual_row_count(), app.cursor_line_col_visual());
+        for y in body.y..body.y + body.height {
+            let mut row = String::new();
+            for x in body.x..body.x + body.width { row.push_str(buf[(x, y)].symbol()); }
+            eprintln!("  bodyrow{} x{} w{} =`{}`", y, body.x, body.width, row);
+        }
+    }
+
 }
