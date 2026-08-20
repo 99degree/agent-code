@@ -488,10 +488,13 @@ impl Provider for OpenAiProvider {
     async fn fetch_models(&self) -> Result<Vec<(String, String)>, ProviderError> {
         // Fetch models from the OpenAI-compatible endpoint
         let url = format!("{}/models", self.base_url);
-        
+
         let mut headers = self.auth_headers().await?;
-        headers.insert(reqwest::header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+
         let response = self
             .http
             .get(&url)
@@ -499,20 +502,25 @@ impl Provider for OpenAiProvider {
             .send()
             .await
             .map_err(|e| ProviderError::Network(e.to_string()))?;
-        
+
         let status = response.status();
         if !status.is_success() {
             let body_text = response.text().await.unwrap_or_default();
             return Err(match status.as_u16() {
                 401 | 403 => ProviderError::Auth(body_text),
-                429 => ProviderError::RateLimited { retry_after_ms: 1000 },
+                429 => ProviderError::RateLimited {
+                    retry_after_ms: 1000,
+                },
                 529 => ProviderError::Overloaded,
                 _ => ProviderError::InvalidResponse(format!("{status}: {body_text}")),
             });
         }
-        
-        let json: serde_json::Value = response.json().await.map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
-        
+
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+
         let mut models = Vec::new();
         if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
             for model in data {
@@ -523,7 +531,7 @@ impl Provider for OpenAiProvider {
                 }
             }
         }
-        
+
         Ok(models)
     }
 }
