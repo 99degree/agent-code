@@ -3,6 +3,7 @@
 //! Lists provider catalog entries with filter + optional effort sub-menu
 //! (Grok Build product motion: pick model, Tab for reasoning effort).
 
+use crossterm::terminal;
 use super::app::{App, EFFORT_LEVELS, PendingModelAction};
 
 /// Overlay state for the model picker.
@@ -69,7 +70,9 @@ impl App {
             } else {
                 let cur = p.selected as i32;
                 p.selected = (cur + delta).rem_euclid(n) as usize;
-                let max_rows: usize = 12;
+                let (_w, term_h) = terminal::size().unwrap_or((80, 24));
+                let header_footer = 4usize; // header + footer + borders
+                let max_rows: usize = (term_h as usize).saturating_sub(header_footer).max(3);
                 let last_visible = (p.top + max_rows - 1).min(p.entries.len().saturating_sub(1));
                 if p.selected as i32 == last_visible as i32 && (p.selected + 1) < (n as usize) {
                     p.top += 1;
