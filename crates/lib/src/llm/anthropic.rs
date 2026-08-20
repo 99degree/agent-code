@@ -171,11 +171,13 @@ impl Provider for AnthropicProvider {
 
         let status = response.status();
         if !status.is_success() {
+            // Read Retry-After (header) before text() consumes the response.
+            let header_retry = header_retry_after_ms(&response);
             let body_text = response.text().await.unwrap_or_default();
             return match status.as_u16() {
                 401 | 403 => Err(ProviderError::Auth(body_text)),
                 429 => {
-                    let retry = parse_retry_after(&body_text);
+                    let retry = parse_retry_after(header_retry, &body_text);
                     Err(ProviderError::RateLimited {
                         retry_after_ms: retry,
                     })
@@ -280,14 +282,33 @@ fn extract_sse_data(event_text: &str) -> Option<&str> {
     None
 }
 
-fn parse_retry_after(body: &str) -> u64 {
+fn parse_retry_after(header_retry_ms: Option<u64>, body: &str) -> u64 {
+    // Header form wins; Anthropic sometimes omits it and puts `retry_after`
+    // in the error body instead. The header value is extracted before
+    // `text()` consumes the response.
+    if let Some(secs_ms) = header_retry_ms.filter(|ms| *ms > 0) {
+        return secs_ms;
+    }
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
         && let Some(retry) = v
             .get("error")
             .and_then(|e| e.get("retry_after"))
             .and_then(|r| r.as_f64())
+        && retry > 0.0
     {
         return (retry * 1000.0) as u64;
     }
     1000
+}
+
+/// Extract the `Retry-After` header (delta-seconds; integer or fractional)
+/// as milliseconds before the response is consumed by `text()`.
+fn header_retry_after_ms(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|secs| *secs > 0.0)
+        .map(|secs| (secs * 1000.0) as u64)
 }

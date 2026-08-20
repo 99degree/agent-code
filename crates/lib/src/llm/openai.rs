@@ -388,9 +388,10 @@ impl OpenAiProvider {
 
         let status = response.status();
         if !status.is_success() {
-            // Read Retry-After before text() consumes the response.
-            let ra_ms = retry_after_ms(&response, 1000);
+            // Read Retry-After (header) before text() consumes the response.
+            let header_retry = header_retry_after_ms(&response);
             let body_text = response.text().await.unwrap_or_default();
+            let ra_ms = retry_after_ms(header_retry, &body_text, 1000);
             warn!("OpenAI chat/completions API error {status}: {body_text}");
             return match status.as_u16() {
                 401 | 403 => Err(ProviderError::Auth(body_text)),
@@ -445,9 +446,10 @@ impl OpenAiProvider {
 
         let status = response.status();
         if !status.is_success() {
-            // Read Retry-After before text() consumes the response.
-            let ra_ms = retry_after_ms(&response, 1000);
+            // Read Retry-After (header) before text() consumes the response.
+            let header_retry = header_retry_after_ms(&response);
             let body_text = response.text().await.unwrap_or_default();
+            let ra_ms = retry_after_ms(header_retry, &body_text, 1000);
             warn!("OpenAI responses API error {status}: {body_text}");
             return match status.as_u16() {
                 401 | 403 => Err(ProviderError::Auth(body_text)),
@@ -536,20 +538,41 @@ impl Provider for OpenAiProvider {
     }
 }
 
-/// Parse the `Retry-After` header (delta-seconds; integer or fractional) into
-/// milliseconds, so a 429 backoff honors the server's requested wait instead of
-/// a fixed guess. HTTP-date form is not parsed (unusual for LLM APIs); falls
-/// back to `default_ms` when the header is absent or unparseable. Must be called
-/// before `response.text()`, which consumes the response.
-fn retry_after_ms(response: &reqwest::Response, default_ms: u64) -> u64 {
+/// Parse the `Retry-After` wait from a 429 response, preferring the
+/// `Retry-After` header value (already extracted to avoid moving the
+/// response) and falling back to a `retry_after` field in the JSON body when
+/// the header is absent or unparseable. Returns milliseconds so a 429
+/// backoff honors the server's requested wait instead of a fixed guess.
+/// HTTP-date header form is not parsed (unusual for LLM APIs). Falls back to
+/// `default_ms` when neither is present or the parsed value is 0/non-positive.
+fn retry_after_ms(header_retry_ms: Option<u64>, body: &str, default_ms: u64) -> u64 {
+    if let Some(secs_ms) = header_retry_ms.filter(|ms| *ms > 0) {
+        return secs_ms;
+    }
+
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(retry) = v
+            .get("error")
+            .and_then(|e| e.get("retry_after"))
+            .and_then(|r| r.as_f64())
+        && retry > 0.0
+    {
+        return (retry * 1000.0) as u64;
+    }
+
+    default_ms
+}
+
+/// Extract the `Retry-After` header (delta-seconds; integer or fractional)
+/// as milliseconds before the response is consumed by `text()`.
+fn header_retry_after_ms(response: &reqwest::Response) -> Option<u64> {
     response
         .headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<f64>().ok())
-        .filter(|secs| *secs >= 0.0)
+        .filter(|secs| *secs > 0.0)
         .map(|secs| (secs * 1000.0) as u64)
-        .unwrap_or(default_ms)
 }
 
 fn spawn_chat_completions_stream(
