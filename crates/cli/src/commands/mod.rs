@@ -23,11 +23,71 @@ use std::sync::Mutex;
 use tokio::runtime::Handle;
 use tokio::task::block_in_place;
 
-/// `(model_name, description)` pairs keyed by provider.
-type ModelList = Vec<(String, String)>;
-
-static MODEL_CACHE: Lazy<Mutex<HashMap<ProviderKind, ModelList>>> =
+/// `(model_name, description)` pairs keyed by provider kind. Live-fetched
+/// once per provider (see [`model_picker_entries`]); reused on later `/model`
+/// invocations and after switching away and back to a provider.
+pub(crate) static MODEL_CACHE: Lazy<Mutex<HashMap<ProviderKind, Vec<(String, String)>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Build the interactive `/model` list for the *current* provider only.
+///
+/// The engine already holds a provider wired with the exact credentials it
+/// uses for requests (API key, or an OAuth session for xAI/Codex), so its
+/// `/models` list is the authoritative catalog. Start from the static catalog
+/// and override it with the live list when the endpoint returns models.
+///
+/// The fetch is cached per provider kind in [`MODEL_CACHE`] (fetch once, read
+/// many). Switching providers keeps the prior list, so returning to it reuses
+/// the cached models instead of re-hitting the network. An empty live result
+/// (e.g. Anthropic's `/models` stub) keeps the static catalog and is not
+/// cached.
+pub(crate) fn model_picker_entries(engine: &QueryEngine) -> Vec<(String, String)> {
+    let (kind, configured) = {
+        let state = engine.state();
+        let kind = agent_code_lib::llm::provider::detect_provider(
+            &state.config.api.model,
+            &state.config.api.base_url,
+        );
+        let api_key = agent_code_lib::llm::provider::resolve_api_key(kind, &state.config);
+        let configured = state.config.api.auth_mode != agent_code_lib::config::ApiAuthMode::ApiKey
+            || api_key.is_some();
+        (kind, configured)
+    };
+
+    // Static catalog as the baseline; overwritten below when the live list is
+    // non-empty.
+    let mut models: Vec<(String, String)> =
+        agent_code_lib::llm::provider::models_for_provider(kind)
+            .iter()
+            .map(|(n, d)| (n.to_string(), d.to_string()))
+            .collect();
+
+    if configured {
+        let cached = MODEL_CACHE.lock().unwrap().get(&kind).cloned();
+        let live = if let Some(c) = cached {
+            c
+        } else {
+            match block_in_place(|| {
+                let handle = Handle::current();
+                handle.block_on(engine.llm().fetch_models())
+            }) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Failed to fetch models for {kind:?}: {e}");
+                    Vec::new()
+                }
+            }
+        };
+        // Only trust the live list when it actually returned models; an empty
+        // result keeps the static catalog and is not cached.
+        if !live.is_empty() {
+            MODEL_CACHE.lock().unwrap().entry(kind).or_insert(live.clone());
+            models = live;
+        }
+    }
+
+    models
+}
 
 /// Result of executing a command.
 pub enum CommandResult {

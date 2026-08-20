@@ -1107,12 +1107,18 @@ pub(super) async fn event_loop(
                 Ok(mut eng) => {
                     let current = eng.state().config.api.model.clone();
                     let base_url = eng.state().config.api.base_url.clone();
+                    // Live model list for the current provider (fetched from
+                    // its `/models` endpoint and cached per provider kind);
+                    // falls back to the static catalog when the endpoint
+                    // yields nothing or is unconfigured.
+                    let entries = crate::commands::model_picker_entries(&eng);
                     let mut next_model: Option<String> = None;
                     let mut next_effort: Option<Option<String>> = None;
                     app.apply_model_action(
                         action,
                         &current,
                         &base_url,
+                        entries,
                         |name| next_model = Some(name),
                         |effort| next_effort = Some(effort),
                     );
