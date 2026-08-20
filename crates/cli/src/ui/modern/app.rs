@@ -2331,18 +2331,22 @@ impl App {
     }
 
     /// Apply a deferred `/model` / `/effort` action against live engine state.
-    /// `set_model` / `set_effort` mutate the engine config.
+    /// `set_model` / `set_effort` mutate the engine config. `entries` is the
+    /// model list to show — the live per-provider catalog fetched by the run
+    /// loop (falling back to the static catalog), so the picker reflects the
+    /// current provider's `/models` response rather than only the built-in
+    /// list.
     pub fn apply_model_action(
         &mut self,
         action: PendingModelAction,
         current_model: &str,
         base_url: &str,
+        entries: Vec<(String, String)>,
         set_model: impl FnOnce(String),
         set_effort: impl FnOnce(Option<String>),
     ) {
         match action {
             PendingModelAction::Show => {
-                let entries = model_catalog_entries(current_model, base_url);
                 if entries.is_empty() {
                     for line in format_model_catalog(current_model, base_url) {
                         self.transcript.push(TranscriptItem::System(line));
@@ -4354,6 +4358,7 @@ mod tests {
             },
             "old-model",
             "",
+            vec![],
             |name| engine_model = name,
             |e| engine_effort = e,
         );
@@ -4376,6 +4381,7 @@ mod tests {
             PendingModelAction::Show,
             "grok-4",
             "https://api.x.ai/v1",
+            model_catalog_entries("grok-4", "https://api.x.ai/v1"),
             |_| {},
             |_| {},
         );
