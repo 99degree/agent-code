@@ -1345,139 +1345,89 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
 
                 println!("Model changed to: {new_model} [{provider_kind:?}]");
             } else {
-                // Interactive model selector showing all configured providers with dynamic model fetching.
+                // Interactive model selector for the *current* provider only.
+                //
+                // The engine already holds a provider wired with the exact
+                // credentials it uses for requests (API key, or an OAuth
+                // session for xAI/Codex), so its `/models` list is the
+                // authoritative catalog. The previous code probed every
+                // provider's env var and skipped OAuth entirely, which both
+                // hid the live list behind the static fallback and never
+                // reached OAuth endpoints. We start from the static catalog
+                // and override it with the live list when the endpoint returns
+                // models.
+                //
+                // The fetch is cached in `MODEL_CACHE` keyed by provider kind:
+                // fetch once, read many. Switching providers keeps the prior
+                // list, so returning to it reuses the cached models instead of
+                // re-hitting the network.
                 let current = engine.state().config.api.model.clone();
+                let (kind, configured) = {
+                    let state = engine.state();
+                    let kind = agent_code_lib::llm::provider::detect_provider(
+                        &state.config.api.model,
+                        &state.config.api.base_url,
+                    );
+                    let api_key =
+                        agent_code_lib::llm::provider::resolve_api_key(kind, &state.config);
+                    let configured = state.config.api.auth_mode
+                        != agent_code_lib::config::ApiAuthMode::ApiKey
+                        || api_key.is_some();
+                    (kind, configured)
+                };
 
-                // Collect (model_name, description, provider_kind) tuples.
-                let mut all_models: Vec<(
-                    String,
-                    String,
-                    agent_code_lib::llm::provider::ProviderKind,
-                )> = Vec::new();
-                for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
-                    if !kind.is_configured() {
-                        continue;
-                    }
-                    // Determine the base URL to use for fetching models.
-                    let base_url = match kind.default_base_url() {
-                        Some(url) => url.to_string(),
-                        None => {
-                            // Use the engine's configured base_url if set, otherwise skip dynamic fetch and use static list.
-                            let engine_base_url = engine.state().config.api.base_url.clone();
-                            if engine_base_url.is_empty() {
-                                // Skip dynamic fetch, use static list.
-                                let models =
-                                    agent_code_lib::llm::provider::models_for_provider(kind);
-                                for (name, desc) in models {
-                                    all_models.push((name.to_string(), desc.to_string(), kind));
-                                }
-                                continue;
-                            } else {
-                                engine_base_url
-                            }
-                        }
-                    };
-                    // Resolve the API key for this provider.
-                    let api_key = agent_code_lib::llm::provider::resolve_api_key(
-                        kind,
-                        &engine.state().config,
-                    )
-                    .unwrap_or_default();
-                    if api_key.is_empty() {
-                        // Skip dynamic fetch, use static list.
-                        let models = agent_code_lib::llm::provider::models_for_provider(kind);
-                        for (name, desc) in models {
-                            all_models.push((name.to_string(), desc.to_string(), kind));
-                        }
-                        continue;
-                    }
-                    // Create a temporary provider for fetching models.
-                    let provider: Option<
-                        std::sync::Arc<dyn agent_code_lib::llm::provider::Provider>,
-                    > = match kind {
-                        agent_code_lib::llm::provider::ProviderKind::AzureOpenAi => {
-                            Some(std::sync::Arc::new(
-                                agent_code_lib::llm::azure_openai::AzureOpenAiProvider::new(
-                                    &base_url, &api_key,
-                                ),
-                            ))
-                        }
-                        _ => match kind.wire_format() {
-                            agent_code_lib::llm::provider::WireFormat::Anthropic => {
-                                Some(std::sync::Arc::new(
-                                    agent_code_lib::llm::anthropic::AnthropicProvider::new(
-                                        &base_url, &api_key,
-                                    ),
-                                ))
-                            }
-                            agent_code_lib::llm::provider::WireFormat::OpenAiCompatible => {
-                                Some(std::sync::Arc::new(
-                                    agent_code_lib::llm::openai::OpenAiProvider::new(
-                                        &base_url, &api_key,
-                                    ),
-                                ))
-                            }
-                        },
-                    };
-                    // Fetch models from the provider, or fall back to static list on failure.
-                    // Try to get cached models for this provider.
-                    let cached = {
-                        let lock = MODEL_CACHE.lock().unwrap();
-                        lock.get(&kind).cloned()
-                    };
-                    let models = if let Some(cached_models) = cached {
-                        cached_models
+                // Static catalog as the baseline; overwritten below when the
+                // live list is non-empty.
+                let mut models: Vec<(String, String)> =
+                    agent_code_lib::llm::provider::models_for_provider(kind)
+                        .iter()
+                        .map(|(n, d)| (n.to_string(), d.to_string()))
+                        .collect();
+
+                if configured {
+                    let cached = MODEL_CACHE.lock().unwrap().get(&kind).cloned();
+                    let live = if let Some(c) = cached {
+                        c
                     } else {
-                        // Fetch models from the provider, or fall back to static list on failure.
-                        let fetched = if let Some(provider) = provider {
-                            match block_in_place(|| {
-                                let handle = Handle::current();
-                                handle.block_on(provider.fetch_models())
-                            }) {
-                                Ok(models) => models,
-                                Err(e) => {
-                                    eprintln!("Failed to fetch models for {:?}: {}", kind, e);
-                                    agent_code_lib::llm::provider::models_for_provider(kind)
-                                        .iter()
-                                        .map(|(n, d)| (n.to_string(), d.to_string()))
-                                        .collect()
-                                }
+                        match block_in_place(|| {
+                            let handle = Handle::current();
+                            handle.block_on(engine.llm().fetch_models())
+                        }) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                eprintln!("Failed to fetch models for {kind:?}: {e}");
+                                Vec::new()
                             }
-                        } else {
-                            // We couldn't create a provider (e.g., missing implementation for this kind), fall back to static list.
-                            agent_code_lib::llm::provider::models_for_provider(kind)
-                                .iter()
-                                .map(|(n, d)| (n.to_string(), d.to_string()))
-                                .collect()
-                        };
-                        // Cache the fetched models (even if empty? we cache what we got).
-                        let mut lock = MODEL_CACHE.lock().unwrap();
-                        lock.insert(kind, fetched.clone());
-                        fetched
+                        }
                     };
-                    for (name, desc) in models {
-                        all_models.push((name, desc, kind));
+                    // Only trust the live list when it actually returned
+                    // models (e.g. Anthropic's `/models` stub yields none); an
+                    // empty result keeps the static catalog and is not cached.
+                    if !live.is_empty() {
+                        MODEL_CACHE
+                            .lock()
+                            .unwrap()
+                            .entry(kind)
+                            .or_insert(live.clone());
+                        models = live;
                     }
                 }
 
-                if all_models.is_empty() {
+                if models.is_empty() {
                     println!("Model: {current}");
                     println!(
-                        "No providers configured. Set an API key (e.g. {}) to browse models.",
-                        agent_code_lib::llm::provider::detect_provider(
-                            &current,
-                            &engine.state().config.api.base_url,
-                        )
-                        .env_var_name()
+                        "No models available for the current provider ({}). \
+                         Set an API key or check the endpoint.",
+                        kind.env_var_name()
                     );
                 } else {
                     println!();
                     println!("  Select model");
                     println!();
 
-                    let options: Vec<crate::ui::selector::SelectOption> = all_models
+                    let options: Vec<crate::ui::selector::SelectOption> = models
                         .iter()
-                        .map(|(name, desc, kind)| {
+                        .map(|(name, desc)| {
                             let check = if *name == current { " ✔" } else { "" };
                             crate::ui::selector::SelectOption {
                                 label: format!("{name}{check}"),
@@ -1490,18 +1440,21 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
 
                     let chosen = crate::ui::selector::select(&options);
                     if !chosen.is_empty() {
-                        // Find the provider for this model and update base_url.
-                        let found_kind = all_models
-                            .iter()
-                            .find(|(n, _, _)| n == &chosen)
-                            .map(|(_, _, k)| *k);
-                        if let Some(kind) = found_kind
-                            && let Some(url) = kind.default_base_url()
+                        // If this provider has a default base URL that differs
+                        // from the live config, repoint to it so the selection
+                        // takes effect for the next request.
+                        if let Some(url) = kind.default_base_url()
+                            && engine.state().config.api.base_url != url
                         {
                             engine.state_mut().config.api.base_url = url.to_string();
+                            if engine.state().config.api.auth_mode
+                                == agent_code_lib::config::ApiAuthMode::ApiKey
+                            {
+                                engine.reload_llm().ok();
+                            }
                         }
                         engine.state_mut().config.api.model = chosen.clone();
-                        println!("Model changed to: {chosen} [{found_kind:?}]");
+                        println!("Model changed to: {chosen} [{kind:?}]");
                         // Record model change in conversation history.
                         engine
                             .state_mut()

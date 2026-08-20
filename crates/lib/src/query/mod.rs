@@ -627,6 +627,15 @@ impl QueryEngine {
         self.llm = llm;
     }
 
+    /// Borrow the active LLM provider.
+    ///
+    /// Used by `/model` to fetch the provider's model list with the exact
+    /// credentials (API key or OAuth session) the engine is currently using,
+    /// so the dynamic list matches what an actual request would hit.
+    pub fn llm(&self) -> &Arc<dyn Provider> {
+        &self.llm
+    }
+
     /// Rebuild the LLM provider object from the current config.
     ///
     /// `base_url` and `api_key` are baked into the provider at construction
