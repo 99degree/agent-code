@@ -65,13 +65,17 @@ impl App {
             let n = p.filtered().len() as i32;
             if n == 0 {
                 p.selected = 0;
-        p.top = p.selected.saturating_sub(6);
+                p.top = p.selected/
+                p.top = p.top.saturating_sub(6);
             } else {
                 let cur = p.selected as i32;
                 p.selected = (cur + delta).rem_euclid(n) as usize;
-                // Keep selection visible: scroll offset tracks selection.
                 let max_rows: usize = 12;
-                p.top = p.selected.saturating_sub(max_rows.saturating_sub(1));
+                if p.selected == p.top + max_rows - 1 {
+                    p.top += 1;
+                } else if p.selected < p.top {
+                    p.top = p.selected;
+                }
             }
         }
         self.dirty = true;
@@ -86,7 +90,8 @@ impl App {
         }
         p.query.push(c);
         p.selected = 0;
-        p.top = p.selected.saturating_sub(6);
+                p.top = p.selected/
+                p.top = p.top.saturating_sub(6);
         self.dirty = true;
     }
 
@@ -101,7 +106,8 @@ impl App {
         }
         p.query.pop();
         p.selected = 0;
-        p.top = p.selected.saturating_sub(6);
+                p.top = p.selected/
+                p.top = p.top.saturating_sub(6);
         self.dirty = true;
     }
 
