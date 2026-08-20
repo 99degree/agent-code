@@ -1134,6 +1134,11 @@ impl App {
                 }
                 self.waiting_on = WaitingOn::Answering;
                 self.stream_buf.push_assistant(&t);
+                // A delta that already exceeds the byte cap must release
+                // immediately so large bursts don't wait out the flush deadline.
+                if self.stream_buf.should_flush_by_size() {
+                    self.flush_stream();
+                }
                 return;
             }
             EngineEvent::Thinking(t) => {
@@ -1142,6 +1147,9 @@ impl App {
                 }
                 self.waiting_on = WaitingOn::Thinking;
                 self.stream_buf.push_thinking(&t);
+                if self.stream_buf.should_flush_by_size() {
+                    self.flush_stream();
+                }
                 return;
             }
             _ => {
