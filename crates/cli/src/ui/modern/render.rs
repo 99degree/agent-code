@@ -605,10 +605,9 @@ fn draw_model_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Style::default().fg(palette().muted),
         )));
     } else {
-        let start = p
-            .selected
-            .saturating_sub(MAX_ROWS.saturating_sub(1).min(p.selected));
+        let start = p.top.clamp(0, filtered.len().saturating_sub(1));
         let end = (start + MAX_ROWS).min(filtered.len());
+        // Window starts at p.top, clamped so selection is always visible.
         for (i, (_, id, desc)) in filtered.iter().enumerate().take(end).skip(start) {
             let is_sel = i == p.selected;
             let marker = if is_sel { "❯" } else { " " };

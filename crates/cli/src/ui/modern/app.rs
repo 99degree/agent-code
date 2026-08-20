@@ -2438,6 +2438,7 @@ impl App {
         self.model_picker = Some(super::model_picker::ModelPicker {
             query: String::new(),
             selected,
+            top: 0,
             entries,
             current: current.to_string(),
             effort_phase: false,

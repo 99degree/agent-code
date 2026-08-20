@@ -12,6 +12,9 @@ pub struct ModelPicker {
     pub query: String,
     /// Highlighted row into the filtered list (model phase) or effort list.
     pub selected: usize,
+    /// First visible row in the filtered list (scroll offset). Keeps the
+    /// selection cursor visible when the list exceeds the terminal height.
+    pub top: usize,
     /// Full catalog: (id, description).
     pub entries: Vec<(String, String)>,
     /// Model active when the picker opened.
@@ -65,6 +68,9 @@ impl App {
             } else {
                 let cur = p.selected as i32;
                 p.selected = (cur + delta).rem_euclid(n) as usize;
+                // Keep selection visible: scroll offset tracks selection.
+                let max_rows: usize = 12;
+                p.top = p.selected.saturating_sub(max_rows.saturating_sub(1));
             }
         }
         self.dirty = true;
