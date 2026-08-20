@@ -33,6 +33,16 @@ const QUIT_ARM_WINDOW: Duration = Duration::from_millis(1500);
 /// How many recent sessions `/resume` offers.
 const SESSION_PICKER_LIMIT: usize = 50;
 
+/// How often the live conversation is checkpointed to disk while the TUI is
+/// idle (no turn running, nothing buffered, no in-flight resume read). A
+/// process killed mid-turn loses only the in-flight turn; a long session left
+/// parked — or an Android Termux process killed in the background — keeps the
+/// last few minutes instead of the last exit. The write is detached (spawned
+/// on a blocking thread) so it never blocks input or repaint; serialization +
+/// masking of a large transcript is the single most expensive thing this loop
+/// does and must not run on the event thread.
+const SAVE_INTERVAL: Duration = Duration::from_secs(120);
+
 /// A session read from disk plus the transcript rebuilt from it: the id
 /// that was asked for, the restored data, and the display items. Produced
 /// on a blocking thread, applied by the event loop.
@@ -964,6 +974,11 @@ pub(super) async fn event_loop(
     anim_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut flush_tick = tokio::time::interval(super::stream_buffer::FLUSH_INTERVAL);
     flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Periodic checkpoint of the live conversation to disk (see SAVE_INTERVAL).
+    // Skip missed ticks rather than catching up with a burst of writes after a
+    // long park: the only point is to bound data loss, not to rewrite history.
+    let mut save_tick = tokio::time::interval(SAVE_INTERVAL);
+    save_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Background tasks live in the shared `TaskManager`, which emits no
     // events, so the pane has to ask. The manager signals on every
     // transition via `wait_for_change`, so the pane repaints only when
@@ -2555,6 +2570,27 @@ pub(super) async fn event_loop(
                 if app.needs_anim_tick() {
                     app.tick();
                 }
+            }
+            // Periodic checkpoint of the live conversation (see SAVE_INTERVAL).
+            // Only fires while idle — no turn running, nothing buffered, no
+            // resume read in flight — because a turn holds the engine mutex
+            // for its whole duration; checkpointing during a turn would
+            // either block on the lock or serialize stale state. The write is
+            // detached to a blocking thread so a large transcript never stalls
+            // input or repaint. The session id is captured here (under no lock)
+            // and the snapshot is taken on the worker from a fresh try_lock, so
+            // an epoch change between scheduling and execution is ignored
+            // rather than writing a stale conversation over the live one.
+            _ = save_tick.tick(), if !live && pending_restore.is_none() =>
+            {
+                let engine_arc = session.engine();
+                tokio::task::spawn_blocking(move || {
+                    if let Ok(eng) = engine_arc.try_lock() {
+                        if let Some(snap) = session_snapshot(&eng) {
+                            let _ = write_session_snapshot(&snap);
+                        }
+                    }
+                });
             }
         }
 
