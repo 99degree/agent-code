@@ -24,6 +24,11 @@ pub struct RetryConfig {
     /// If the API specifies a longer wait, we abort instead of retrying.
     /// Set to 0 to use the API's value regardless of duration.
     pub max_retry_after_ms: u64,
+    /// Long-wait threshold (milliseconds). A 429 whose retry-after meets or
+    /// exceeds this is treated as a long backoff the API wants us to honor by
+    /// *stopping* — we abort rather than block for that long. Set to 0 to
+    /// disable the threshold (subject only to `max_retry_after_ms`).
+    pub long_wait_after_ms: u64,
 }
 
 impl Default for RetryConfig {
@@ -35,6 +40,9 @@ impl Default for RetryConfig {
             multiplier: 2.0,
             max_overload_retries: 3,
             max_retry_after_ms: 10_000, // 10 seconds
+            // An hour: long enough that a 429 requesting this much wait is a
+            // "stop and come back later" signal, not a retriable delay.
+            long_wait_after_ms: 3_600_000,
         }
     }
 }
@@ -62,6 +70,15 @@ impl RetryState {
                 self.rate_limit_retries += 1;
                 if self.rate_limit_retries > config.max_retries {
                     return RetryAction::Abort("Rate limit retries exhausted".into());
+                }
+                // A long retry-after is a "stop and come back later" signal,
+                // not a wait worth blocking for — abort instead of stalling.
+                if config.long_wait_after_ms > 0 && *retry_after >= config.long_wait_after_ms {
+                    return RetryAction::Abort(format!(
+                        "Rate limit retry-after {}ms exceeds long-wait threshold {}ms \
+                         — stopping instead of blocking",
+                        retry_after, config.long_wait_after_ms
+                    ));
                 }
                 // If API specifies a retry-after longer than our threshold, abort.
                 // 0 means no limit (use API's value regardless).
@@ -176,6 +193,38 @@ mod tests {
         let c = RetryConfig::default();
         assert_eq!(c.max_retries, 3);
         assert!(c.multiplier > 1.0);
+    }
+
+    #[test]
+    fn test_rate_limit_aborts_on_long_wait() {
+        let mut state = RetryState::default();
+        let config = RetryConfig {
+            long_wait_after_ms: 3_600_000, // 1h
+            ..Default::default()
+        };
+        // A 429 asking us to wait an hour is a "stop" signal.
+        match state.next_action(
+            &RetryableError::RateLimited {
+                retry_after: 3_600_000,
+            },
+            &config,
+        ) {
+            RetryAction::Abort(msg) => assert!(msg.contains("long-wait"), "{msg}"),
+            other => panic!("Expected Abort on long wait, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rate_limit_retries_short_wait() {
+        let mut state = RetryState::default();
+        let config = RetryConfig {
+            long_wait_after_ms: 3_600_000,
+            ..Default::default()
+        };
+        match state.next_action(&RetryableError::RateLimited { retry_after: 500 }, &config) {
+            RetryAction::Retry { after } => assert!(after.as_millis() >= 500),
+            other => panic!("Expected Retry on short wait, got {other:?}"),
+        }
     }
 
     #[test]
