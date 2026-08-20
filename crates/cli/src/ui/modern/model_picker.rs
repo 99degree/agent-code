@@ -70,8 +70,11 @@ impl App {
                 let cur = p.selected as i32;
                 p.selected = (cur + delta).rem_euclid(n) as usize;
                 let max_rows: usize = 12;
-                if p.selected == p.top + max_rows - 1 {
+                let last_visible = (p.top + max_rows - 1).min(p.entries.len().saturating_sub(1));
+                if p.selected as i32 == last_visible as i32 && (p.selected + 1) < (n as usize) {
                     p.top += 1;
+                    // Ensure selected stays visible after scroll by keeping
+                    // the selection within the new window.
                 } else if p.selected < p.top {
                     p.top = p.selected;
                 }
