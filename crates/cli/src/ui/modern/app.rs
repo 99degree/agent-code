@@ -3033,10 +3033,11 @@ impl App {
 
     /// Whether any manager-backed row can still change state.
     ///
-    /// Gates the background poll: event-driven subagent rows persist for
-    /// the whole session, so polling "while any rows exist" would wake
-    /// every 750 ms forever. Terminal manager states never change again;
-    /// only a still-working manager task justifies the timer.
+    /// Gates the background repaint: subagent rows persist for the whole
+    /// session, so repainting "while any rows exist" would wake the
+    /// `wait_for_change` arm forever once a terminal manager task appears.
+    /// Terminal manager states never change again; only a still-working
+    /// manager task justifies waiting for a transition.
     pub fn has_live_manager_tasks(&self) -> bool {
         use super::tasks::TaskState;
         self.tasks

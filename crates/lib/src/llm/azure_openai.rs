@@ -464,7 +464,7 @@ impl Provider for AzureOpenAiProvider {
     async fn fetch_models(&self) -> Result<Vec<(String, String)>, ProviderError> {
         // Construct the models endpoint URL
         let url = format!("{}/models?api-version={}", self.base_url, self.api_version);
-        
+
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
@@ -496,13 +496,18 @@ impl Provider for AzureOpenAiProvider {
             let body_text = response.text().await.unwrap_or_default();
             return Err(match status.as_u16() {
                 401 | 403 => ProviderError::Auth(body_text),
-                429 => ProviderError::RateLimited { retry_after_ms: 1000 },
+                429 => ProviderError::RateLimited {
+                    retry_after_ms: 1000,
+                },
                 529 => ProviderError::Overloaded,
                 _ => ProviderError::InvalidResponse(format!("{status}: {body_text}")),
             });
         }
 
-        let json: serde_json::Value = response.json().await.map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
 
         let mut models = Vec::new();
         if let Some(data) = json.get("data").and_then(|d| d.as_array()) {

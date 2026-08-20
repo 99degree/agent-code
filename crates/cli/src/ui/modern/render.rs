@@ -336,7 +336,7 @@ fn draw_search_bar(frame: &mut Frame<'_>, bar: Rect, app: &App) {
     } else {
         Style::default().fg(p.accent)
     };
-        use unicode_width::UnicodeWidthStr;
+    use unicode_width::UnicodeWidthStr;
     let prefix = "  find: ";
     // Editing happens at the end of the query, so when it outgrows the
     // row show a horizontally scrolled tail with a leading ellipsis —
@@ -1849,7 +1849,7 @@ fn paint_col_range_on_line(
     end: u16,
     fill: Style,
 ) -> Line<'static> {
-        use unicode_width::UnicodeWidthStr;
+    use unicode_width::UnicodeWidthStr;
     let mut out: Vec<Span<'static>> = Vec::new();
     let mut col = 0u16;
     let line_style = line.style;
@@ -2348,7 +2348,10 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 
     if app.skin == crate::ui::modern::app::Skin::Minimal {
         app.composer_body = Some(area);
-        frame.render_widget(Paragraph::new(display_lines).wrap(Wrap { trim: false }), area);
+        frame.render_widget(
+            Paragraph::new(display_lines).wrap(Wrap { trim: false }),
+            area,
+        );
         set_prompt_cursor(frame, area, app, /*bordered*/ false);
         return;
     }
@@ -4467,15 +4470,21 @@ mod tests {
         term.draw(|f| draw(f, &mut app)).unwrap();
         let buf = term.backend().buffer().clone();
         let body = app.composer_body.unwrap();
-        eprintln!("composer_wrap_w={} body.x={} body.width={} body.y={} body.height={}",
-            app.composer_wrap_w, body.x, body.width, body.y, body.height);
-        eprintln!("visual_row_count={} cursor_line_col_visual={:?}",
-            app.visual_row_count(), app.cursor_line_col_visual());
+        eprintln!(
+            "composer_wrap_w={} body.x={} body.width={} body.y={} body.height={}",
+            app.composer_wrap_w, body.x, body.width, body.y, body.height
+        );
+        eprintln!(
+            "visual_row_count={} cursor_line_col_visual={:?}",
+            app.visual_row_count(),
+            app.cursor_line_col_visual()
+        );
         for y in body.y..body.y + body.height {
             let mut row = String::new();
-            for x in body.x..body.x + body.width { row.push_str(buf[(x, y)].symbol()); }
+            for x in body.x..body.x + body.width {
+                row.push_str(buf[(x, y)].symbol());
+            }
             eprintln!("  bodyrow{} x{} w{} =`{}`", y, body.x, body.width, row);
         }
     }
-
 }

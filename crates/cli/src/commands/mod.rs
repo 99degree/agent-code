@@ -14,18 +14,20 @@ mod import_pi;
 mod settings_sync;
 mod uninstall;
 
-use agent_code_lib::query::QueryEngine;
 use agent_code_lib::llm::provider::ProviderKind;
+use agent_code_lib::query::QueryEngine;
 
-use tokio::task::block_in_place;
-use tokio::runtime::Handle;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use tokio::runtime::Handle;
+use tokio::task::block_in_place;
 
-static MODEL_CACHE: Lazy<Mutex<HashMap<ProviderKind, Vec<(String, String)>>>> =
+/// `(model_name, description)` pairs keyed by provider.
+type ModelList = Vec<(String, String)>;
+
+static MODEL_CACHE: Lazy<Mutex<HashMap<ProviderKind, ModelList>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
-
 
 /// Result of executing a command.
 pub enum CommandResult {
@@ -1364,7 +1366,8 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             let engine_base_url = engine.state().config.api.base_url.clone();
                             if engine_base_url.is_empty() {
                                 // Skip dynamic fetch, use static list.
-                                let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                                let models =
+                                    agent_code_lib::llm::provider::models_for_provider(kind);
                                 for (name, desc) in models {
                                     all_models.push((name.to_string(), desc.to_string(), kind));
                                 }
@@ -1375,8 +1378,11 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         }
                     };
                     // Resolve the API key for this provider.
-                    let api_key = agent_code_lib::llm::provider::resolve_api_key(kind, &engine.state().config)
-                        .unwrap_or_default();
+                    let api_key = agent_code_lib::llm::provider::resolve_api_key(
+                        kind,
+                        &engine.state().config,
+                    )
+                    .unwrap_or_default();
                     if api_key.is_empty() {
                         // Skip dynamic fetch, use static list.
                         let models = agent_code_lib::llm::provider::models_for_provider(kind);
@@ -1386,25 +1392,30 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         continue;
                     }
                     // Create a temporary provider for fetching models.
-                    let provider: Option<std::sync::Arc<dyn agent_code_lib::llm::provider::Provider>> = match kind {
+                    let provider: Option<
+                        std::sync::Arc<dyn agent_code_lib::llm::provider::Provider>,
+                    > = match kind {
                         agent_code_lib::llm::provider::ProviderKind::AzureOpenAi => {
-                            Some(std::sync::Arc::new(agent_code_lib::llm::azure_openai::AzureOpenAiProvider::new(
-                                &base_url,
-                                &api_key,
-                            )))
+                            Some(std::sync::Arc::new(
+                                agent_code_lib::llm::azure_openai::AzureOpenAiProvider::new(
+                                    &base_url, &api_key,
+                                ),
+                            ))
                         }
                         _ => match kind.wire_format() {
                             agent_code_lib::llm::provider::WireFormat::Anthropic => {
-                                Some(std::sync::Arc::new(agent_code_lib::llm::anthropic::AnthropicProvider::new(
-                                    &base_url,
-                                    &api_key,
-                                )))
+                                Some(std::sync::Arc::new(
+                                    agent_code_lib::llm::anthropic::AnthropicProvider::new(
+                                        &base_url, &api_key,
+                                    ),
+                                ))
                             }
                             agent_code_lib::llm::provider::WireFormat::OpenAiCompatible => {
-                                Some(std::sync::Arc::new(agent_code_lib::llm::openai::OpenAiProvider::new(
-                                    &base_url,
-                                    &api_key,
-                                )))
+                                Some(std::sync::Arc::new(
+                                    agent_code_lib::llm::openai::OpenAiProvider::new(
+                                        &base_url, &api_key,
+                                    ),
+                                ))
                             }
                         },
                     };
@@ -1419,16 +1430,25 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     } else {
                         // Fetch models from the provider, or fall back to static list on failure.
                         let fetched = if let Some(provider) = provider {
-                            match block_in_place(|| { let handle = Handle::current(); handle.block_on(provider.fetch_models()) }) {
+                            match block_in_place(|| {
+                                let handle = Handle::current();
+                                handle.block_on(provider.fetch_models())
+                            }) {
                                 Ok(models) => models,
                                 Err(e) => {
                                     eprintln!("Failed to fetch models for {:?}: {}", kind, e);
-                                    agent_code_lib::llm::provider::models_for_provider(kind).iter().map(|(n, d)| (n.to_string(), d.to_string())).collect()
+                                    agent_code_lib::llm::provider::models_for_provider(kind)
+                                        .iter()
+                                        .map(|(n, d)| (n.to_string(), d.to_string()))
+                                        .collect()
                                 }
                             }
                         } else {
                             // We couldn't create a provider (e.g., missing implementation for this kind), fall back to static list.
-                            agent_code_lib::llm::provider::models_for_provider(kind).iter().map(|(n, d)| (n.to_string(), d.to_string())).collect()
+                            agent_code_lib::llm::provider::models_for_provider(kind)
+                                .iter()
+                                .map(|(n, d)| (n.to_string(), d.to_string()))
+                                .collect()
                         };
                         // Cache the fetched models (even if empty? we cache what we got).
                         let mut lock = MODEL_CACHE.lock().unwrap();
@@ -1475,10 +1495,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             .iter()
                             .find(|(n, _, _)| n == &chosen)
                             .map(|(_, _, k)| *k);
-                        if let Some(kind) = found_kind {
-                            if let Some(url) = kind.default_base_url() {
-                                engine.state_mut().config.api.base_url = url.to_string();
-                            }
+                        if let Some(kind) = found_kind
+                            && let Some(url) = kind.default_base_url()
+                        {
+                            engine.state_mut().config.api.base_url = url.to_string();
                         }
                         engine.state_mut().config.api.model = chosen.clone();
                         println!("Model changed to: {chosen} [{found_kind:?}]");
@@ -1565,11 +1585,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             let filter_tag = args.and_then(|a| {
                 let after_tag = a.strip_prefix("--tag ")?.trim();
                 // Don't treat --all as a tag name.
-                let tag_val = after_tag
+                after_tag
                     .split_whitespace()
                     .next()
-                    .filter(|t| !t.eq_ignore_ascii_case("all"));
-                tag_val
+                    .filter(|t| !t.eq_ignore_ascii_case("all"))
             });
             let show_all = args
                 .map(|a| a.contains("--all") || a.contains("-a"))

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info};
 
 use super::subagent_colors::SubagentColor;
@@ -229,6 +229,10 @@ pub struct TaskManager {
     /// can reload tasks from it after a restart. `None` keeps the manager
     /// purely in-memory (the default; used by tests).
     persist_dir: Option<PathBuf>,
+    /// Wakes the UI the moment any task transitions, so the tasks pane
+    /// can repaint without polling. Signalled on every status change;
+    /// the run loop awaits it instead of a fixed-interval `tasks_tick`.
+    changes: Arc<Notify>,
 }
 
 impl TaskManager {
@@ -238,6 +242,7 @@ impl TaskManager {
             next_id: Arc::new(Mutex::new(1)),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             persist_dir: None,
+            changes: Arc::new(Notify::new()),
         }
     }
 
@@ -264,6 +269,13 @@ impl TaskManager {
         if let Some(dir) = &self.persist_dir {
             let _ = std::fs::remove_file(journal_path(dir, id));
         }
+    }
+
+    /// Wake any UI awaiting [`Self::wait_for_change`] after a task
+    /// transition. Cheap to call on every mutation; `Notify` coalesces
+    /// bursts into a single wakeup and the run loop re-checks state.
+    fn notify_changes(&self) {
+        self.changes.notify_one();
     }
 
     /// Spawn a background shell command.
@@ -329,6 +341,7 @@ impl TaskManager {
         };
         self.persist(&info);
         self.tasks.lock().await.insert(id.clone(), info);
+        self.notify_changes();
 
         // Register a cancellation handle so `kill()` can terminate the
         // live process (and its children) rather than only flipping the
@@ -442,6 +455,7 @@ impl TaskManager {
         };
         self.persist(&info);
         self.tasks.lock().await.insert(id.clone(), info);
+        self.notify_changes();
         debug!("Registered {kind:?} task {id}: {description}");
         id
     }
@@ -465,6 +479,7 @@ impl TaskManager {
             info.clone()
         };
         self.persist(&snapshot);
+        self.notify_changes();
         Ok(())
     }
 
@@ -562,6 +577,17 @@ impl TaskManager {
         self.tasks.lock().await.values().cloned().collect()
     }
 
+    /// Await the next task transition.
+    ///
+    /// Replaces the run loop's fixed `tasks_tick` so the tasks pane
+    /// repaints only when something actually changes. The underlying
+    /// `Notify` coalesces bursts — a spawn that immediately finishes
+    /// wakes the waiter once — and an awaiting caller re-checks state
+    /// after each wakeup. Cheap to await even when no tasks exist.
+    pub async fn wait_for_change(&self) {
+        self.changes.notified().await;
+    }
+
     /// Kill a running task.
     ///
     /// Flips the status to [`TaskStatus::Killed`] and, when the task
@@ -585,6 +611,7 @@ impl TaskManager {
             (info.clone(), was_running)
         };
         self.persist(&snapshot);
+        self.notify_changes();
         // Signal the live runtime (if any) outside the tasks lock.
         let had_cancel = {
             let cancels = self.cancels.lock().await;
@@ -654,6 +681,9 @@ impl TaskManager {
             self.unpersist(&info.id);
             let _ = std::fs::remove_file(&info.output_file);
             removed.push(info.id);
+        }
+        if !removed.is_empty() {
+            self.notify_changes();
         }
         removed
     }
@@ -784,6 +814,7 @@ impl TaskManager {
 
         if adopted > 0 {
             info!("Adopted {adopted} background task(s) from a previous session");
+            self.notify_changes();
         }
         adopted
     }

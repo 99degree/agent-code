@@ -943,7 +943,7 @@ pub(super) async fn event_loop(
     cli_permissions: &CliPermissionOverride,
     notifier: &mut NotifierService,
     term_events: &mut (impl futures::Stream<Item = std::io::Result<Event>> + Unpin),
-    mut term_rx: &mut Option<mpsc::UnboundedReceiver<Event>>,
+    term_rx: &mut Option<mpsc::UnboundedReceiver<Event>>,
     draw: &mut dyn FnMut(&mut App) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let mut turn: Option<TurnHandle> = None;
@@ -965,11 +965,12 @@ pub(super) async fn event_loop(
     let mut flush_tick = tokio::time::interval(super::stream_buffer::FLUSH_INTERVAL);
     flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Background tasks live in the shared `TaskManager`, which emits no
-    // events, so the pane has to ask. Polled only while a turn is live or
-    // rows already exist, so an idle session still never wakes — and the
-    // sync only marks the frame dirty when something actually changed.
-    let mut tasks_tick = tokio::time::interval(Duration::from_millis(750));
-    tasks_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // events, so the pane has to ask. The manager signals on every
+    // transition via `wait_for_change`, so the pane repaints only when
+    // something actually changed — no fixed-interval poll, and an idle
+    // session never wakes for tasks. The arm stays gated on a live turn
+    // or existing working rows; once every row is terminal the notify
+    // won't fire again, exactly matching the old poll's stop condition.
     let task_manager = {
         let engine_arc = session.engine();
         let eng = engine_arc.lock().await;
@@ -1107,7 +1108,7 @@ pub(super) async fn event_loop(
                         eng.state_mut().config.api.effort = effort;
                     }
                     // Reflect the new model in the terminal tab title.
-                    update_terminal_title(&app);
+                    update_terminal_title(app);
                 }
                 Err(_) => {
                     app.work.stage_model(action);
@@ -1447,7 +1448,7 @@ pub(super) async fn event_loop(
                                     term_events,
                                     draw,
                                     &mut pending_events,
-                                    &mut term_rx,
+                                    term_rx,
                                     async {
                                         let mut eng = engine_arc.lock().await;
                                         // The scope Ctrl+C just cancelled
@@ -1525,7 +1526,7 @@ pub(super) async fn event_loop(
                                 term_events,
                                 draw,
                                 &mut pending_events,
-                                &mut term_rx,
+                                term_rx,
                                 async {
                                     let mut eng = engine_arc.lock().await;
                                     // The working set was announced as
@@ -1626,12 +1627,12 @@ pub(super) async fn event_loop(
                             // Restore per-session presentation state saved
                             // with the conversation.
                             st.brief_mode = data.brief_mode;
-                            if !data.response_style.is_empty() {
-                                if let Some(style) = agent_code_lib::state::ResponseStyle::from_name(
+                            if !data.response_style.is_empty()
+                                && let Some(style) = agent_code_lib::state::ResponseStyle::from_name(
                                     &data.response_style,
-                                ) {
-                                    st.response_style = style;
-                                }
+                                )
+                            {
+                                st.response_style = style;
                             }
                             if !data.base_url.is_empty() {
                                 st.config.api.base_url = data.base_url.clone();
@@ -1733,7 +1734,7 @@ pub(super) async fn event_loop(
                                 term_events,
                                 draw,
                                 &mut pending_events,
-                                &mut term_rx,
+                                term_rx,
                                 async {
                                     let _ =
                                         eng.fire_cwd_changed_hooks(&previous_cwd, "resume").await;
@@ -1761,7 +1762,7 @@ pub(super) async fn event_loop(
                             term_events,
                             draw,
                             &mut pending_events,
-                            &mut term_rx,
+                            term_rx,
                             async {
                                 let eng = engine_arc.lock().await;
                                 let _ = eng.fire_session_start_hooks().await;
@@ -2253,7 +2254,7 @@ pub(super) async fn event_loop(
 
         tokio::select! {
             // Terminal input.
-            maybe_ev = next_terminal_event(&mut pending_events, term_events, &mut term_rx) => {
+            maybe_ev = next_terminal_event(&mut pending_events, term_events, term_rx) => {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) if is_cancel_chord(&key)
                         && app.resume.is_loading() =>
@@ -2536,10 +2537,12 @@ pub(super) async fn event_loop(
                 app.dirty = true;
             }
             // Background-task rows (`&` shell jobs, workflows, monitors).
-            // Gated on work that can still change: polling while any
-            // rows exist at all would tick forever once a subagent row
-            // (which persists for the session) appears.
-            _ = tasks_tick.tick(), if live || app.has_live_manager_tasks() => {
+            // Event-driven: the manager wakes `wait_for_change` on every
+            // transition, so we repaint only when something actually
+            // changed. Gated on a live turn or existing working rows so an
+            // idle session with only terminal (e.g. subagent) rows never
+            // wakes — the notify stops firing once nothing can change.
+            _ = task_manager.wait_for_change(), if live || app.has_live_manager_tasks() => {
                 let rows = manager_rows(&task_manager).await;
                 app.sync_background_tasks(rows);
             }
