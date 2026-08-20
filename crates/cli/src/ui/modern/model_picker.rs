@@ -73,7 +73,7 @@ impl App {
                 let (_w, term_h) = terminal::size().unwrap_or((80, 24));
                 let header_footer = 6usize; // header + footer + borders
                 let max_rows: usize = (term_h as usize).saturating_sub(header_footer).max(3);
-                let last_visible = (p.top + max_rows - 1).min(p.entries.len().saturating_sub(1));
+                let _last_visible = (p.top + max_rows - 1).min(p.entries.len().saturating_sub(1));
                 if p.selected.saturating_sub(p.top) >= max_rows.saturating_sub(1) && (p.selected + 1) < (n as usize) {
                     // Scroll window so selected is at bottom (visible)
                     p.top = p.selected.saturating_sub(max_rows.saturating_sub(1));
