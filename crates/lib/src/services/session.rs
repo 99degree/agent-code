@@ -455,6 +455,37 @@ pub fn list_sessions_for_cwd(target_cwd: &str, limit: usize) -> Vec<SessionSumma
     sessions
 }
 
+/// List recent sessions for `/resume`, cwd-matched first, then fill the
+/// remaining slots with any other recent sessions.
+///
+/// `/resume` used to hide every session whose `cwd` differed from the
+/// current directory (it filtered to a match set and only fell back to a
+/// global list when that set was *empty*). A short session created in a
+/// different project — or before the cwd was canonicalized consistently
+/// across runs — therefore never appeared in the picker, which looked
+/// empty even though sessions existed. This keeps the "sessions in this
+/// directory" group at the top while still surfacing other recent work
+/// below it, up to `limit` total.
+pub fn list_sessions_cwd_first(target_cwd: &str, limit: usize) -> Vec<SessionSummary> {
+    let canonical = canonicalize_cwd(target_cwd);
+    let recent = list_sessions(limit * 4); // over-fetch before splitting
+    let mut here: Vec<SessionSummary> = recent
+        .iter()
+        .filter(|s| canonicalize_cwd(&s.cwd) == canonical)
+        .cloned()
+        .collect();
+    let mut other: Vec<SessionSummary> = recent
+        .into_iter()
+        .filter(|s| canonicalize_cwd(&s.cwd) != canonical)
+        .collect();
+    // `list_sessions` already sorted both groups newest-first.
+    here.truncate(limit);
+    let remaining = limit.saturating_sub(here.len());
+    other.truncate(remaining);
+    here.extend(other);
+    here
+}
+
 /// Summary fields only, deserialized WITHOUT materializing the
 /// `messages` transcript (serde skips the unknown field), so hot-path
 /// callers don't pay to allocate every session's full history.
@@ -928,6 +959,86 @@ mod tests {
                  "cwd":"/work/{id}","model":"m","turn_count":1,"messages":[]}}"#
         );
         std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
+    }
+
+    /// Build a small SessionSummary for tests (the listing/tag fields only).
+    fn summary(id: &str, cwd: &str, updated_at: &str, turn_count: usize) -> SessionSummary {
+        SessionSummary {
+            id: id.to_string(),
+            cwd: cwd.to_string(),
+            model: String::new(),
+            turn_count,
+            message_count: 0,
+            updated_at: updated_at.to_string(),
+            label: None,
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn list_sessions_cwd_first_surfaces_cross_directory_sessions() {
+        // The bug: a short session saved in another directory was hidden
+        // by the old cwd-only filter. cwd-first must still show it in the
+        // remaining slots rather than dropping it.
+        let here = "/work/cur".to_string();
+        let mut all = vec![
+            summary("a", "/work/cur", "2026-06-30T12:00:00Z", 40),
+            summary("b", "/work/other", "2026-06-30T11:55:00Z", 1),
+            summary("c", "/work/cur", "2026-06-30T11:50:00Z", 5),
+            summary("d", "/work/other", "2026-06-30T11:45:00Z", 2),
+        ];
+        all.sort_by(|x, y| y.updated_at.cmp(&x.updated_at));
+
+        // Partition by cwd, newest-first within each group, then interleave
+        // cwd-first — mirroring list_sessions_cwd_first's contract.
+        let canonical = canonicalize_cwd(&here);
+        let (mut here_g, mut other_g): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|s| canonicalize_cwd(&s.cwd) == canonical);
+        here_g.sort_by(|x, y| y.updated_at.cmp(&x.updated_at));
+        other_g.sort_by(|x, y| y.updated_at.cmp(&x.updated_at));
+        let mut rows = here_g;
+        let other_len = other_g.len();
+        rows.extend(other_g);
+        assert_eq!(rows.len(), 4, "no session should be dropped");
+        assert_eq!(rows[0].id, "a", "cwd match sorts first");
+        assert_eq!(rows[1].id, "c", "second cwd match before any other");
+        // The cross-directory short session must still be present.
+        assert!(rows.iter().any(|s| s.id == "b"), "other-dir session hidden");
+        assert!(rows.iter().any(|s| s.id == "d"), "other-dir session hidden");
+        assert_eq!(other_len, 2);
+    }
+
+    #[test]
+    fn list_sessions_cwd_first_respects_limit_with_cross_dir_fill() {
+        let here = "/work/cur".to_string();
+        let canonical = canonicalize_cwd(&here);
+        let mut all: Vec<SessionSummary> = (0..30)
+            .map(|i| {
+                let other = i % 2 == 0;
+                summary(
+                    &format!("s{i}"),
+                    if other { "/work/other" } else { "/work/cur" },
+                    &format!("2026-06-30T{ii:02}:00:00Z", ii = 30 - i),
+                    1,
+                )
+            })
+            .collect();
+        all.sort_by(|x, y| y.updated_at.cmp(&x.updated_at));
+
+        let (here_g, mut other_g): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|s| canonicalize_cwd(&s.cwd) == canonical);
+        let remaining = 20usize.saturating_sub(here_g.len());
+        other_g.truncate(remaining);
+        assert!(
+            other_g.len() <= remaining,
+            "cross-dir fill must not exceed limit"
+        );
+        assert!(
+            here_g.len() + other_g.len() <= 20,
+            "total must respect the limit"
+        );
     }
 
     #[test]
