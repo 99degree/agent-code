@@ -2438,7 +2438,7 @@ impl App {
         self.model_picker = Some(super::model_picker::ModelPicker {
             query: String::new(),
             selected,
-            top: 0,
+            top: selected.saturating_sub(6),
             entries,
             current: current.to_string(),
             effort_phase: false,
@@ -2474,7 +2474,7 @@ impl App {
         self.provider_picker = Some(super::provider_picker::ProviderPicker {
             query: String::new(),
             selected,
-            top: 0,
+            top: selected.saturating_sub(6),
             entries,
             current: current.to_string(),
         });
