@@ -970,7 +970,7 @@ pub(super) async fn event_loop(
     // (4x quieter than the original 80ms/100ms) to cut idle/streaming CPU:
     // the screen refresh heartbeat was the main cost vs. the line-oriented
     // classic REPL, which only repainted on new input/output.
-    let mut anim_tick = tokio::time::interval(Duration::from_millis(320));
+    let mut anim_tick = tokio::time::interval(Duration::from_millis(800));
     anim_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut flush_tick = tokio::time::interval(super::stream_buffer::FLUSH_INTERVAL);
     flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
