@@ -922,7 +922,10 @@ fn draw_modal_box(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border))
         .title(title.to_string());
-    let inner = block.inner(rect);
+    let mut inner = block.inner(rect);
+    // Sidebars overlap first/last char of inner content; add 1-col padding.
+    inner.x = inner.x.saturating_add(2);
+    inner.width = inner.width.saturating_sub(2);
     frame.render_widget(block, rect);
 
     if let Some(footer_line) = footer {

@@ -71,11 +71,13 @@ impl App {
                 let cur = p.selected as i32;
                 p.selected = (cur + delta).rem_euclid(n) as usize;
                 let (_w, term_h) = terminal::size().unwrap_or((80, 24));
-                let header_footer = 4usize; // header + footer + borders
+                let header_footer = 6usize; // header + footer + borders
                 let max_rows: usize = (term_h as usize).saturating_sub(header_footer).max(3);
                 let last_visible = (p.top + max_rows - 1).min(p.entries.len().saturating_sub(1));
-                if p.selected as i32 == last_visible as i32 && (p.selected + 1) < (n as usize) {
-                    p.top += 1;
+                if p.selected.saturating_sub(p.top) >= max_rows.saturating_sub(1) && (p.selected + 1) < (n as usize) {
+                    // Scroll window so selected is at bottom (visible)
+                    p.top = p.selected.saturating_sub(max_rows.saturating_sub(1));
+                    p.top = p.top.min(p.entries.len().saturating_sub(1));
                     // Ensure selected stays visible after scroll by keeping
                     // the selection within the new window.
                 } else if p.selected < p.top {
@@ -95,6 +97,7 @@ impl App {
         }
         p.query.push(c);
         p.selected = 0;
+                p.top = 0;
         p.top = p.selected.saturating_sub(6);
         self.dirty = true;
     }
