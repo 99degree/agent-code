@@ -65,8 +65,7 @@ impl App {
             let n = p.filtered().len() as i32;
             if n == 0 {
                 p.selected = 0;
-                p.top = p.selected/
-                p.top = p.top.saturating_sub(6);
+                p.top = 0;
             } else {
                 let cur = p.selected as i32;
                 p.selected = (cur + delta).rem_euclid(n) as usize;
@@ -90,8 +89,7 @@ impl App {
         }
         p.query.push(c);
         p.selected = 0;
-                p.top = p.selected/
-                p.top = p.top.saturating_sub(6);
+        p.top = p.selected.saturating_sub(6);
         self.dirty = true;
     }
 
@@ -104,10 +102,7 @@ impl App {
             self.dirty = true;
             return;
         }
-        p.query.pop();
-        p.selected = 0;
-                p.top = p.selected/
-                p.top = p.top.saturating_sub(6);
+                p.top = p.selected.saturating_sub(6);
         self.dirty = true;
     }
 
