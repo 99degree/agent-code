@@ -1598,7 +1598,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             let mut sessions = if show_all {
                 agent_code_lib::services::session::list_sessions(100)
             } else {
-                agent_code_lib::services::session::list_sessions_for_cwd(&cwd, 100)
+                // Cwd-matched first, then any other recent session fills the
+                // remaining slots — so a short/cross-directory session still
+                // appears below the local ones instead of being hidden.
+                agent_code_lib::services::session::list_sessions_cwd_first(&cwd, 100)
             };
 
             if let Some(tag) = filter_tag {
@@ -6446,11 +6449,10 @@ fn execute_files(engine: &QueryEngine) {
 /// Esc/q leaves the current session untouched.
 fn execute_session_picker(engine: &mut QueryEngine) {
     let cwd = engine.state().cwd.clone();
-    let mut sessions = agent_code_lib::services::session::list_sessions_for_cwd(&cwd, 20);
-    if sessions.is_empty() {
-        // Fallback: show all sessions if none match this cwd.
-        sessions = agent_code_lib::services::session::list_sessions(20);
-    }
+    // Cwd-matched sessions first; any other recent session fills the
+    // remaining slots so a short/cross-directory session still shows up
+    // below the local ones instead of being hidden.
+    let sessions = agent_code_lib::services::session::list_sessions_cwd_first(&cwd, 20);
     if sessions.is_empty() {
         println!("No saved sessions to pick from.");
         return;

@@ -2394,17 +2394,15 @@ pub(super) async fn event_loop(
                     // Summary-only listing: it is index-cached and skips
                     // deserializing every transcript, which is the entire
                     // cost of the full read for data the picker never shows.
-                    let mut rows = agent_code_lib::services::session::list_sessions_for_cwd(
+                    // Cwd-matched sessions first, then any other recent
+                    // session fills the remaining slots — so a session
+                    // created in another directory (or before cwd
+                    // canonicalization was consistent) still appears below
+                    // the local ones instead of being hidden.
+                    let rows = agent_code_lib::services::session::list_sessions_cwd_first(
                         &here,
                         SESSION_PICKER_LIMIT,
                     );
-                    if rows.is_empty() {
-                        // Fallback: no sessions match this cwd — show all
-                        // recent ones so the picker never looks empty.
-                        rows = agent_code_lib::services::session::list_session_summaries(
-                            SESSION_PICKER_LIMIT,
-                        );
-                    }
                     let _ = tx.send((generation, rows));
                 });
             }
@@ -2585,10 +2583,10 @@ pub(super) async fn event_loop(
             {
                 let engine_arc = session.engine();
                 tokio::task::spawn_blocking(move || {
-                    if let Ok(eng) = engine_arc.try_lock() {
-                        if let Some(snap) = session_snapshot(&eng) {
-                            let _ = write_session_snapshot(&snap);
-                        }
+                    if let Ok(eng) = engine_arc.try_lock()
+                        && let Some(snap) = session_snapshot(&eng)
+                    {
+                        let _ = write_session_snapshot(&snap);
                     }
                 });
             }
