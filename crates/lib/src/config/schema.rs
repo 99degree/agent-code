@@ -404,6 +404,7 @@ impl Default for ApiConfig {
             .or_else(|_| std::env::var("OPENROUTER_API_KEY"))
             .or_else(|_| std::env::var("COHERE_API_KEY"))
             .or_else(|_| std::env::var("PERPLEXITY_API_KEY"))
+            .or_else(|_| std::env::var("KILO_API_KEY"))
             .or_else(|_| std::env::var("OPENCODE_ZEN_API_KEY"))
             .or_else(|_| std::env::var("OPENCODE_API_KEY"))
             .or_else(|_| std::env::var("OPENCODE_GO_API_KEY"))
@@ -458,6 +459,8 @@ impl Default for ApiConfig {
             "https://api.cohere.com/v2".to_string()
         } else if std::env::var("PERPLEXITY_API_KEY").is_ok() {
             "https://api.perplexity.ai".to_string()
+        } else if std::env::var("KILO_API_KEY").is_ok() {
+            "https://api.kilo.ai/api/gateway".to_string()
         } else if std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
             || std::env::var("OPENCODE_API_KEY").is_ok()
         {
@@ -991,6 +994,7 @@ mod tests {
             "MISTRAL_API_KEY",
             "ZHIPU_API_KEY",
             "TOGETHER_API_KEY",
+            "KILO_API_KEY",
             "OPENROUTER_API_KEY",
             "COHERE_API_KEY",
             "PERPLEXITY_API_KEY",
@@ -1050,6 +1054,18 @@ mod tests {
                 assert_eq!(cfg.api_key.as_deref(), Some(v));
             });
         }
+    }
+
+    #[test]
+    fn api_config_default_picks_kilo_when_key_set() {
+        with_only_opencode_key("KILO_API_KEY", "kilo-key", || {
+            let cfg = ApiConfig::default();
+            assert_eq!(
+                cfg.base_url, "https://api.kilo.ai/api/gateway",
+                "KILO_API_KEY should select kilo base url"
+            );
+            assert_eq!(cfg.api_key.as_deref(), Some("kilo-key"));
+        });
     }
 
     #[test]
