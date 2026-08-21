@@ -186,7 +186,13 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
             ("deepseek-ai/deepseek-v4-pro", "DeepSeek V4 Pro"),
             ("meta/llama-3.1-8b-instruct", "Llama 3.1 8B · Fast"),
         ],
-        ProviderKind::Kilo => &[("kilo-alpha", "Kilo Alpha · Most capable")],
+        ProviderKind::Kilo => &[
+            ("kilo-auto/frontier", "Kilo Auto Frontier · Most capable"),
+            ("kilo-auto/balanced", "Kilo Auto Balanced · Balanced"),
+            ("kilo-auto/efficient", "Kilo Auto Efficient · Cheapest that works"),
+            ("kilo-auto/free", "Kilo Auto Free · Rotates free models"),
+            ("tencent/hy3:free", "Tencent Hy3 · Free (failover)"),
+        ],
         ProviderKind::Novita => &[("tencent/hy3", "Tencent Hy3 · Open")],
         ProviderKind::OpenCode => &[
             ("big-pickle", "Big Pickle · Frontier flagship"),
@@ -1152,7 +1158,10 @@ mod tests {
 
     #[test]
     fn test_default_model_picks_first_catalog_entry() {
-        assert_eq!(ProviderKind::Kilo.default_model(), Some("kilo-alpha"));
+        assert_eq!(
+            ProviderKind::Kilo.default_model(),
+            Some("kilo-auto/frontier")
+        );
         assert_eq!(ProviderKind::OpenCode.default_model(), Some("big-pickle"));
         // Providers without a curated catalog have no default model.
         assert_eq!(ProviderKind::OpenAiCompatible.default_model(), None);
