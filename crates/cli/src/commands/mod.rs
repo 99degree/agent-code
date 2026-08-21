@@ -23,11 +23,15 @@ use std::sync::Mutex;
 use tokio::runtime::Handle;
 use tokio::task::block_in_place;
 
-/// `(model_name, description)` pairs keyed by provider kind. Live-fetched
-/// once per provider (see [`model_picker_entries`]); reused on later `/model`
-/// invocations and after switching away and back to a provider.
-pub(crate) static MODEL_CACHE: Lazy<Mutex<HashMap<ProviderKind, Vec<(String, String)>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+/// A `(model_id, description)` pair in a model picker list.
+type ModelEntry = (String, String);
+
+/// Live-fetched model lists keyed by provider kind. Fetched once per provider
+/// (see [`model_picker_entries`]); reused on later `/model` invocations and
+/// after switching away and back to a provider.
+type ModelCache = HashMap<ProviderKind, Vec<ModelEntry>>;
+
+pub(crate) static MODEL_CACHE: Lazy<Mutex<ModelCache>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Build the interactive `/model` list for the *current* provider only.
 ///
@@ -41,6 +45,28 @@ pub(crate) static MODEL_CACHE: Lazy<Mutex<HashMap<ProviderKind, Vec<(String, Str
 /// the cached models instead of re-hitting the network. An empty live result
 /// (e.g. Anthropic's `/models` stub) keeps the static catalog and is not
 /// cached.
+/// Merge the static catalog with a live model list.
+///
+/// Static entries are preserved (their curated descriptions are better than
+/// the raw id the live endpoint returns). Live models not present in the
+/// static catalog are appended, so a newly surfaced model is selectable
+/// without replacing the human-curated entries.
+fn merge_models(
+    static_catalog: &[(&str, &str)],
+    live: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut models: Vec<(String, String)> = static_catalog
+        .iter()
+        .map(|(n, d)| (n.to_string(), d.to_string()))
+        .collect();
+    for (id, desc) in live {
+        if !models.iter().any(|(n, _)| n.eq_ignore_ascii_case(id)) {
+            models.push((id.clone(), desc.clone()));
+        }
+    }
+    models
+}
+
 pub(crate) fn model_picker_entries(engine: &QueryEngine) -> Vec<(String, String)> {
     let (kind, configured) = {
         let state = engine.state();
@@ -54,13 +80,11 @@ pub(crate) fn model_picker_entries(engine: &QueryEngine) -> Vec<(String, String)
         (kind, configured)
     };
 
-    // Static catalog as the baseline; overwritten below when the live list is
-    // non-empty.
-    let mut models: Vec<(String, String)> =
-        agent_code_lib::llm::provider::models_for_provider(kind)
-            .iter()
-            .map(|(n, d)| (n.to_string(), d.to_string()))
-            .collect();
+    let static_catalog = agent_code_lib::llm::provider::models_for_provider(kind);
+    let mut models: Vec<(String, String)> = static_catalog
+        .iter()
+        .map(|(n, d)| (n.to_string(), d.to_string()))
+        .collect();
 
     if configured {
         let cached = MODEL_CACHE.lock().unwrap().get(&kind).cloned();
@@ -81,8 +105,12 @@ pub(crate) fn model_picker_entries(engine: &QueryEngine) -> Vec<(String, String)
         // Only trust the live list when it actually returned models; an empty
         // result keeps the static catalog and is not cached.
         if !live.is_empty() {
-            MODEL_CACHE.lock().unwrap().entry(kind).or_insert(live.clone());
-            models = live;
+            MODEL_CACHE
+                .lock()
+                .unwrap()
+                .entry(kind)
+                .or_insert(live.clone());
+            models = merge_models(static_catalog, &live);
         }
     }
 
@@ -1436,13 +1464,11 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     (kind, configured)
                 };
 
-                // Static catalog as the baseline; overwritten below when the
-                // live list is non-empty.
-                let mut models: Vec<(String, String)> =
-                    agent_code_lib::llm::provider::models_for_provider(kind)
-                        .iter()
-                        .map(|(n, d)| (n.to_string(), d.to_string()))
-                        .collect();
+                let static_catalog = agent_code_lib::llm::provider::models_for_provider(kind);
+                let mut models: Vec<(String, String)> = static_catalog
+                    .iter()
+                    .map(|(n, d)| (n.to_string(), d.to_string()))
+                    .collect();
 
                 if configured {
                     let cached = MODEL_CACHE.lock().unwrap().get(&kind).cloned();
@@ -1469,7 +1495,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             .unwrap()
                             .entry(kind)
                             .or_insert(live.clone());
-                        models = live;
+                        models = merge_models(static_catalog, &live);
                     }
                 }
 

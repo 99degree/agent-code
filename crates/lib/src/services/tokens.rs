@@ -115,6 +115,11 @@ pub fn context_window_for_model(model: &str) -> u64 {
 
     if lower.contains("opus") || lower.contains("sonnet") || lower.contains("haiku") {
         200_000
+    } else if lower.contains("nemotron") {
+        // NVIDIA Nemotron. The OpenCode Zen `-free` variants
+        // (`nemotron-3-ultra-free`, `nemotron-3.5-lightning-free`) expose a
+        // 1M context window; treat the family as 1M.
+        1_000_000
     } else if lower.contains("gpt-4") {
         128_000
     } else if lower.contains("gpt-3.5") {
@@ -346,6 +351,20 @@ mod tests {
     fn test_context_window_for_unknown_model() {
         // Unknown models default to 128K.
         assert_eq!(context_window_for_model("some-unknown-model"), 128_000);
+    }
+
+    #[test]
+    fn test_context_window_for_nemotron_models() {
+        // The Nemotron family is treated as a 1M context window.
+        assert_eq!(context_window_for_model("nemotron-3-ultra-free"), 1_000_000);
+        assert_eq!(
+            context_window_for_model("nemotron-3.5-lightning-free"),
+            1_000_000
+        );
+        assert_eq!(
+            context_window_for_model("nvidia/nemotron-3-nano-30b-a3b"),
+            1_000_000
+        );
     }
 
     #[test]

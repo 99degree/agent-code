@@ -3,8 +3,8 @@
 //! Lists provider catalog entries with filter + optional effort sub-menu
 //! (Grok Build product motion: pick model, Tab for reasoning effort).
 
-use crossterm::terminal;
 use super::app::{App, EFFORT_LEVELS, PendingModelAction};
+use crossterm::terminal;
 
 /// Overlay state for the model picker.
 #[derive(Debug, Clone)]
@@ -74,7 +74,9 @@ impl App {
                 let header_footer = 6usize; // header + footer + borders
                 let max_rows: usize = (term_h as usize).saturating_sub(header_footer).max(3);
                 let _last_visible = (p.top + max_rows - 1).min(p.entries.len().saturating_sub(1));
-                if p.selected.saturating_sub(p.top) >= max_rows.saturating_sub(1) && (p.selected + 1) < (n as usize) {
+                if p.selected.saturating_sub(p.top) >= max_rows.saturating_sub(1)
+                    && (p.selected + 1) < (n as usize)
+                {
                     // Scroll window so selected is at bottom (visible)
                     p.top = p.selected.saturating_sub(max_rows.saturating_sub(1));
                     p.top = p.top.min(p.entries.len().saturating_sub(1));
@@ -97,7 +99,7 @@ impl App {
         }
         p.query.push(c);
         p.selected = 0;
-                p.top = 0;
+        p.top = 0;
         p.top = p.selected.saturating_sub(6);
         self.dirty = true;
     }
@@ -111,7 +113,7 @@ impl App {
             self.dirty = true;
             return;
         }
-                p.top = p.selected.saturating_sub(6);
+        p.top = p.selected.saturating_sub(6);
         self.dirty = true;
     }
 
