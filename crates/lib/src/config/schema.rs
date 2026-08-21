@@ -54,7 +54,7 @@ impl Default for Config {
         // Default failover pairs: opencode -> kilo (tencent/hy3 free); nvidia -> kilo (tencent/hy3:free)
         failover_mapping.insert(
             "opencode".to_string(),
-            ("kilo".to_string(), "tencent/hy3".to_string()),
+            ("kilo".to_string(), "tencent/hy3:free".to_string()),
         );
         failover_mapping.insert(
             "opencode/*".to_string(),
