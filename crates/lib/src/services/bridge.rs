@@ -105,6 +105,7 @@ pub fn discover_bridges() -> Vec<BridgeInstance> {
             // Check if the process is still running.
             let alive = std::process::Command::new("kill")
                 .args(["-0", &pid.to_string()])
+                .stdin(std::process::Stdio::null())
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false);

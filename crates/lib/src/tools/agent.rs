@@ -715,8 +715,13 @@ pub fn build_subagent_command(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "agent".to_string());
 
+    // stdin nulled: the subagent must never share the parent TUI's pty,
+    // or its own prompt loop would compete for the user's keystrokes.
     let mut cmd = tokio::process::Command::new(&agent_binary);
-    cmd.arg("--prompt").arg(full_prompt).current_dir(cwd);
+    cmd.arg("--prompt")
+        .arg(full_prompt)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null());
 
     if let Some(def) = definition {
         apply_agent_definition(&mut cmd, def, endpoint.model.as_deref());

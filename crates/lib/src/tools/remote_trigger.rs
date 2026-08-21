@@ -136,6 +136,7 @@ impl Tool for RemoteTriggerTool {
         cmd.arg("schedule")
             .arg("run")
             .arg(id)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             // Defense in depth: if this future is dropped (panic, caller

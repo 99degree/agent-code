@@ -497,6 +497,7 @@ async fn run_with_options(cwd: &Path, config: &crate::config::Config, network: b
     if let Ok(output) = tokio::process::Command::new("df")
         .args(["-BG", "."])
         .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
         .output()
         .await
     {

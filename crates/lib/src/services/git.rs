@@ -13,6 +13,7 @@ pub async fn is_git_repo(cwd: &Path) -> bool {
     Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(cwd)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -26,6 +27,7 @@ pub async fn repo_root(cwd: &Path) -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(cwd)
+        .stdin(Stdio::null())
         .output()
         .await
         .ok()?;
@@ -46,6 +48,7 @@ pub async fn canonical_root(cwd: &Path) -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", "--git-common-dir"])
         .current_dir(cwd)
+        .stdin(Stdio::null())
         .output()
         .await
         .ok()?;
@@ -80,6 +83,7 @@ pub fn repo_name_sync(cwd: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(cwd)
+        .stdin(Stdio::null())
         .output()
         .ok()?;
 
@@ -110,6 +114,7 @@ pub async fn is_shallow(cwd: &Path) -> bool {
     Command::new("git")
         .args(["rev-parse", "--is-shallow-repository"])
         .current_dir(cwd)
+        .stdin(Stdio::null())
         .output()
         .await
         .map(|o| {
@@ -135,6 +140,7 @@ pub async fn current_branch(cwd: &Path) -> Option<String> {
     let output = Command::new("git")
         .args(["branch", "--show-current"])
         .current_dir(cwd)
+        .stdin(Stdio::null())
         .output()
         .await
         .ok()?;
@@ -158,6 +164,7 @@ pub async fn default_branch(cwd: &Path) -> String {
         let output = Command::new("git")
             .args(["rev-parse", "--verify", &format!("refs/heads/{name}")])
             .current_dir(cwd)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -324,6 +331,7 @@ async fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(cwd)
+        .stdin(Stdio::null())
         .output()
         .await
         .map_err(|e| format!("git command failed: {e}"))?;

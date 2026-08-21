@@ -19,6 +19,7 @@ use agent_code_lib::query::QueryEngine;
 
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::sync::Mutex;
 use tokio::runtime::Handle;
 use tokio::task::block_in_place;
@@ -4574,6 +4575,7 @@ fn nearest_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
 fn git_user_email() -> Option<String> {
     let out = std::process::Command::new("git")
         .args(["config", "user.email"])
+        .stdin(Stdio::null())
         .output()
         .ok()?;
     if !out.status.success() {
