@@ -50,6 +50,9 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
+        // Failover rotation is enabled by default, but only activates when
+        // both the source provider and the failover target provider have
+        // valid API keys configured (checked at runtime by provider::is_configured).
         let mut failover_mapping = std::collections::HashMap::new();
         // Default failover pairs: opencode -> kilo (tencent/hy3 free); nvidia -> kilo (tencent/hy3:free)
         failover_mapping.insert(
