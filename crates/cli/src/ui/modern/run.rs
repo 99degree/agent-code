@@ -71,6 +71,7 @@ type LoadedSession = (
 );
 
 use agent_code_lib::config::PermissionMode;
+use agent_code_lib::llm::provider::ProviderKind;
 use agent_code_lib::query::{QueryEngine, Session, TurnHandle};
 use agent_code_lib::services::notifier::{NotificationKind, NotifierService};
 use agent_code_lib::tools::PermissionResponse;
@@ -1005,6 +1006,12 @@ pub(super) async fn event_loop(
     // reset a filtered picker, or reopen one the user has already
     // dismissed or selected from.
     let mut session_scan_generation: u64 = 0;
+    // Live model list for the in-TUI picker, fetched off-thread on `/model`.
+    // The static catalog already opened the picker; this receiver upgrades it
+    // in place once the network call lands, so the provider fetch never
+    // stalls input or repaint. `None` until a fetch is in flight and once it
+    // settles (or the picker is dismissed).
+    let mut model_fetch_rx: Option<crate::commands::ModelFetchRx> = None;
     // Loading the *selected* session is the heavier half — a whole
     // transcript read and deserialized — so it is detached too. The
     // payload is boxed because a full conversation is far too big to pass
@@ -1107,18 +1114,18 @@ pub(super) async fn event_loop(
                 Ok(mut eng) => {
                     let current = eng.state().config.api.model.clone();
                     let base_url = eng.state().config.api.base_url.clone();
-                    // Live model list for the current provider (fetched from
-                    // its `/models` endpoint and cached per provider kind);
-                    // falls back to the static catalog when the endpoint
-                    // yields nothing or is unconfigured.
-                    let entries = crate::commands::model_picker_entries(&eng);
+                    // Static catalog immediately, so the picker opens without
+                    // blocking on a network fetch; the live list replaces it
+                    // when the off-thread fetch (below) returns. The picker is
+                    // only opened after we know there is something to show.
+                    let static_entries = crate::commands::static_model_entries(&eng);
                     let mut next_model: Option<String> = None;
                     let mut next_effort: Option<Option<String>> = None;
                     app.apply_model_action(
                         action,
                         &current,
                         &base_url,
-                        entries,
+                        static_entries,
                         |name| next_model = Some(name),
                         |effort| next_effort = Some(effort),
                     );
@@ -1130,6 +1137,9 @@ pub(super) async fn event_loop(
                     }
                     // Reflect the new model in the terminal tab title.
                     update_terminal_title(app);
+                    // Kick the live model fetch off this thread so the picker
+                    // updates in place without stalling input or repaint.
+                    model_fetch_rx = crate::commands::spawn_model_fetch(&eng);
                 }
                 Err(_) => {
                     app.work.stage_model(action);
@@ -1147,8 +1157,7 @@ pub(super) async fn event_loop(
                     let current = eng.state().config.api.model.clone();
                     let base_url = eng.state().config.api.base_url.clone();
                     let cur = agent_code_lib::llm::provider::detect_provider(&current, &base_url);
-                    let mut next_provider: Option<agent_code_lib::llm::provider::ProviderKind> =
-                        None;
+                    let mut next_provider: Option<ProviderKind> = None;
                     app.apply_provider_action(action, cur.as_name(), |p| next_provider = Some(p));
                     if let Some(p) = next_provider {
                         // Switching providers is only meaningful in the
@@ -1849,6 +1858,72 @@ pub(super) async fn event_loop(
             app.dirty = true;
         }
 
+        // Apply a deferred `/new` to the engine conversation (classic
+        // parity). Mirrors the deferred `/clear` handling: try_lock so a
+        // running turn retries next iteration, and `claim_pending_new_session`
+        // consumes the flag only when nothing withholds it (a resume in
+        // flight keeps it pending).
+        if app.work.new_session_staged()
+            && let Ok(mut eng) = session.engine().try_lock()
+            && app.claim_pending_new_session()
+        {
+            // Persist the conversation being left so it is recoverable via
+            // `/resume` or `/sessions`, then start a brand-new session.
+            {
+                let state = eng.state();
+                if !state.messages.is_empty()
+                    || agent_code_lib::services::session::session_exists(&state.session_id)
+                {
+                    let _ = agent_code_lib::services::session::save_session_full(
+                        &state.session_id,
+                        &state.messages,
+                        &state.cwd,
+                        &state.config.api.model,
+                        state.turn_count,
+                        state.total_cost_usd,
+                        state.total_usage.input_tokens,
+                        state.total_usage.output_tokens,
+                        state.plan_mode,
+                        Some(
+                            agent_code_lib::services::session::ProviderIdentity::from_api(
+                                &state.config.api.base_url,
+                                state.config.api.auth_mode,
+                            ),
+                        ),
+                        state.brief_mode,
+                        state.response_style.name(),
+                        &state.config.api.base_url,
+                        &agent_code_lib::services::git::repo_name_sync(std::path::Path::new(
+                            &state.cwd,
+                        ))
+                        .unwrap_or_default(),
+                    );
+                }
+            }
+            let new_id = agent_code_lib::services::session::new_session_id();
+            {
+                let state = eng.state_mut();
+                state.session_id = new_id.clone();
+                state.messages.clear();
+                state.turn_count = 0;
+                state.total_cost_usd = 0.0;
+                state.total_usage = agent_code_lib::llm::message::Usage::default();
+                state.model_usage.clear();
+                state.plan_mode = false;
+                state.brief_mode = false;
+                state.compact_requested = false;
+            }
+            eng.set_live_plan_mode(false);
+            // `submit` already cleared the view; keep it honest for the
+            // deferred case (a resume applied in between repainted history).
+            app.clear_transcript_view();
+            app.new_conversation();
+            // Mirror the new engine session id into the TUI header.
+            App::set_session_id(&new_id);
+            app.status_message = format!("new session {new_id}");
+            app.dirty = true;
+        }
+
         // Full classic slash-command bridge (stdout captured → transcript).
         // Run off the async worker via `block_in_place`: many slash arms call
         // `Handle::block_on` / spawn+join, which panic if invoked directly on
@@ -2423,6 +2498,32 @@ pub(super) async fn event_loop(
                 if generation == session_scan_generation && !app.pending_session_list {
                     app.accept_session_scan(rows);
                 }
+            }
+            // Live model list for the picker, fetched off-thread on `/model`.
+            // The static catalog already opened the picker; this arm upgrades
+            // it in place once the network call lands, so the provider fetch
+            // never stalls input or repaint. Mirrors the session-list fetch:
+            // the receiver is held in a local and only polled while present.
+            Some((kind, entries)) = async {
+                match &mut model_fetch_rx {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            }, if model_fetch_rx.is_some() => {
+                // The receiver owns the stream; drop it after the one result
+                // (or close) so the arm stops being ready. The apply only
+                // touches the open picker, so a dismissed picker is harmless.
+                model_fetch_rx = None;
+                if let Some(p) = app.model_picker.as_mut() {
+                    // Re-anchor the selection on the previously active model
+                    // so the user's cursor does not jump to the top.
+                    let cur = p.current.clone();
+                    p.entries = entries;
+                    p.selected = p.entries.iter().position(|(id, _)| id == &cur).unwrap_or(0);
+                    p.top = p.selected.saturating_sub(6);
+                }
+                app.dirty = true;
+                let _ = kind;
             }
             // Read and rebuild the selected session off-thread: a long
             // conversation is megabytes of JSON, and deserializing it on
