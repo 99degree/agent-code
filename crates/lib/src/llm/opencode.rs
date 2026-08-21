@@ -51,6 +51,11 @@ impl Provider for OpenCodeProvider {
         let openai_provider = super::openai::OpenAiProvider::new(self.base_url(), self.api_key());
         openai_provider.stream(request).await
     }
+
+    async fn fetch_models(&self) -> Result<Vec<(String, String)>, ProviderError> {
+        let openai_provider = super::openai::OpenAiProvider::new(self.base_url(), self.api_key());
+        openai_provider.fetch_models().await
+    }
 }
 
 #[cfg(test)]
