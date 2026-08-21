@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 /// 3. User config (`~/.config/agent-code/config.toml`)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-#[derive(Default)]
 pub struct Config {
     pub api: ApiConfig,
     pub permissions: PermissionsConfig,
@@ -47,6 +46,39 @@ pub struct Config {
     /// Desktop notifier settings.
     #[serde(default)]
     pub notifier: NotifierConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        let mut failover_mapping = std::collections::HashMap::new();
+        // Default failover pairs: opencode -> kilo (tencent/hy3 free); nvidia -> kilo (tencent/hy3:free)
+        failover_mapping.insert(
+            "opencode".to_string(),
+            ("kilo".to_string(), "tencent/hy3".to_string()),
+        );
+        failover_mapping.insert(
+            "opencode/*".to_string(),
+            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+        );
+        failover_mapping.insert(
+            "nvidia/*".to_string(),
+            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+        );
+        Self {
+            api: ApiConfig::default(),
+            permissions: PermissionsConfig::default(),
+            ui: UiConfig::default(),
+            features: FeaturesConfig::default(),
+            mcp_servers: std::collections::HashMap::new(),
+            hooks: Vec::new(),
+            security: SecurityConfig::default(),
+            sandbox: SandboxConfig::default(),
+            session: SessionConfig::default(),
+            failover_mapping,
+            limits: std::collections::HashMap::new(),
+            notifier: NotifierConfig::default(),
+        }
+    }
 }
 
 /// Desktop notifier configuration.
