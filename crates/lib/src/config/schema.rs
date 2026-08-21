@@ -404,6 +404,10 @@ impl Default for ApiConfig {
             .or_else(|_| std::env::var("OPENROUTER_API_KEY"))
             .or_else(|_| std::env::var("COHERE_API_KEY"))
             .or_else(|_| std::env::var("PERPLEXITY_API_KEY"))
+            .or_else(|_| std::env::var("OPENCODE_ZEN_API_KEY"))
+            .or_else(|_| std::env::var("OPENCODE_API_KEY"))
+            .or_else(|_| std::env::var("OPENCODE_GO_API_KEY"))
+            .or_else(|_| std::env::var("OPENCODE2_API_KEY"))
             .ok();
 
         // Auto-detect base URL from which key is set.
@@ -454,6 +458,14 @@ impl Default for ApiConfig {
             "https://api.cohere.com/v2".to_string()
         } else if std::env::var("PERPLEXITY_API_KEY").is_ok() {
             "https://api.perplexity.ai".to_string()
+        } else if std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
+            || std::env::var("OPENCODE_API_KEY").is_ok()
+        {
+            "https://opencode.ai/zen/v1".to_string()
+        } else if std::env::var("OPENCODE_GO_API_KEY").is_ok()
+            || std::env::var("OPENCODE2_API_KEY").is_ok()
+        {
+            "https://opencode.ai/zen/go/v1".to_string()
         } else {
             // Default to OpenAI (default model is gpt-5.4).
             "https://api.openai.com/v1".to_string()
@@ -952,6 +964,92 @@ mod tests {
     fn api_config_default_api_key_helper_is_none() {
         let cfg = ApiConfig::default();
         assert!(cfg.api_key_helper.is_none());
+    }
+
+    // OpenCode keys (and the AWS/cloud flags) are cleared before each case so
+    // the opencode branch is the one the auto-detect chain takes. A static
+    // mutex serializes the two tests because they mutate process-global env.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_only_opencode_key<F: FnOnce()>(key: &str, value: &str, body: F) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let competing = [
+            "AGENT_CODE_API_KEY",
+            "AGENT_CODE_USE_BEDROCK",
+            "AGENT_CODE_USE_VERTEX",
+            "ANTHROPIC_API_KEY",
+            "AWS_REGION",
+            "AZURE_OPENAI_API_KEY",
+            "AZURE_OPENAI_ENDPOINT",
+            "OPENAI_API_KEY",
+            "XAI_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+            "DEEPSEEK_API_KEY",
+            "GROQ_API_KEY",
+            "MISTRAL_API_KEY",
+            "ZHIPU_API_KEY",
+            "TOGETHER_API_KEY",
+            "OPENROUTER_API_KEY",
+            "COHERE_API_KEY",
+            "PERPLEXITY_API_KEY",
+            "OPENCODE_ZEN_API_KEY",
+            "OPENCODE_API_KEY",
+            "OPENCODE_GO_API_KEY",
+            "OPENCODE2_API_KEY",
+        ];
+        for c in competing {
+            if c != key {
+                unsafe {
+                    std::env::remove_var(c);
+                }
+            }
+        }
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        body();
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn api_config_default_picks_opencode_when_zen_key_set() {
+        // OpenCode Zen publishes its model list and handles /model fetching;
+        // the default config must route its keys to the opencode.ai/zen URL
+        // so the provider is detected and the live fetch fires.
+        for (k, v) in [
+            ("OPENCODE_ZEN_API_KEY", "zen-key"),
+            ("OPENCODE_API_KEY", "alt-key"),
+        ] {
+            with_only_opencode_key(k, v, || {
+                let cfg = ApiConfig::default();
+                assert_eq!(
+                    cfg.base_url, "https://opencode.ai/zen/v1",
+                    "key {k} should select opencode zen base url"
+                );
+                assert_eq!(cfg.api_key.as_deref(), Some(v));
+            });
+        }
+    }
+
+    #[test]
+    fn api_config_default_picks_opencode_go_when_go_key_set() {
+        for (k, v) in [
+            ("OPENCODE_GO_API_KEY", "go-key"),
+            ("OPENCODE2_API_KEY", "go-alt-key"),
+        ] {
+            with_only_opencode_key(k, v, || {
+                let cfg = ApiConfig::default();
+                assert_eq!(
+                    cfg.base_url, "https://opencode.ai/zen/go/v1",
+                    "key {k} should select opencode go base url"
+                );
+                assert_eq!(cfg.api_key.as_deref(), Some(v));
+            });
+        }
     }
 
     #[test]
