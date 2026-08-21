@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-*No changes yet.*
+### Changed
+
+- **Accurate model context windows** — `context_window_for_model` now consults an explicit per-model table (sourced from provider catalogs such as pi.dev) before falling back to prefix heuristics, so large-context models (1M+) no longer collapse to the 128K default and trigger premature compaction. `/model` picker catalogs for NVIDIA, OpenCode, OpenCodeGo, Mistral, and Zhipu were fleshed out with real current model ids.
 
 ## [0.30.0] - 2026-07-29
 
