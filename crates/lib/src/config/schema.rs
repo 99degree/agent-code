@@ -405,6 +405,7 @@ impl Default for ApiConfig {
             .or_else(|_| std::env::var("COHERE_API_KEY"))
             .or_else(|_| std::env::var("PERPLEXITY_API_KEY"))
             .or_else(|_| std::env::var("KILO_API_KEY"))
+            .or_else(|_| std::env::var("NOVITA_API_KEY"))
             .or_else(|_| std::env::var("OPENCODE_ZEN_API_KEY"))
             .or_else(|_| std::env::var("OPENCODE_API_KEY"))
             .or_else(|_| std::env::var("OPENCODE_GO_API_KEY"))
@@ -461,6 +462,10 @@ impl Default for ApiConfig {
             "https://api.perplexity.ai".to_string()
         } else if std::env::var("KILO_API_KEY").is_ok() {
             "https://api.kilo.ai/api/gateway".to_string()
+        } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+            "https://api.anthropic.com/v1".to_string()
+        } else if std::env::var("NOVITA_API_KEY").is_ok() {
+            "https://api.novita.ai/openai/v1".to_string()
         } else if std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
             || std::env::var("OPENCODE_API_KEY").is_ok()
         {
@@ -993,6 +998,8 @@ mod tests {
             "GROQ_API_KEY",
             "MISTRAL_API_KEY",
             "ZHIPU_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "NOVITA_API_KEY",
             "TOGETHER_API_KEY",
             "KILO_API_KEY",
             "OPENROUTER_API_KEY",
@@ -1065,6 +1072,30 @@ mod tests {
                 "KILO_API_KEY should select kilo base url"
             );
             assert_eq!(cfg.api_key.as_deref(), Some("kilo-key"));
+        });
+    }
+
+    #[test]
+    fn api_config_default_picks_anthropic_when_key_set() {
+        with_only_opencode_key("ANTHROPIC_API_KEY", "anthropic-key", || {
+            let cfg = ApiConfig::default();
+            assert_eq!(
+                cfg.base_url, "https://api.anthropic.com/v1",
+                "ANTHROPIC_API_KEY should select anthropic base url"
+            );
+            assert_eq!(cfg.api_key.as_deref(), Some("anthropic-key"));
+        });
+    }
+
+    #[test]
+    fn api_config_default_picks_novita_when_key_set() {
+        with_only_opencode_key("NOVITA_API_KEY", "novita-key", || {
+            let cfg = ApiConfig::default();
+            assert_eq!(
+                cfg.base_url, "https://api.novita.ai/openai/v1",
+                "NOVITA_API_KEY should select novita base url"
+            );
+            assert_eq!(cfg.api_key.as_deref(), Some("novita-key"));
         });
     }
 
