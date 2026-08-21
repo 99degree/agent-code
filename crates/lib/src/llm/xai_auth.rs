@@ -162,6 +162,13 @@ impl XaiOauthAuth {
                         .into(),
                 ));
             }
+            // 503 is a transient server error, not an auth failure — let the
+            // retry loop handle it as a network error.
+            if status.as_u16() == 503 {
+                return Err(ProviderError::Network(format!(
+                    "xAI token refresh service unavailable (HTTP 503): {body}"
+                )));
+            }
             return Err(ProviderError::Auth(format!(
                 "xAI token refresh failed (HTTP {status}): {body}. Re-run `agent login xai`."
             )));

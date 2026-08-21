@@ -282,7 +282,7 @@ impl LlmClient {
                 });
             }
 
-            if status.as_u16() == 529 {
+            if status.as_u16() == 529 || status.as_u16() == 503 {
                 // Overloaded — treat like rate limit with longer backoff.
                 return Err(LlmError::RateLimited {
                     retry_after_ms: 5000,

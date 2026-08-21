@@ -252,7 +252,7 @@ impl Provider for AzureOpenAiProvider {
                 429 => Err(ProviderError::RateLimited {
                     retry_after_ms: 1000,
                 }),
-                529 => Err(ProviderError::Overloaded),
+                529 | 503 => Err(ProviderError::Overloaded),
                 413 => Err(ProviderError::RequestTooLarge(body_text)),
                 _ => Err(ProviderError::Network(format!("{status}: {body_text}"))),
             };
@@ -499,7 +499,7 @@ impl Provider for AzureOpenAiProvider {
                 429 => ProviderError::RateLimited {
                     retry_after_ms: 1000,
                 },
-                529 => ProviderError::Overloaded,
+                529 | 503 => ProviderError::Overloaded,
                 _ => ProviderError::InvalidResponse(format!("{status}: {body_text}")),
             });
         }
