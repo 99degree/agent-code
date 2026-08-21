@@ -247,14 +247,17 @@ impl Provider for AzureOpenAiProvider {
         let status = response.status();
         if !status.is_success() {
             let body_text = response.text().await.unwrap_or_default();
-            return match status.as_u16() {
+            let status_code = status.as_u16();
+            return match status_code {
                 401 | 403 => Err(ProviderError::Auth(body_text)),
                 429 => Err(ProviderError::RateLimited {
                     retry_after_ms: 1000,
                 }),
                 529 | 503 => Err(ProviderError::Overloaded),
                 413 => Err(ProviderError::RequestTooLarge(body_text)),
-                _ => Err(ProviderError::Network(format!("{status}: {body_text}"))),
+                _ => Err(ProviderError::Network(format!(
+                    "{status_code}: {body_text}"
+                ))),
             };
         }
 
@@ -494,13 +497,14 @@ impl Provider for AzureOpenAiProvider {
         let status = response.status();
         if !status.is_success() {
             let body_text = response.text().await.unwrap_or_default();
-            return Err(match status.as_u16() {
+            let status_code = status.as_u16();
+            return Err(match status_code {
                 401 | 403 => ProviderError::Auth(body_text),
                 429 => ProviderError::RateLimited {
                     retry_after_ms: 1000,
                 },
                 529 | 503 => ProviderError::Overloaded,
-                _ => ProviderError::InvalidResponse(format!("{status}: {body_text}")),
+                _ => ProviderError::InvalidResponse(format!("{status_code}: {body_text}")),
             });
         }
 
