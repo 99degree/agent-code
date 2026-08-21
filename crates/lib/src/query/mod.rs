@@ -2680,6 +2680,31 @@ fn extract_file_path(
     extract_file_paths(tool_calls, use_id).into_iter().next()
 }
 
+/// Fixed model mapping for provider rotation failover.
+fn get_failover_model(current_provider: &str, current_model: &str) -> Option<(String, String)> {
+    // Anthropic Claude -> OpenAI GPT-5.5
+    if current_provider.contains("anthropic") || current_model.to_lowercase().contains("claude") {
+        return Some(("openai".to_string(), "gpt-5.5".to_string()));
+    }
+    // OpenAI GPT -> Anthropic Claude Sonnet 5
+    if current_provider.contains("openai") || current_model.to_lowercase().contains("gpt-") {
+        return Some(("anthropic".to_string(), "claude-sonnet-5".to_string()));
+    }
+    // Xai Grok -> DeepSeek Chat
+    if current_provider.contains("xai") || current_model.to_lowercase().contains("grok") {
+        return Some(("deepseek".to_string(), "deepseek-chat".to_string()));
+    }
+    // DeepSeek -> Mistral Large
+    if current_provider.contains("deepseek") || current_model.to_lowercase().contains("deepseek") {
+        return Some(("mistral".to_string(), "mistral-large-latest".to_string()));
+    }
+    // Google Gemini -> OpenRouter
+    if current_provider.contains("google") || current_model.to_lowercase().contains("gemini") {
+        return Some(("openrouter".to_string(), "openai/gpt-5.5".to_string()));
+    }
+    None
+}
+
 fn get_fallback_model(current: &str) -> String {
     let lower = current.to_lowercase();
     if lower.contains("opus") {
