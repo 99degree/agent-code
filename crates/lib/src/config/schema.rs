@@ -33,6 +33,12 @@ pub struct Config {
     /// Session persistence settings (cleanup period, etc.).
     #[serde(default)]
     pub session: SessionConfig,
+    /// Provider rotation failover mapping: provider -> (failover_provider, failover_model).
+    /// When a provider call fails with auth/rate-limit/overloaded, the agent
+    /// rotates to the configured failover provider/model instead of retrying
+    /// the same endpoint.
+    #[serde(default)]
+    pub failover_mapping: std::collections::HashMap<String, (String, String)>,
     /// Per-provider rate / token / concurrency limits. Absent or
     /// empty = no limits enforced (the policy service runs as a
     /// no-op).
