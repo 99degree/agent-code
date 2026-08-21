@@ -75,6 +75,7 @@ pub struct SessionWork {
     model: Option<PendingModelAction>,
     provider: Option<PendingProviderAction>,
     clear: bool,
+    new_session: bool,
     slash: Option<String>,
     shell: Option<String>,
 }
@@ -98,6 +99,10 @@ impl SessionWork {
 
     pub fn stage_clear(&mut self) {
         self.clear = true;
+    }
+
+    pub fn stage_new_session(&mut self) {
+        self.new_session = true;
     }
 
     pub fn stage_slash(&mut self, line: String) {
@@ -133,6 +138,18 @@ impl SessionWork {
     /// Take a deferred `!cmd`, unless a resume holds it.
     pub fn take_shell(&mut self, resume: &ResumeState) -> Option<String> {
         self.gated(resume, |w| w.shell.take())
+    }
+
+    /// Claim a deferred `/new`, unless a resume holds it.
+    ///
+    /// The flag is cleared only when the claim succeeds, so a `/new` held
+    /// back for a resume stays pending rather than being dropped.
+    pub fn claim_new_session(&mut self, resume: &ResumeState) -> bool {
+        if !self.new_session || !resume.allows(WorkScope::Session) {
+            return false;
+        }
+        self.new_session = false;
+        true
     }
 
     /// Claim a deferred `/clear`, unless a resume holds it.
@@ -214,6 +231,10 @@ impl SessionWork {
 
     pub fn clear_staged(&self) -> bool {
         self.clear
+    }
+
+    pub fn new_session_staged(&self) -> bool {
+        self.new_session
     }
 
     pub fn slash_staged(&self) -> Option<&str> {
@@ -329,6 +350,18 @@ mod tests {
         assert!(w.clear_staged(), "the held /clear was dropped");
         assert!(w.claim_clear(&ResumeState::default()));
         assert!(!w.clear_staged());
+    }
+
+    /// `/new` is gated by the same session scope as `/clear`: a resume in
+    /// flight withholds it, and it stays staged rather than being lost.
+    #[test]
+    fn a_refused_claim_leaves_the_new_session_staged() {
+        let mut w = SessionWork::default();
+        w.stage_new_session();
+        assert!(!w.claim_new_session(&loading()));
+        assert!(w.new_session_staged(), "the held /new was dropped");
+        assert!(w.claim_new_session(&ResumeState::default()));
+        assert!(!w.new_session_staged());
     }
 
     /// The composer is busy while a resume holds the prompt, so a peek

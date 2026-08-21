@@ -388,6 +388,11 @@ pub enum Phase {
     PlanReview,
 }
 
+thread_local! {
+    static GLOBAL_APP: std::cell::RefCell<Option<std::sync::Arc<std::sync::Mutex<App>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Entire TUI state.
 #[derive(Debug, Clone)]
 pub struct App {
@@ -919,6 +924,32 @@ fn word_start_col(line: &str, col: usize) -> usize {
 }
 
 impl App {
+    /// Update the live session id without touching the rest of the UI state.
+    ///
+    /// Slash commands such as `/new` swap the engine's session in place; the
+    /// run loop only mirrors `session_id` through resume/swap paths, so the
+    /// command calls this directly to keep the header honest. The live `App`
+    /// is registered with [`register_global`] by the run loop once it is
+    /// constructed.
+    pub fn set_session_id(id: &str) {
+        GLOBAL_APP.with(|cell| {
+            if let Some(arc) = cell.borrow().as_ref() {
+                let _ = arc.lock().map(|mut app| {
+                    app.session_id = id.to_string();
+                    app.dirty = true;
+                });
+            }
+        });
+    }
+
+    /// Register the live `App` so slash commands can mirror session state
+    /// after an in-place engine swap (e.g. `/new`). Least-recently-built wins;
+    /// only one TUI run loop exists at a time.
+    pub fn register_global(app: &App) {
+        let arc = std::sync::Arc::new(std::sync::Mutex::new(app.clone()));
+        GLOBAL_APP.with(|cell| *cell.borrow_mut() = Some(arc));
+    }
+
     pub fn new(
         model: impl Into<String>,
         cwd: impl Into<String>,
@@ -1867,6 +1898,22 @@ impl App {
         }
         if text == "/exit" || text == "/quit" {
             self.should_quit = true;
+            self.input.clear();
+            self.cursor = 0;
+            return;
+        }
+        if text == "/new" {
+            // Mirror `/clear`: if a resume is outstanding the engine swap is
+            // deferred behind it, so only clear the view now. The run loop
+            // applies the new-session swap under try_lock once the resume
+            // resolves (or is cancelled).
+            if self.resume.allows(WorkScope::Session) {
+                self.clear_transcript_view();
+                self.new_conversation();
+            }
+            // Mark the engine for a fresh session; the run loop performs the
+            // swap (new id, empty history, persisted previous) under try_lock.
+            self.work.stage_new_session();
             self.input.clear();
             self.cursor = 0;
             return;
@@ -3330,6 +3377,15 @@ impl App {
         self.work.claim_clear(&self.resume)
     }
 
+    /// Claim the deferred `/new` staged by `App::submit`, applying the same
+    /// session gate as `claim_pending_clear`.
+    ///
+    /// Returns whether it was claimed; the flag is cleared only when it
+    /// is, so a held `/new` stays pending rather than being dropped.
+    pub fn claim_pending_new_session(&mut self) -> bool {
+        self.work.claim_new_session(&self.resume)
+    }
+
     pub fn toggle_tasks(&mut self) {
         self.show_tasks = !self.show_tasks;
         self.dirty = true;
@@ -4764,6 +4820,21 @@ mod tests {
         app.cursor = 6;
         app.submit();
         assert!(app.work.clear_staged(), "engine clear deferred to run loop");
+        assert!(app.transcript.is_empty());
+    }
+
+    /// `/new` mirrors `/clear`'s routing: the composer stages the engine
+    /// swap, which the run loop performs (or defers for a resume).
+    #[test]
+    fn new_requests_an_engine_session_swap() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.input = "/new".into();
+        app.cursor = 4;
+        app.submit();
+        assert!(
+            app.work.new_session_staged(),
+            "engine session swap deferred to run loop"
+        );
         assert!(app.transcript.is_empty());
     }
 
