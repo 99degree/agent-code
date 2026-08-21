@@ -174,7 +174,8 @@ impl Provider for AnthropicProvider {
             // Read Retry-After (header) before text() consumes the response.
             let header_retry = header_retry_after_ms(&response);
             let body_text = response.text().await.unwrap_or_default();
-            return match status.as_u16() {
+            let status_code = status.as_u16();
+            return match status_code {
                 401 | 403 => Err(ProviderError::Auth(body_text)),
                 429 => {
                     let retry = parse_retry_after(header_retry, &body_text);
@@ -184,7 +185,9 @@ impl Provider for AnthropicProvider {
                 }
                 529 | 503 => Err(ProviderError::Overloaded),
                 413 => Err(ProviderError::RequestTooLarge(body_text)),
-                _ => Err(ProviderError::Network(format!("{status}: {body_text}"))),
+                _ => Err(ProviderError::Network(format!(
+                    "{status_code}: {body_text}"
+                ))),
             };
         }
 

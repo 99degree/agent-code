@@ -189,7 +189,10 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
         ProviderKind::Kilo => &[
             ("kilo-auto/frontier", "Kilo Auto Frontier · Most capable"),
             ("kilo-auto/balanced", "Kilo Auto Balanced · Balanced"),
-            ("kilo-auto/efficient", "Kilo Auto Efficient · Cheapest that works"),
+            (
+                "kilo-auto/efficient",
+                "Kilo Auto Efficient · Cheapest that works",
+            ),
             ("kilo-auto/free", "Kilo Auto Free · Rotates free models"),
             ("tencent/hy3:free", "Tencent Hy3 · Free (failover)"),
         ],
