@@ -79,6 +79,7 @@ fn macos_samples() -> Vec<Sample> {
     let pid = std::process::id().to_string();
     let output = std::process::Command::new("ps")
         .args(["-o", "rss=,vsz=", "-p", &pid])
+        .stdin(std::process::Stdio::null())
         .output();
 
     let mut out = Vec::new();

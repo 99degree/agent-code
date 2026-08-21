@@ -861,6 +861,7 @@ async fn async_main() -> anyhow::Result<()> {
                     &format!("x-api-key: {check_key}"),
                     &check_url,
                 ])
+                .stdin(std::process::Stdio::null())
                 .output()
                 .await
                 .ok()

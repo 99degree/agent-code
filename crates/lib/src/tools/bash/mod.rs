@@ -279,11 +279,16 @@ impl Tool for BashTool {
             return run_background(command, &ctx.cwd, ctx.task_manager.as_ref()).await;
         }
 
-        // Build the base bash command.
+        // Build the base bash command. stdin is nulled: the TUI reads the
+        // pty through crossterm, so an inherited stdin would let the child
+        // (e.g. `sed`, `cat`, `ssh`) steal the user's keystrokes and freeze
+        // the UI until the process exits. Null stdin also gives stdin-readers
+        // an immediate EOF instead of hanging on a tty nobody feeds.
         let mut base = Command::new("bash");
         base.arg("-c")
             .arg(command)
             .current_dir(&ctx.cwd)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 

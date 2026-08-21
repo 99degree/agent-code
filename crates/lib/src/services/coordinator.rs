@@ -796,6 +796,7 @@ fn build_agent_command(
     cmd.arg("--prompt")
         .arg(full_prompt)
         .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 

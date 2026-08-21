@@ -22,6 +22,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::process::Stdio;
 
 use sha2::{Digest, Sha256};
 
@@ -144,6 +145,7 @@ pub fn head_commit(repo_root: &Path) -> Option<String> {
         .arg("-C")
         .arg(repo_root)
         .args(["rev-parse", "HEAD"])
+        .stdin(Stdio::null())
         .output()
         .ok()?;
     if !out.status.success() {
@@ -164,6 +166,7 @@ pub fn worktree_is_clean(repo_root: &Path) -> bool {
         .arg("-C")
         .arg(repo_root)
         .args(["status", "--porcelain"])
+        .stdin(Stdio::null())
         .output()
     {
         Ok(out) => out.status.success() && out.stdout.is_empty(),
@@ -193,6 +196,7 @@ pub fn changed_files_since(repo_root: &Path, base: &str) -> Option<BTreeSet<Path
         .arg("-C")
         .arg(repo_root)
         .args(["diff", "--name-only", "-z", &format!("{base}..HEAD")])
+        .stdin(Stdio::null())
         .output()
         .ok()?;
     if !diff.status.success() {
@@ -210,6 +214,7 @@ pub fn changed_files_since(repo_root: &Path, base: &str) -> Option<BTreeSet<Path
         .arg("-C")
         .arg(repo_root)
         .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .stdin(Stdio::null())
         .output()
         && status.status.success()
     {
@@ -229,6 +234,7 @@ fn git_show_prefix(repo_root: &Path) -> String {
         .arg("-C")
         .arg(repo_root)
         .args(["rev-parse", "--show-prefix"])
+        .stdin(Stdio::null())
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -390,6 +396,7 @@ mod tests {
                 .arg("-C")
                 .arg(dir)
                 .args(args)
+                .stdin(Stdio::null())
                 .output()
                 .unwrap()
                 .status
@@ -453,6 +460,7 @@ mod tests {
                 .arg("-C")
                 .arg(dir)
                 .args(args)
+                .stdin(Stdio::null())
                 .output()
                 .unwrap()
                 .status

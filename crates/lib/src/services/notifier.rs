@@ -328,7 +328,7 @@ fn detached_spawn(mut cmd: tokio::process::Command) {
     // sigkill an in-flight notification daemon mid-write. The child is
     // owned by a one-shot tokio task that awaits its exit — that is
     // what reaps the zombie on unix without blocking the call site.
-    cmd.kill_on_drop(false);
+    cmd.kill_on_drop(false).stdin(std::process::Stdio::null());
     let spawned = cmd.spawn();
     match spawned {
         Ok(child) => {
@@ -390,6 +390,7 @@ async fn reap_child(mut child: tokio::process::Child) {
 fn which(binary: &str) -> bool {
     std::process::Command::new("which")
         .arg(binary)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -401,6 +402,7 @@ fn which(binary: &str) -> bool {
 fn powershell_available() -> bool {
     std::process::Command::new("where.exe")
         .arg("powershell.exe")
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()

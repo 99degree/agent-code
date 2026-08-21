@@ -350,7 +350,10 @@ impl TaskManager {
         self.cancels.lock().await.insert(id.clone(), cancel.clone());
 
         // Capture output and isolate the process group for killability.
-        cmd.stdout(std::process::Stdio::piped())
+        // stdin is nulled so a background task can never consume the
+        // interactive pty (same rationale as the foreground Bash tool).
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         #[cfg(unix)]
         cmd.process_group(0);
