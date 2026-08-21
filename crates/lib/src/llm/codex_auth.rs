@@ -165,6 +165,13 @@ impl CodexChatGptAuth {
         }
 
         let body = response.text().await.unwrap_or_default();
+        // 503 is a transient server error, not an auth failure — let the
+        // retry loop handle it as a network error.
+        if status.as_u16() == 503 {
+            return Err(ProviderError::Network(format!(
+                "Codex ChatGPT token refresh service unavailable (HTTP 503): {body}"
+            )));
+        }
         Err(ProviderError::Auth(format!(
             "Codex ChatGPT token refresh failed ({status}): {}",
             refresh_error_message(&body)

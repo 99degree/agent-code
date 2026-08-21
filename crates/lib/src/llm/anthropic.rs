@@ -182,7 +182,7 @@ impl Provider for AnthropicProvider {
                         retry_after_ms: retry,
                     })
                 }
-                529 => Err(ProviderError::Overloaded),
+                529 | 503 => Err(ProviderError::Overloaded),
                 413 => Err(ProviderError::RequestTooLarge(body_text)),
                 _ => Err(ProviderError::Network(format!("{status}: {body_text}"))),
             };

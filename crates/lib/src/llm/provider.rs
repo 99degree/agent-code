@@ -194,7 +194,10 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
             ("hy3-free", "Tencent Hy3 · Free"),
             ("mimo-v2.5-free", "MiMo 2.5 · Free"),
             ("nemotron-3-ultra-free", "Nemotron 3 Ultra · Free"),
-            ("nemotron-3.5-lightning-free", "Nemotron 3.5 Lightning · Free"),
+            (
+                "nemotron-3.5-lightning-free",
+                "Nemotron 3.5 Lightning · Free",
+            ),
             ("x-preview-f-free", "x-preview-f · Free preview"),
             ("muse-spark-1.2-contributor-free", "Muse Spark 1.2 · Free"),
             ("laguna-s-2.1-free", "Laguna S 2.1 · Free"),

@@ -18,7 +18,7 @@ pub struct RetryConfig {
     pub max_backoff: Duration,
     /// Backoff multiplier (exponential).
     pub multiplier: f64,
-    /// Maximum 529 (overloaded) retries before falling back.
+    /// Maximum 529/503 (overloaded) retries before falling back.
     pub max_overload_retries: u32,
     /// Maximum retry-after duration we'll accept from the API (milliseconds).
     /// If the API specifies a longer wait, we abort instead of retrying.
@@ -54,7 +54,7 @@ pub struct RetryState {
     pub consecutive_failures: u32,
     /// Number of 429 (rate limit) retries.
     pub rate_limit_retries: u32,
-    /// Number of 529 (overload) retries.
+    /// Number of 529/503 (overload) retries.
     pub overload_retries: u32,
     /// Whether we've fallen back to the smaller model.
     pub using_fallback: bool,
