@@ -1753,6 +1753,14 @@ impl QueryEngine {
             // emit into the same pipe the later executor path drains.
             let (tool_event_tx, mut tool_event_rx) = crate::tools::event_sink::tool_event_channel();
             let mut content_blocks = Vec::new();
+            // Text accumulated from `TextDelta`s that have not yet been
+            // finalized by a `ContentBlockComplete`. Tracked so a cancel
+            // mid-stream can persist the partial reply the user already saw
+            // on screen (otherwise it lives only in the UI transcript and
+            // is lost when the process exits). Cleared when the block
+            // completes; reset is unnecessary on cancel since the whole
+            // streaming state dies with the function.
+            let mut pending_text = String::new();
             let mut usage = Usage::default();
             let mut stop_reason: Option<StopReason> = None;
             let mut got_error = false;
@@ -1772,6 +1780,7 @@ impl QueryEngine {
                         match event {
                             Some(StreamEvent::TextDelta(text)) => {
                                 sink.on_text(&text);
+                                pending_text.push_str(&text);
                             }
                             Some(StreamEvent::ContentBlockComplete(block)) => {
                                 if let ContentBlock::ToolUse {
@@ -1902,6 +1911,13 @@ impl QueryEngine {
                                 if let ContentBlock::Thinking { ref thinking, .. } = block {
                                     sink.on_thinking(thinking);
                                 }
+                                if let ContentBlock::Text { .. } = block {
+                                    // The completed block carries the full text,
+                                    // so the in-flight delta buffer is now
+                                    // redundant (and would double-count on a
+                                    // cancel that follows immediately after).
+                                    pending_text.clear();
+                                }
                                 content_blocks.push(block);
                             }
                             Some(StreamEvent::Done {
@@ -1945,6 +1961,18 @@ impl QueryEngine {
                 // Record the partial assistant message so the next turn has a
                 // consistent history (assistant + tool_result pairs). Without
                 // this, orphaned tool_use blocks 400 the next API call.
+                //
+                // Capture the in-flight text the user already saw on screen
+                // (delivered only as `TextDelta`, never assembled into a
+                // `ContentBlockComplete` before the cancel). Without this the
+                // partial reply would live only in the UI transcript and be
+                // lost on exit, leaving the next/resume session without the
+                // tail of the cancelled message.
+                if !pending_text.is_empty() {
+                    content_blocks.push(ContentBlock::Text {
+                        text: pending_text.clone(),
+                    });
+                }
                 if !content_blocks.is_empty() {
                     let assistant_msg = Message::Assistant(AssistantMessage {
                         uuid: Uuid::new_v4(),
@@ -4060,6 +4088,73 @@ mod tests {
         );
     }
 
+    /// Verifies that a mid-stream cancel persists the partial text the user
+    /// already saw on screen, instead of recording an empty assistant message.
+    /// Regression for the "Ctrl+C then Ctrl+D loses the last reply" symptom:
+    /// `TextDelta`s were forwarded to the sink but never assembled into
+    /// `content_blocks`, so a cancelled in-flight reply left no text behind.
+    #[tokio::test]
+    async fn cancelled_streaming_turn_persists_partial_text() {
+        // Emits a couple TextDeltas ("partial..."), then hangs. The cancel
+        // should still capture those deltas into the assistant message.
+        struct PartialThenHangProvider;
+        #[async_trait::async_trait]
+        impl Provider for PartialThenHangProvider {
+            fn name(&self) -> &str {
+                "partial-then-hang-mock"
+            }
+            async fn stream(
+                &self,
+                _request: &ProviderRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>, ProviderError> {
+                let (tx, rx) = tokio::sync::mpsc::channel(8);
+                tokio::spawn(async move {
+                    let _ = tx.send(StreamEvent::TextDelta("partial... ".into())).await;
+                    let _ = tx.send(StreamEvent::TextDelta("more partial".into())).await;
+                    // Hang forever — no ContentBlockComplete, no Done.
+                    let _tx_holder = tx;
+                    std::future::pending::<()>().await;
+                });
+                Ok(rx)
+            }
+        }
+
+        let mut engine = build_engine(Arc::new(PartialThenHangProvider));
+        schedule_cancel(&engine, 80);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            engine.run_turn_with_sink("interrupt me", &NullSink),
+        )
+        .await;
+        assert!(result.is_ok(), "cancelled turn should not hang");
+        assert!(result.unwrap().is_ok());
+
+        // The cancelled assistant message must contain the deltas the user
+        // saw, joined into a Text content block.
+        let last = engine
+            .state()
+            .messages
+            .last()
+            .expect("an assistant message was pushed");
+        let assistant_text = match last {
+            crate::llm::message::Message::Assistant(a) => a.content.iter().find_map(|b| {
+                if let crate::llm::message::ContentBlock::Text { text } = b {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            }),
+            _ => None,
+        };
+        let text = assistant_text.expect(
+            "cancelled streaming turn should leave an assistant message with captured text",
+        );
+        assert!(
+            text.contains("partial...") && text.contains("more partial"),
+            "partial delta text should be persisted on cancel, got: {text:?}"
+        );
+    }
     /// Verifies that cancelling BEFORE any event arrives still interrupts
     /// the turn cleanly (edge case: cancellation races with the first recv).
     #[tokio::test]
