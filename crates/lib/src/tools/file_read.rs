@@ -183,6 +183,7 @@ impl Tool for FileReadTool {
 async fn read_pdf(file_path: &str, pages: Option<&str>) -> Result<ToolResult, ToolError> {
     // Build pdftotext command with optional page range.
     let mut cmd = tokio::process::Command::new("pdftotext");
+    cmd.stdin(std::process::Stdio::null());
 
     if let Some(page_spec) = pages {
         // Parse page spec like "1-5", "3", "10-20".

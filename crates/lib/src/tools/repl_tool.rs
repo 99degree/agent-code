@@ -92,6 +92,10 @@ impl Tool for ReplTool {
             .arg(flag)
             .arg(code)
             .current_dir(&ctx.cwd)
+            // Null stdin: in the TUI the parent's stdin is the user's terminal
+            // (raw mode); an inherited fd would let an interactive REPL read
+            // keystrokes and freeze the UI. Null gives an immediate EOF.
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()

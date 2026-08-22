@@ -70,6 +70,12 @@ pub fn run_and_capture(
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
+        // stdin is nulled: in the TUI the agent's process stdin is the user's
+        // terminal (raw mode), so an inherited stdin would let a command that
+        // reads from it (e.g. `cat`, `ssh`, `read`) steal the user's keystrokes
+        // and freeze the UI until the process exits. Null also gives
+        // stdin-readers an immediate EOF instead of hanging on an unattended tty.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
