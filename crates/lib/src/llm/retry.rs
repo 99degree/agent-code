@@ -385,6 +385,33 @@ mod tests {
     }
 
     #[test]
+    fn test_network_error_retries_then_aborts() {
+        let mut state = RetryState::default();
+        let config = RetryConfig {
+            max_retries: 2,
+            ..Default::default()
+        };
+        let err = RetryableError::Network;
+
+        // First two transport failures should retry with backoff.
+        match state.next_action(&err, &config) {
+            RetryAction::Retry { .. } => {}
+            other => panic!("Expected Retry, got {other:?}"),
+        }
+        match state.next_action(&err, &config) {
+            RetryAction::Retry { .. } => {}
+            other => panic!("Expected Retry, got {other:?}"),
+        }
+
+        // Third failure exceeds max_retries => abort, so the turn stops
+        // instead of looping forever on an unreachable endpoint.
+        match state.next_action(&err, &config) {
+            RetryAction::Abort(msg) => assert!(msg.contains("Network")),
+            other => panic!("Expected Abort, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_retry_state_default_values() {
         let state = RetryState::default();
         assert_eq!(state.consecutive_failures, 0);

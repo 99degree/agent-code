@@ -1551,7 +1551,15 @@ impl QueryEngine {
                                 crate::llm::retry::RetryableError::Overloaded
                             }
                             ProviderError::Network(_) => {
-                                crate::llm::retry::RetryableError::StreamInterrupted
+                                // Transport failure before/at the request — no
+                                // status code exists to map (DNS, connection,
+                                // TLS, or the request never left the box). The
+                                // higher-level parser only handles JSON error
+                                // bodies, so this is surfaced as a raw string.
+                                // Classify as a network retry so the existing
+                                // backoff counter applies and the turn aborts
+                                // once retries are exhausted.
+                                crate::llm::retry::RetryableError::Network
                             }
                             other => {
                                 crate::llm::retry::RetryableError::NonRetryable(other.to_string())

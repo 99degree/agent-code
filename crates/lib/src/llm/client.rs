@@ -269,7 +269,7 @@ impl LlmClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(|e| LlmError::Http(format!("request: {e} (url: {url})")))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -312,7 +312,9 @@ impl LlmClient {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+                        let _ = tx
+                            .send(StreamEvent::Error(format!("stream read error: {e}")))
+                            .await;
                         break;
                     }
                 };

@@ -242,7 +242,7 @@ impl Provider for AzureOpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
+            .map_err(|e| ProviderError::Network(format!("chat/completions: {e} (url: {url})")))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -295,7 +295,9 @@ impl Provider for AzureOpenAiProvider {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+                        let _ = tx
+                            .send(StreamEvent::Error(format!("stream read error: {e}")))
+                            .await;
                         break;
                     }
                 };
@@ -492,7 +494,7 @@ impl Provider for AzureOpenAiProvider {
             .headers(headers)
             .send()
             .await
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
+            .map_err(|e| ProviderError::Network(format!("models: {e} (url: {url})")))?;
 
         let status = response.status();
         if !status.is_success() {
