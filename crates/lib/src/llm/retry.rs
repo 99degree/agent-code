@@ -30,6 +30,11 @@ pub struct RetryConfig {
     /// Retry-After header — a longer, seconds-scale wait gives transient
     /// instability time to clear instead of looping on a 1s backoff.
     pub network_backoff: Duration,
+    /// Maximum retry attempts for transport-level network failures. These are
+    /// unbounded by a Retry-After header and often reflect brief provider
+    /// instability, so they get a larger budget than `max_retries` (which
+    /// also covers stream/parse errors that tend to repeat on a bad payload).
+    pub max_network_retries: u32,
     /// Long-wait threshold (milliseconds). A 429 whose retry-after meets or
     /// exceeds this is treated as a long backoff the API wants us to honor by
     /// *stopping* — we abort rather than block for that long. Set to 0 to
@@ -50,6 +55,7 @@ impl Default for RetryConfig {
             // "stop and come back later" signal, not a retriable delay.
             long_wait_after_ms: 3_600_000,
             network_backoff: Duration::from_secs(5),
+            max_network_retries: 5,
         }
     }
 }
@@ -130,7 +136,7 @@ impl RetryState {
                 RetryAction::Retry { after: backoff }
             }
             RetryableError::Network => {
-                if self.consecutive_failures > config.max_retries {
+                if self.consecutive_failures > config.max_network_retries {
                     return RetryAction::Abort("Network error retry limit reached".into());
                 }
                 // Transport failures carry no status to derive a wait from, so
@@ -399,7 +405,7 @@ mod tests {
     fn test_network_error_retries_then_aborts() {
         let mut state = RetryState::default();
         let config = RetryConfig {
-            max_retries: 2,
+            max_network_retries: 2,
             ..Default::default()
         };
         let err = RetryableError::Network;
