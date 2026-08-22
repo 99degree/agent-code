@@ -1572,6 +1572,13 @@ impl QueryEngine {
                                 // "Retrying" — otherwise a persistent 402/429/500
                                 // is invisible even at RUST_LOG=debug.
                                 warn!("LLM call failed ({e}); retrying in {}ms", after.as_millis());
+                                // Surface transient transport failures to the
+                                // user too — a persistent network blip would
+                                // otherwise retry silently and look like a hang.
+                                sink.on_warning(&format!(
+                                    "Network error, retrying in {:.1}s",
+                                    after.as_secs_f64()
+                                ));
                                 // Backoff can reach 60s — racing the cancel
                                 // token keeps Ctrl+C responsive during it
                                 // (previously the sleep ran to completion and

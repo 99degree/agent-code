@@ -24,6 +24,12 @@ pub struct RetryConfig {
     /// If the API specifies a longer wait, we abort instead of retrying.
     /// Set to 0 to use the API's value regardless of duration.
     pub max_retry_after_ms: u64,
+    /// Backoff applied to transport-level network failures (DNS, TLS,
+    /// connection reset, request never left the box). These have no status
+    /// code to map, so unlike rate-limit/overload they can't be tuned off a
+    /// Retry-After header — a longer, seconds-scale wait gives transient
+    /// instability time to clear instead of looping on a 1s backoff.
+    pub network_backoff: Duration,
     /// Long-wait threshold (milliseconds). A 429 whose retry-after meets or
     /// exceeds this is treated as a long backoff the API wants us to honor by
     /// *stopping* — we abort rather than block for that long. Set to 0 to
@@ -43,6 +49,7 @@ impl Default for RetryConfig {
             // An hour: long enough that a 429 requesting this much wait is a
             // "stop and come back later" signal, not a retriable delay.
             long_wait_after_ms: 3_600_000,
+            network_backoff: Duration::from_secs(5),
         }
     }
 }
@@ -126,9 +133,13 @@ impl RetryState {
                 if self.consecutive_failures > config.max_retries {
                     return RetryAction::Abort("Network error retry limit reached".into());
                 }
+                // Transport failures carry no status to derive a wait from, so
+                // use the dedicated longer backoff (seconds-scale) rather than
+                // the short initial_backoff — this rides out transient blips
+                // instead of burning all retries on a 1s cadence.
                 let backoff = calculate_backoff(
                     self.consecutive_failures,
-                    config.initial_backoff,
+                    config.network_backoff,
                     config.max_backoff,
                     config.multiplier,
                 );
@@ -408,6 +419,25 @@ mod tests {
         match state.next_action(&err, &config) {
             RetryAction::Abort(msg) => assert!(msg.contains("Network")),
             other => panic!("Expected Abort, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_network_error_uses_longer_backoff() {
+        // Transport failures have no status to derive a wait from, so the
+        // network backoff (seconds-scale) should kick in on the first retry,
+        // not the short initial_backoff (1s).
+        let mut state = RetryState::default();
+        let config = RetryConfig::default();
+        match state.next_action(&RetryableError::Network, &config) {
+            RetryAction::Retry { after } => {
+                assert!(
+                    after.as_millis() >= 5000,
+                    "network retry should use seconds-scale backoff, got {}ms",
+                    after.as_millis()
+                );
+            }
+            other => panic!("Expected Retry, got {other:?}"),
         }
     }
 
