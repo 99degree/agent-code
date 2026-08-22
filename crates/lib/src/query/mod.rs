@@ -1647,7 +1647,8 @@ impl QueryEngine {
                                     // Consuming a turn keeps `max_turns` as the
                                     // bound, so a persistently-down provider still
                                     // terminates instead of hanging.
-                                    warn!("Unattended retry: waiting 30s for capacity");
+                                    let now = chrono::Local::now().format("%H:%M:%S");
+                                    warn!("Unattended retry: waiting 30s for capacity (at {now})");
                                     tokio::select! {
                                         _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
                                         _ = self.cancel.cancelled() => {
@@ -2004,9 +2005,12 @@ impl QueryEngine {
                     retry_config.initial_backoff.as_millis() as u64
                         * 2u64.saturating_pow(no_output_retry_count - 1).min(32),
                 );
+                // Stamp the local time so a delayed retry is easy to correlate
+                // against server logs (mirrors the network-retry warning).
+                let now = chrono::Local::now().format("%H:%M:%S");
                 sink.on_warning(&format!(
                     "No output from model within {}s — server busy or request queue \
-                     saturated. Retrying in {:.1}s (attempt {}/{})",
+                     saturated. Retrying in {:.1}s (attempt {}/{}) (at {now})",
                     self.state.config.api.timeout_secs,
                     backoff.as_secs_f64(),
                     no_output_retry_count,
