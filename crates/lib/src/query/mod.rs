@@ -1575,8 +1575,11 @@ impl QueryEngine {
                                 // Surface transient transport failures to the
                                 // user too — a persistent network blip would
                                 // otherwise retry silently and look like a hang.
+                                // Stamp the local time so a delayed retry is
+                                // easy to correlate against server logs.
+                                let now = chrono::Local::now().format("%H:%M:%S");
                                 sink.on_warning(&format!(
-                                    "Network error, retrying in {:.1}s",
+                                    "Network error, retrying in {:.1}s (at {now})",
                                     after.as_secs_f64()
                                 ));
                                 // Backoff can reach 60s — racing the cancel
