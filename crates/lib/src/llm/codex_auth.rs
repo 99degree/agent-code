@@ -154,7 +154,7 @@ impl CodexChatGptAuth {
             }))
             .send()
             .await
-            .map_err(|e| ProviderError::Network(format!("token refresh: {e} (url: {endpoint})")))?;
+            .map_err(|e| ProviderError::Network(format!("token refresh: {e}")))?;
 
         let status = response.status();
         if status.is_success() {

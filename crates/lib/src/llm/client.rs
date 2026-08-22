@@ -269,7 +269,7 @@ impl LlmClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| LlmError::Http(format!("request: {e} (url: {url})")))?;
+            .map_err(|e| LlmError::Http(format!("request: {e}")))?;
 
         let status = response.status();
         if !status.is_success() {
