@@ -1657,6 +1657,27 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             Ok(m) => m,
                             Err(e) => {
                                 eprintln!("Failed to fetch models for {kind:?}: {e}");
+                                // Record the failed fetch as a system message so
+                                // the next `/model` invocation retries it (the
+                                // cache only stores successes). No inline retry
+                                // here — surfacing the failure and letting the
+                                // next invocation re-attempt keeps the picker
+                                // responsive on a flaky endpoint.
+                                engine
+                                    .state_mut()
+                                    .messages
+                                    .push(agent_code_lib::llm::message::Message::System(
+                                        agent_code_lib::llm::message::SystemMessage {
+                                            uuid: uuid::Uuid::new_v4(),
+                                            timestamp: chrono::Utc::now().to_rfc3339(),
+                                            subtype:
+                                                agent_code_lib::llm::message::SystemMessageType::Informational,
+                                            content: format!(
+                                                "Failed to fetch live models for {kind:?}: {e}"
+                                            ),
+                                            level: agent_code_lib::llm::message::MessageLevel::Warning,
+                                        },
+                                    ));
                                 Vec::new()
                             }
                         }
