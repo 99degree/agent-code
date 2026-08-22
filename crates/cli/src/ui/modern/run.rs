@@ -858,6 +858,8 @@ fn restore_stdout_modes() {
 }
 
 fn restore_terminal(terminal: &mut Term) -> anyhow::Result<()> {
+    // Hand the terminal tab title back to the shell before tearing down modes.
+    restore_terminal_title();
     pop_keyboard_enhancement(terminal.backend_mut());
     execute!(
         terminal.backend_mut(),
@@ -904,6 +906,7 @@ fn with_main_screen<R>(f: impl FnOnce() -> R) -> R {
 fn install_panic_restore_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        restore_terminal_title();
         restore_stdout_modes();
         prev(info);
     }));
@@ -4465,7 +4468,6 @@ fn cwd_title(cwd: &str) -> String {
 
 /// OSC 0 window title: braille spinner + working dir when live; calm idle title.
 fn update_terminal_title(app: &App) {
-    use std::io::Write;
     let dir = sanitize_osc_title(&cwd_title(&app.cwd));
     let title = match app.phase {
         super::app::Phase::Streaming => {
@@ -4486,10 +4488,24 @@ fn update_terminal_title(app: &App) {
         _ => format!("agent · {dir}"),
     };
     let title = sanitize_osc_title(&title);
-    // OSC 0 ; title BEL
+    emit_terminal_title(&title);
+}
+
+/// Write an OSC 0 window title sequence (title BEL) to stdout.
+fn emit_terminal_title(title: &str) {
+    use std::io::Write;
     let seq = format!("\x1b]0;{title}\x07");
     let _ = std::io::stdout().write_all(seq.as_bytes());
     let _ = std::io::stdout().flush();
+}
+
+/// Restore the terminal tab title on exit by clearing the agent's `agent · <dir>`
+/// string. Termux (and xterm-style terminals) do not reliably report the
+/// previous title back, so rather than leave the agent's title lingering in the
+/// tab after the process ends, we clear it — the shell's prompt repaints the
+/// real title on the next command (plan §M7/§M9).
+fn restore_terminal_title() {
+    emit_terminal_title("");
 }
 
 /// Apply a UI session mode to the engine so it takes effect immediately —
