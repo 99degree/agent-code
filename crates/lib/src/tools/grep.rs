@@ -163,7 +163,7 @@ impl Tool for GrepTool {
 
         // Build ripgrep command.
         let mut cmd = Command::new("rg");
-        cmd.arg("--color=never");
+        cmd.arg("--color=never").stdin(Stdio::null());
 
         // Output mode determines base flags.
         match output_mode {
