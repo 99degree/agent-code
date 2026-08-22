@@ -384,7 +384,7 @@ impl OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::Network(format!("chat/completions: {e} (url: {url})")))?;
+            .map_err(|e| ProviderError::Network(format!("chat/completions: {e}")))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -445,7 +445,7 @@ impl OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::Network(format!("responses: {e} (url: {url})")))?;
+            .map_err(|e| ProviderError::Network(format!("responses: {e}")))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -509,7 +509,7 @@ impl Provider for OpenAiProvider {
             .headers(headers)
             .send()
             .await
-            .map_err(|e| ProviderError::Network(format!("models: {e} (url: {url})")))?;
+            .map_err(|e| ProviderError::Network(format!("models: {e}")))?;
 
         let status = response.status();
         if !status.is_success() {

@@ -242,7 +242,7 @@ impl Provider for AzureOpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::Network(format!("chat/completions: {e} (url: {url})")))?;
+            .map_err(|e| ProviderError::Network(format!("chat/completions: {e}")))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -494,7 +494,7 @@ impl Provider for AzureOpenAiProvider {
             .headers(headers)
             .send()
             .await
-            .map_err(|e| ProviderError::Network(format!("models: {e} (url: {url})")))?;
+            .map_err(|e| ProviderError::Network(format!("models: {e}")))?;
 
         let status = response.status();
         if !status.is_success() {

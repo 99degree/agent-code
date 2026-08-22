@@ -167,7 +167,7 @@ impl Provider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::Network(format!("messages: {e} (url: {url})")))?;
+            .map_err(|e| ProviderError::Network(format!("messages: {e}")))?;
 
         let status = response.status();
         if !status.is_success() {
