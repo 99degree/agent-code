@@ -104,7 +104,7 @@ impl CodexChatGptAuth {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
+            .map_err(|e| ProviderError::Network(format!("client build: {e}")))?;
 
         Ok(Self {
             auth_file,
@@ -145,7 +145,7 @@ impl CodexChatGptAuth {
             .unwrap_or_else(|_| REFRESH_TOKEN_URL.to_string());
         let response = self
             .http
-            .post(endpoint)
+            .post(&endpoint)
             .header("Content-Type", "application/json")
             .json(&serde_json::json!({
                 "client_id": CLIENT_ID,
@@ -154,7 +154,7 @@ impl CodexChatGptAuth {
             }))
             .send()
             .await
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
+            .map_err(|e| ProviderError::Network(format!("token refresh: {e} (url: {endpoint})")))?;
 
         let status = response.status();
         if status.is_success() {
