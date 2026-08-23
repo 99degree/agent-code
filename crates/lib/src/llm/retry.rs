@@ -7,6 +7,8 @@
 
 use std::time::Duration;
 
+use crate::llm::provider::ProviderKind;
+
 /// Retry configuration.
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -71,11 +73,28 @@ pub struct RetryState {
     pub overload_retries: u32,
     /// Whether we've fallen back to the smaller model.
     pub using_fallback: bool,
+    /// Whether we've already failed over from one provider to another
+    /// (e.g. OpenCode → Kilo) during this turn. Prevents ping-ponging
+    /// between the two providers on repeated failures.
+    pub using_failover: bool,
 }
 
 impl RetryState {
     /// Determine the next action after a failure.
-    pub fn next_action(&mut self, error: &RetryableError, config: &RetryConfig) -> RetryAction {
+    ///
+    /// `current_provider` is the provider the failing request was issued
+    /// to; if `error` is a model-availability failure with a matching
+    /// cross-provider failover rule ([`FAILOVER_RULES`]), this returns
+    /// [`RetryAction::Failover`] — but only when `using_failover` is false,
+    /// so a request fails over at most once per turn (no provider
+    /// ping-pong).
+    pub fn next_action(
+        &mut self,
+        error: &RetryableError,
+        config: &RetryConfig,
+        current_provider: ProviderKind,
+        using_failover: bool,
+    ) -> RetryAction {
         self.consecutive_failures += 1;
 
         match error {
@@ -152,6 +171,16 @@ impl RetryState {
                 RetryAction::Retry { after: backoff }
             }
             RetryableError::NonRetryable(msg) => RetryAction::Abort(msg.clone()),
+            // ModelUnavailable: try a cross-provider failover first; if none
+            // applies (no rule, wrong provider, or already failed over), the
+            // request is unrecoverable and we abort.
+            RetryableError::ModelUnavailable { .. } => {
+                if let Some(target) = error.failover_target(current_provider, using_failover) {
+                    RetryAction::Failover { target }
+                } else {
+                    RetryAction::Abort("model unavailable".into())
+                }
+            }
         }
     }
 
@@ -160,16 +189,27 @@ impl RetryState {
         self.consecutive_failures = 0;
         self.rate_limit_retries = 0;
         // Don't reset overload_retries or using_fallback — those persist.
+        // `using_failover` is per-turn, so it is also left intact
+        // here; the caller resets it between turns.
     }
 }
 
 /// Categorized error for retry logic.
 pub enum RetryableError {
-    RateLimited { retry_after: u64 },
+    RateLimited {
+        retry_after: u64,
+    },
     Overloaded,
     StreamInterrupted,
     Network,
     NonRetryable(String),
+    /// The provider rejected the request because the model is unavailable
+    /// or rate-limited *for that model*, and we have a cross-provider
+    /// failover rule. Carries the model name so the caller can look up
+    /// the target provider.
+    ModelUnavailable {
+        model: String,
+    },
 }
 
 /// Action the caller should take after a failure.
@@ -181,6 +221,141 @@ pub enum RetryAction {
     FallbackModel,
     /// Give up — unrecoverable.
     Abort(String),
+    /// Fail over to a different provider/model via a static rule (e.g.
+    /// OpenCode `laguna-s` → Kilo `kilo-alpha`). The caller must rebuild
+    /// the provider from the supplied target.
+    Failover { target: FailoverTarget },
+}
+
+/// Static failover rules: when a provider errors out on a model, retry
+/// the same request against another provider (its free/open mirror)
+/// instead of the smaller-model fallback.
+///
+/// Each rule fires when the *current* provider matches `from` and the
+/// failing model name contains `model_fragment`. The concrete Kilo mirror
+/// model id is resolved at runtime via a /models lookup (the exact names
+/// like `laguna-s-2.1:free` / `stealth/ox-alpha` change over time, so we
+/// do not hard-code them), and the request is repointed to that mirror.
+/// A request that has already failed over is never re-failed-over
+/// (`using_failover` guards against a ping-pong loop between providers).
+///
+/// Current rules (OpenCode Zen "free"/preview tiers → Kilo's mirror):
+/// - OpenCode `laguna-s` (e.g. `laguna-s-2.1:free`) → Kilo `laguna-s-2.1:free`
+/// - OpenCode `x-preview-f-free` → Kilo `stealth/ox-alpha`
+///
+/// The `search_fragment` differs from the trigger because Kilo's mirror
+/// model id does not share the OpenCode name (e.g. `x-preview-f-free`
+/// mirrors to `stealth/ox-alpha`). The caller resolves the exact id from
+/// Kilo's live `/models` list using `search_fragment`.
+const FAILOVER_RULES: &[FailoverRule] = &[
+    FailoverRule {
+        from: ProviderKind::OpenCode,
+        to: ProviderKind::Kilo,
+        trigger_fragment: "laguna-s",
+        search_fragment: "laguna-s",
+    },
+    FailoverRule {
+        from: ProviderKind::OpenCode,
+        to: ProviderKind::Kilo,
+        trigger_fragment: "x-preview-f-free",
+        search_fragment: "ox-alpha",
+    },
+];
+
+/// One entry in the cross-provider failover table.
+pub struct FailoverRule {
+    /// Provider the failing request was issued to.
+    pub from: ProviderKind,
+    /// Provider to retry against.
+    pub to: ProviderKind,
+    /// Substring of the *failing OpenCode model* name that triggers this
+    /// rule (matched case-insensitively).
+    pub trigger_fragment: &'static str,
+    /// Substring to match against the failover provider's live `/models`
+    /// list to find the concrete mirror model id.
+    pub search_fragment: &'static str,
+}
+
+/// A resolved failover target: the provider and model *hint* the next
+/// attempt should use when `RetryAction::Failover` is returned. The
+/// `model_hint` is the failing model's fragment (e.g. `laguna-s`); the
+/// caller resolves it to the failover provider's actual mirror model id
+/// via a live /models lookup before issuing the request, so we never
+/// hard-code a name that may have changed.
+#[derive(Debug, Clone)]
+pub struct FailoverTarget {
+    /// Provider kind to issue the repointed request to.
+    pub provider: ProviderKind,
+    /// Fragment of the failing model name that triggered the rule; the
+    /// caller turns this into the failover provider's real mirror id.
+    pub model_hint: String,
+}
+
+impl RetryAction {
+    /// Whether this action represents a provider-level failover (the
+    /// caller must rebuild the provider from a static rule), distinct
+    /// from a model-only `FallbackModel`.
+    pub fn is_failover(&self) -> bool {
+        matches!(self, RetryAction::Failover { .. })
+    }
+}
+
+impl RetryableError {
+    /// Map a raw provider error into a retryable category, surfacing
+    /// model-availability failures (OpenAI-compatible 404/400 on an
+    /// unknown or bad-request model) as [`ModelUnavailable`] so the
+    /// static failover table can repoint the request at another provider.
+    pub fn classify(e: &crate::llm::provider::ProviderError) -> Self {
+        match e {
+            crate::llm::provider::ProviderError::RateLimited { retry_after_ms } => {
+                RetryableError::RateLimited {
+                    retry_after: *retry_after_ms,
+                }
+            }
+            crate::llm::provider::ProviderError::Overloaded => RetryableError::Overloaded,
+            crate::llm::provider::ProviderError::Network(_) => RetryableError::StreamInterrupted,
+            crate::llm::provider::ProviderError::InvalidResponse(msg)
+            | crate::llm::provider::ProviderError::RequestTooLarge(msg) => {
+                // OpenAI-compatible servers emit 404 on an unknown model and
+                // 400 on a bad-request model, both surfaced here. Treat either
+                // as "model unavailable" so failover can kick in.
+                RetryableError::ModelUnavailable { model: msg.clone() }
+            }
+            crate::llm::provider::ProviderError::Auth(msg) => {
+                RetryableError::NonRetryable(msg.clone())
+            }
+        }
+    }
+
+    /// Resolve a cross-provider failover for this error, honoring the
+    /// static [`FAILOVER_RULES`] table. Returns `None` if the error is
+    /// not a model-availability failure, the current provider has no
+    /// rule, the failing model name matches no rule, or the caller has
+    /// already failed over (to prevent a ping-pong loop between two
+    /// providers on repeated failures).
+    pub fn failover_target(
+        &self,
+        current_provider: ProviderKind,
+        using_failover: bool,
+    ) -> Option<FailoverTarget> {
+        let RetryableError::ModelUnavailable { model } = self else {
+            return None;
+        };
+        // Only one failover per turn — prevents provider ping-pong.
+        if using_failover {
+            return None;
+        }
+        let needle = model.to_lowercase();
+        for rule in FAILOVER_RULES {
+            if rule.from == current_provider && needle.contains(rule.trigger_fragment) {
+                return Some(FailoverTarget {
+                    provider: rule.to,
+                    model_hint: rule.search_fragment.to_string(),
+                });
+            }
+        }
+        None
+    }
 }
 
 /// Calculate exponential backoff with jitter.
@@ -249,7 +424,7 @@ mod tests {
         let mut state = RetryState::default();
         let config = RetryConfig::default();
         let err = RetryableError::RateLimited { retry_after: 500 };
-        match state.next_action(&err, &config) {
+        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
             RetryAction::Retry { after } => assert!(after.as_millis() >= 500),
             other => panic!("Expected Retry, got {other:?}"),
         }
@@ -263,8 +438,8 @@ mod tests {
             ..Default::default()
         };
         let err = RetryableError::RateLimited { retry_after: 100 };
-        let _ = state.next_action(&err, &config); // First retry.
-        match state.next_action(&err, &config) {
+        let _ = state.next_action(&err, &config, ProviderKind::OpenAi, false); // First retry.
+        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
             RetryAction::Abort(_) => {}
             other => panic!("Expected Abort, got {other:?}"),
         }
@@ -275,7 +450,7 @@ mod tests {
         let mut state = RetryState::default();
         let config = RetryConfig::default();
         let err = RetryableError::NonRetryable("bad request".into());
-        match state.next_action(&err, &config) {
+        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
             RetryAction::Abort(msg) => assert!(msg.contains("bad request")),
             other => panic!("Expected Abort, got {other:?}"),
         }
@@ -289,9 +464,9 @@ mod tests {
             ..Default::default()
         };
         let err = RetryableError::Overloaded;
-        let _ = state.next_action(&err, &config);
-        let _ = state.next_action(&err, &config);
-        match state.next_action(&err, &config) {
+        let _ = state.next_action(&err, &config, ProviderKind::OpenAi, false);
+        let _ = state.next_action(&err, &config, ProviderKind::OpenAi, false);
+        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
             RetryAction::FallbackModel => {}
             other => panic!("Expected FallbackModel, got {other:?}"),
         }
@@ -332,6 +507,7 @@ mod tests {
             rate_limit_retries: 5,
             overload_retries: 2,
             using_fallback: false,
+            using_failover: false,
         };
         state.reset();
         assert_eq!(state.rate_limit_retries, 0);
@@ -350,26 +526,26 @@ mod tests {
         let err = RetryableError::Overloaded;
 
         // First overload: retry with backoff.
-        match state.next_action(&err, &config) {
+        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
             RetryAction::Retry { .. } => {}
             other => panic!("Expected Retry, got {other:?}"),
         }
 
         // Second overload: exceeds max_overload_retries, triggers fallback.
-        match state.next_action(&err, &config) {
+        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
             RetryAction::FallbackModel => {}
             other => panic!("Expected FallbackModel, got {other:?}"),
         }
         assert!(state.using_fallback);
 
         // Now on fallback model, overload again: retry.
-        match state.next_action(&err, &config) {
+        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
             RetryAction::Retry { .. } => {}
             other => panic!("Expected Retry on fallback, got {other:?}"),
         }
 
         // Exceed overloads on fallback: abort.
-        match state.next_action(&err, &config) {
+        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
             RetryAction::Abort(msg) => assert!(msg.contains("fallback")),
             other => panic!("Expected Abort, got {other:?}"),
         }
@@ -385,17 +561,17 @@ mod tests {
         let err = RetryableError::StreamInterrupted;
 
         // First two interruptions should retry.
-        match state.next_action(&err, &config) {
+        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
             RetryAction::Retry { .. } => {}
             other => panic!("Expected Retry, got {other:?}"),
         }
-        match state.next_action(&err, &config) {
+        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
             RetryAction::Retry { .. } => {}
             other => panic!("Expected Retry, got {other:?}"),
         }
 
         // Third interruption exceeds max_retries => abort.
-        match state.next_action(&err, &config) {
+        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
             RetryAction::Abort(msg) => assert!(msg.contains("Stream")),
             other => panic!("Expected Abort, got {other:?}"),
         }
@@ -454,5 +630,95 @@ mod tests {
         assert_eq!(state.rate_limit_retries, 0);
         assert_eq!(state.overload_retries, 0);
         assert!(!state.using_fallback);
+    }
+
+    #[test]
+    fn test_classify_maps_model_404_to_unavailable() {
+        use crate::llm::provider::ProviderError;
+        // OpenAI-compatible servers surface an unknown model as a 404
+        // InvalidResponse; failover should treat it as ModelUnavailable.
+        let err = ProviderError::InvalidResponse("model laguna-s not found".into());
+        let retryable = RetryableError::classify(&err);
+        assert!(matches!(
+            retryable,
+            RetryableError::ModelUnavailable { model } if model.contains("laguna-s")
+        ));
+    }
+
+    #[test]
+    fn test_failover_opencode_laguna_to_kilo() {
+        let err = RetryableError::ModelUnavailable {
+            model: "opencode:laguna-s".into(),
+        };
+        let target = err.failover_target(ProviderKind::OpenCode, false);
+        match target {
+            Some(t) => {
+                assert_eq!(t.provider, ProviderKind::Kilo);
+                assert_eq!(t.model_hint, "laguna-s");
+            }
+            None => panic!("expected OpenCode laguna-s → Kilo failover"),
+        }
+    }
+
+    #[test]
+    fn test_failover_opencode_x_preview_to_kilo() {
+        let err = RetryableError::ModelUnavailable {
+            model: "x-preview-f-free".into(),
+        };
+        let target = err.failover_target(ProviderKind::OpenCode, false);
+        match target {
+            Some(t) => {
+                assert_eq!(t.provider, ProviderKind::Kilo);
+                assert_eq!(t.model_hint, "ox-alpha");
+            }
+            None => panic!("expected OpenCode x-preview-f-free → Kilo failover"),
+        }
+    }
+
+    #[test]
+    fn test_failover_does_not_apply_to_non_opencode() {
+        let err = RetryableError::ModelUnavailable {
+            model: "laguna-s".into(),
+        };
+        assert!(err.failover_target(ProviderKind::OpenAi, false).is_none());
+    }
+
+    #[test]
+    fn test_failover_only_once_per_turn() {
+        let err = RetryableError::ModelUnavailable {
+            model: "laguna-s".into(),
+        };
+        // After a failover, the next ModelUnavailable on the same turn must
+        // not produce another failover target (prevents provider ping-pong).
+        assert!(err.failover_target(ProviderKind::OpenCode, true).is_none());
+    }
+
+    #[test]
+    fn test_next_action_falls_over_when_rule_matches() {
+        let mut state = RetryState::default();
+        let config = RetryConfig::default();
+        let err = RetryableError::ModelUnavailable {
+            model: "laguna-s".into(),
+        };
+        match state.next_action(&err, &config, ProviderKind::OpenCode, false) {
+            RetryAction::Failover { target } => {
+                assert_eq!(target.provider, ProviderKind::Kilo);
+                assert_eq!(target.model_hint, "laguna-s");
+            }
+            other => panic!("Expected Failover, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_next_action_aborts_when_no_rule() {
+        let mut state = RetryState::default();
+        let config = RetryConfig::default();
+        let err = RetryableError::ModelUnavailable {
+            model: "some-other-model".into(),
+        };
+        match state.next_action(&err, &config, ProviderKind::OpenCode, false) {
+            RetryAction::Abort(_) => {}
+            other => panic!("Expected Abort, got {other:?}"),
+        }
     }
 }
