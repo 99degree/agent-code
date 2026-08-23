@@ -337,7 +337,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "subagent",
         aliases: &[],
-        description: "Show or change the default sub-agent model",
+        description: "Show or change the default sub-agent model/provider",
         hidden: false,
     },
     Command {
@@ -1319,10 +1319,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                         state.config.api.effort.clone(),
                         &state.additional_dirs,
                         state.pre_fast_model.clone(),
-                        state
-                            .disk_output_style
-                            .as_ref()
-                            .map(|s| s.name.clone()),
+                        state.disk_output_style.as_ref().map(|s| s.name.clone()),
                     );
                 }
             }
@@ -1912,18 +1909,92 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             CommandResult::Handled
         }
         Some("subagent") => {
-            if let Some(new_model) = args {
-                engine.state_mut().config.api.subagent_model = Some(new_model.to_string());
-                println!("Sub-agent model changed to: {new_model}");
+            let api = &mut engine.state_mut().config.api;
+            if let Some(raw) = args {
+                let raw = raw.trim();
+                // `clear` / `off` / `reset` inherit the parent for every field.
+                if raw.eq_ignore_ascii_case("clear")
+                    || raw.eq_ignore_ascii_case("off")
+                    || raw.eq_ignore_ascii_case("reset")
+                {
+                    api.subagent_model = None;
+                    api.subagent_base_url = None;
+                    api.subagent_auth_mode = None;
+                    println!("Sub-agent endpoint reset — subagents now inherit the main session.");
+                    return CommandResult::Handled;
+                }
+
+                // Parse `#provider` and/or `#model` tokens. A leading `#`
+                // names a provider when it resolves to a known provider
+                // kind; otherwise it is treated as a raw model id.
+                let mut provider: Option<ProviderKind> = None;
+                let mut model: Option<String> = None;
+                for tok in raw.split_whitespace() {
+                    let tok = tok.trim();
+                    if let Some(name) = tok.strip_prefix('#') {
+                        match ProviderKind::from_name(name) {
+                            Some(k) => provider = Some(k),
+                            None => model = Some(name.to_string()),
+                        }
+                    } else {
+                        model = Some(tok.to_string());
+                    }
+                }
+
+                if provider.is_none() && model.is_none() {
+                    println!(
+                        "Usage: /subagent #<provider> [<model>] | /subagent <model> | /subagent clear"
+                    );
+                    return CommandResult::Handled;
+                }
+
+                if let Some(kind) = provider {
+                    if let Some(url) = kind.default_base_url() {
+                        api.subagent_base_url = Some(url.to_string());
+                    } else {
+                        println!(
+                            "Provider `{}` has no default base URL; subagent base URL left unchanged.",
+                            kind.as_name()
+                        );
+                    }
+                    // Seed a default model unless the call also names one.
+                    if model.is_none()
+                        && let Some(def) = kind.default_model()
+                    {
+                        api.subagent_model = Some(def.to_string());
+                    }
+                }
+                if let Some(m) = model {
+                    api.subagent_model = Some(
+                        agent_code_lib::services::coordinator::resolve_model_alias(&m),
+                    );
+                }
+                let model_now = api
+                    .subagent_model
+                    .as_deref()
+                    .unwrap_or("(inherits main model)");
+                let url_now = api
+                    .subagent_base_url
+                    .as_deref()
+                    .unwrap_or("(inherits main endpoint)");
+                println!("Sub-agent model: {model_now}\nSub-agent endpoint: {url_now}");
             } else {
-                let current = engine
-                    .state()
-                    .config
-                    .api
+                let api = &engine.state().config.api;
+                let model = api
                     .subagent_model
                     .as_deref()
                     .unwrap_or("(not set — inherits main model)");
-                println!("Sub-agent model: {current}");
+                let url = api
+                    .subagent_base_url
+                    .as_deref()
+                    .unwrap_or("(not set — inherits main endpoint)");
+                let auth = api
+                    .subagent_auth_mode
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_else(|| "(not set — inherits main auth)".to_string());
+                println!(
+                    "Sub-agent model: {model}\nSub-agent endpoint: {url}\nSub-agent auth: {auth}"
+                );
             }
             CommandResult::Handled
         }
@@ -2775,10 +2846,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 state.config.api.effort.clone(),
                 &state.additional_dirs,
                 state.pre_fast_model.clone(),
-                state
-                    .disk_output_style
-                    .as_ref()
-                    .map(|s| s.name.clone()),
+                state.disk_output_style.as_ref().map(|s| s.name.clone()),
             ) {
                 Ok(_) => {
                     println!("Forked conversation at message {msg_count} -> session {fork_id}",);
