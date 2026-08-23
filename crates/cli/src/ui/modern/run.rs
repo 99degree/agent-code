@@ -1670,6 +1670,29 @@ pub(super) async fn event_loop(
                             if !data.base_url.is_empty() {
                                 st.config.api.base_url = data.base_url.clone();
                             }
+                            // Restore the per-session environment the conversation
+                            // was produced in (effort selection, extra working
+                            // dirs, fast-model override, disk output style). These
+                            // are not engine defaults — they are choices the
+                            // session made — so a `/resume` must not silently
+                            // revert them to the process startup values.
+                            if let Some(ref e) = data.effort {
+                                if !e.is_empty() {
+                                    st.config.api.effort = Some(e.clone());
+                                }
+                            }
+                            st.additional_dirs = data.additional_dirs.clone();
+                            st.pre_fast_model = data.pre_fast_model.clone();
+                            if let Some(ref style_name) = data.disk_output_style {
+                                if let Some(style) = agent_code_lib::output_styles::OutputStyleRegistry::load_all(
+                                    Some(std::path::Path::new(&st.cwd)),
+                                )
+                                .find(style_name)
+                                {
+                                    st.response_style = agent_code_lib::state::ResponseStyle::Default;
+                                    st.disk_output_style = Some(style.clone());
+                                }
+                            }
                         }
                         // "Allow for this session" grants belong to the
                         // conversation they were given in. The engine is
@@ -1900,6 +1923,13 @@ pub(super) async fn event_loop(
                             &state.cwd,
                         ))
                         .unwrap_or_default(),
+                        state.config.api.effort.clone(),
+                        &state.additional_dirs,
+                        state.pre_fast_model.clone(),
+                        state
+                            .disk_output_style
+                            .as_ref()
+                            .map(|s| s.name.clone()),
                     );
                 }
             }
@@ -2772,6 +2802,14 @@ struct SessionSnapshot {
     response_style: String,
     base_url: String,
     repo: String,
+    /// Reasoning effort at save time (so `/resume` re-applies `--effort high`).
+    effort: Option<String>,
+    /// `/add-dir` working set at save time.
+    additional_dirs: Vec<String>,
+    /// Pre-`/fast` model, so fast mode can be re-entered on resume.
+    pre_fast_model: Option<String>,
+    /// Active disk output style id at save time (re-loaded from disk on resume).
+    disk_output_style: Option<String>,
 }
 
 /// Copy the live conversation out of the engine, or `None` when there is
@@ -2807,6 +2845,13 @@ fn session_snapshot(eng: &agent_code_lib::query::QueryEngine) -> Option<SessionS
         base_url: st.config.api.base_url.clone(),
         repo: agent_code_lib::services::git::repo_name_sync(std::path::Path::new(&st.cwd))
             .unwrap_or_default(),
+        effort: st.config.api.effort.clone(),
+        additional_dirs: st.additional_dirs.clone(),
+        pre_fast_model: st.pre_fast_model.clone(),
+        disk_output_style: st
+            .disk_output_style
+            .as_ref()
+            .map(|s| s.name.clone()),
     })
 }
 
@@ -2834,6 +2879,10 @@ fn write_session_snapshot(snap: &SessionSnapshot) -> Result<(), String> {
         &snap.response_style,
         &snap.base_url,
         &snap.repo,
+        snap.effort.clone(),
+        &snap.additional_dirs,
+        snap.pre_fast_model.clone(),
+        snap.disk_output_style.clone(),
     )
     .map(|_| ())
 }

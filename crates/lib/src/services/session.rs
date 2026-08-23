@@ -115,6 +115,28 @@ pub struct SessionData {
     /// "unknown" rather than assuming the current process is safe.
     #[serde(default)]
     pub provider: Option<ProviderIdentity>,
+    /// Reasoning effort selected for the session (`low`/`medium`/`high`).
+    /// Restored on `/resume` so `--effort high` survives a restart; falls
+    /// back to the process default when `None` (legacy sessions / no
+    /// override was ever chosen).
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Extra directories added with `/add-dir` outside `cwd`, so the
+    /// restored system prompt re-authorizes reads/edits there.
+    #[serde(default)]
+    pub additional_dirs: Vec<String>,
+    /// Saved `config.api.model` before `/fast` swapped in the fast
+    /// alternative — `Some` ⇔ fast mode was active at save time and is
+    /// reactivated on resume.
+    #[serde(default)]
+    pub pre_fast_model: Option<String>,
+    /// Disk-loaded output style active at save time, stored as its id so
+    /// the resolved file is re-loaded from disk on resume (the body is
+    /// not stashed — it is reloaded from the source file to pick up any
+    /// edits the user made since). `None` means the built-in
+    /// `response_style` was active.
+    #[serde(default)]
+    pub disk_output_style: Option<String>,
 }
 
 /// Sessions directory path.
@@ -208,7 +230,24 @@ pub fn save_session(
     turn_count: usize,
 ) -> Result<PathBuf, String> {
     save_session_full(
-        session_id, messages, cwd, model, turn_count, 0.0, 0, 0, false, None, false, "", "", "",
+        session_id,
+        messages,
+        cwd,
+        model,
+        turn_count,
+        0.0,
+        0,
+        0,
+        false,
+        None,
+        false,
+        "",
+        "",
+        "",
+        None,
+        &[],
+        None,
+        None,
     )
 }
 
@@ -234,6 +273,10 @@ pub fn save_session_full(
     response_style: &str,
     base_url: &str,
     repo: &str,
+    effort: Option<String>,
+    additional_dirs: &[String],
+    pre_fast_model: Option<String>,
+    disk_output_style: Option<String>,
 ) -> Result<PathBuf, String> {
     with_session_lock(session_id, |path| {
         // Preserve original created_at, label, tags, and (when the caller
@@ -244,6 +287,19 @@ pub fn save_session_full(
         let (created_at, label, tags, prior_provider) = match load_session_at(path) {
             Ok(d) => (d.created_at, d.label, d.tags, d.provider),
             Err(_) => (chrono::Utc::now().to_rfc3339(), None, Vec::new(), None),
+        };
+        // When the caller omits a field (the thin `save_session` wrapper
+        // and metadata-only writers like `/rename` pass None/empty), keep
+        // whatever the existing file already stored instead of blanking it
+        // — a rename must not drop the saved reasoning effort / working set.
+        let prior_effort = match load_session_at(path) {
+            Ok(d) => d.effort,
+            Err(_) => None,
+        };
+        let (prior_additional_dirs, prior_pre_fast, prior_disk_style) = match load_session_at(path)
+        {
+            Ok(d) => (d.additional_dirs, d.pre_fast_model, d.disk_output_style),
+            Err(_) => (Vec::new(), None, None),
         };
 
         let data = SessionData {
@@ -265,6 +321,14 @@ pub fn save_session_full(
             label,
             tags,
             provider: provider.or(prior_provider),
+            effort: effort.or(prior_effort),
+            additional_dirs: if additional_dirs.is_empty() {
+                prior_additional_dirs
+            } else {
+                additional_dirs.to_vec()
+            },
+            pre_fast_model: pre_fast_model.or(prior_pre_fast),
+            disk_output_style: disk_output_style.or(prior_disk_style),
         };
 
         write_session_file_atomic(path, &data)?;
@@ -1254,6 +1318,10 @@ mod tests {
             label: None,
             tags: Vec::new(),
             provider: None,
+            effort: None,
+            additional_dirs: Vec::new(),
+            pre_fast_model: None,
+            disk_output_style: None,
         }
     }
 
@@ -1318,6 +1386,10 @@ mod tests {
             label: None,
             tags: Vec::new(),
             provider: None,
+            effort: None,
+            additional_dirs: Vec::new(),
+            pre_fast_model: None,
+            disk_output_style: None,
         };
         let json = serde_json::to_string_pretty(&data).unwrap();
         std::fs::create_dir_all(dir.path()).unwrap();
@@ -1353,6 +1425,10 @@ mod tests {
             label: None,
             tags: Vec::new(),
             provider: None,
+            effort: None,
+            additional_dirs: Vec::new(),
+            pre_fast_model: None,
+            disk_output_style: None,
         };
 
         let json = serde_json::to_string(&data).unwrap();
@@ -1387,6 +1463,10 @@ mod tests {
             label: None,
             tags: Vec::new(),
             provider: None,
+            effort: None,
+            additional_dirs: Vec::new(),
+            pre_fast_model: None,
+            disk_output_style: None,
         };
         let out = serialize_masked(&data).unwrap();
         assert!(
@@ -1421,6 +1501,10 @@ mod tests {
             label: None,
             tags: Vec::new(),
             provider: None,
+            effort: None,
+            additional_dirs: Vec::new(),
+            pre_fast_model: None,
+            disk_output_style: None,
         };
         let out = serialize_masked(&data).unwrap();
         assert!(!out.contains("verylongprovidersecret1234567890"));
@@ -1452,6 +1536,10 @@ mod tests {
             label: None,
             tags: Vec::new(),
             provider: None,
+            effort: None,
+            additional_dirs: Vec::new(),
+            pre_fast_model: None,
+            disk_output_style: None,
         };
         let out = serialize_masked(&data).unwrap();
         // Must still parse back as a SessionData.
@@ -1495,6 +1583,10 @@ mod tests {
                 label: None,
                 tags: Vec::new(),
                 provider: None,
+                effort: None,
+                additional_dirs: Vec::new(),
+                pre_fast_model: None,
+                disk_output_style: None,
             };
             let out = serialize_masked(&data).unwrap();
             let parsed: Result<SessionData, _> = serde_json::from_str(&out);
@@ -1605,6 +1697,10 @@ mod tests {
             label: None,
             tags: Vec::new(),
             provider: None,
+            effort: None,
+            additional_dirs: Vec::new(),
+            pre_fast_model: None,
+            disk_output_style: None,
         };
         let out = serialize_masked(&data).unwrap();
         assert!(!out.contains("REDACTED"));
@@ -1632,6 +1728,10 @@ mod tests {
             label: Some("refactor pass".into()),
             tags: Vec::new(),
             provider: None,
+            effort: Some("high".to_string()),
+            additional_dirs: vec!["/work/extra".to_string()],
+            pre_fast_model: Some("grok-4".to_string()),
+            disk_output_style: Some("friendly".to_string()),
         };
         let json = serde_json::to_string(&data).unwrap();
         let back: SessionData = serde_json::from_str(&json).unwrap();
@@ -1728,6 +1828,10 @@ mod tests {
             label: None,
             tags: Vec::new(),
             provider: None,
+            effort: None,
+            additional_dirs: Vec::new(),
+            pre_fast_model: None,
+            disk_output_style: None,
         };
         let json = serde_json::to_string_pretty(&data).unwrap();
         std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
@@ -2052,10 +2156,18 @@ mod tests {
             "",
             "",
             "",
+            Some("high".to_string()),
+            &["/work/extra".to_string()],
+            Some("grok-4".to_string()),
+            Some("friendly".to_string()),
         )
         .expect("save");
         let loaded = load_session(id).expect("load");
         assert_eq!(loaded.provider.as_ref(), Some(&identity));
+        assert_eq!(loaded.effort.as_deref(), Some("high"));
+        assert_eq!(loaded.additional_dirs, vec!["/work/extra".to_string()]);
+        assert_eq!(loaded.pre_fast_model.as_deref(), Some("grok-4"));
+        assert_eq!(loaded.disk_output_style.as_deref(), Some("friendly"));
 
         // A later save without a provider stamp must keep the old one
         // (metadata-only writers share this path).
@@ -2074,11 +2186,22 @@ mod tests {
             "",
             "",
             "",
+            None,
+            &[],
+            None,
+            None,
         )
         .expect("resave");
         let again = load_session(id).expect("load again");
         assert_eq!(again.provider.as_ref(), Some(&identity));
         assert_eq!(again.turn_count, 2);
+        // A metadata-only re-save (None / empty) must not clobber fields
+        // that were previously stored — the caller simply did not restamp
+        // them, not that the session forgot its choices.
+        assert_eq!(again.effort.as_deref(), Some("high"));
+        assert_eq!(again.additional_dirs, vec!["/work/extra".to_string()]);
+        assert_eq!(again.pre_fast_model.as_deref(), Some("grok-4"));
+        assert_eq!(again.disk_output_style.as_deref(), Some("friendly"));
     }
 
     #[test]
