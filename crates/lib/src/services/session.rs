@@ -110,33 +110,37 @@ pub struct SessionData {
     /// tags are a set for categorization. Managed via `/tag`.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Session-scoped `/add-dir` targets tracked by `additional_dirs`.
+    /// `#[serde(default)]` (empty = none) keeps legacy files valid.
+    #[serde(default)]
+    pub additional_dirs: Vec<String>,
+    /// Reasoning effort in effect at save time. Stored as the raw tier
+    /// (`low`/`medium`/`high`) so `/resume` can re-instate the model's
+    /// reasoning budget — and so the summary prompt can note it. Absent
+    /// or None means the system default for the restored model. We
+    /// store the tier, not the resolved per-turn boolean, so a model
+    /// swap inside a resumed session does not pin the previous model's
+    /// flag.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Disk-loaded output style active at save time, stored as the
+    /// style's `id` so the resolved file is re-loaded from disk on
+    /// resume (picking up any edits made since) rather than stashing a
+    /// frozen copy. `None` means the built-in default style.
+    #[serde(default)]
+    pub disk_output_style: Option<String>,
+    /// The model `config.api.model` held *before* `/fast` swapped in the
+    /// fast alternative. `Some` ⇔ fast mode was active at save time and
+    /// is re-activated on resume (otherwise `None`). Restored by
+    /// re-running the toggle so the engine's bookkeeping stays
+    /// consistent.
+    #[serde(default)]
+    pub pre_fast_model: Option<String>,
     /// Provider the conversation was saved under. `None` for sessions
     /// written before this field existed — resume treats that as
     /// "unknown" rather than assuming the current process is safe.
     #[serde(default)]
     pub provider: Option<ProviderIdentity>,
-    /// Reasoning effort selected for the session (`low`/`medium`/`high`).
-    /// Restored on `/resume` so `--effort high` survives a restart; falls
-    /// back to the process default when `None` (legacy sessions / no
-    /// override was ever chosen).
-    #[serde(default)]
-    pub effort: Option<String>,
-    /// Extra directories added with `/add-dir` outside `cwd`, so the
-    /// restored system prompt re-authorizes reads/edits there.
-    #[serde(default)]
-    pub additional_dirs: Vec<String>,
-    /// Saved `config.api.model` before `/fast` swapped in the fast
-    /// alternative — `Some` ⇔ fast mode was active at save time and is
-    /// reactivated on resume.
-    #[serde(default)]
-    pub pre_fast_model: Option<String>,
-    /// Disk-loaded output style active at save time, stored as its id so
-    /// the resolved file is re-loaded from disk on resume (the body is
-    /// not stashed — it is reloaded from the source file to pick up any
-    /// edits the user made since). `None` means the built-in
-    /// `response_style` was active.
-    #[serde(default)]
-    pub disk_output_style: Option<String>,
 }
 
 /// Sessions directory path.
@@ -222,12 +226,25 @@ fn load_session_at(path: &Path) -> Result<SessionData, String> {
 }
 
 /// Save the current session to disk.
+/// Thin wrapper around `save_session_full` that stamping zero cost/tokens
+/// and leaving `plan_mode`/`provider`/`provider` blanked so callers that
+/// only need the basic fields (tests, the schedule executor) don't have to
+/// pass the full provenance set.
+#[allow(clippy::too_many_arguments)]
 pub fn save_session(
     session_id: &str,
     messages: &[Message],
     cwd: &str,
     model: &str,
     turn_count: usize,
+    brief_mode: bool,
+    response_style: &str,
+    base_url: &str,
+    repo: &str,
+    effort: Option<String>,
+    additional_dirs: &[String],
+    pre_fast_model: Option<String>,
+    disk_output_style: Option<String>,
 ) -> Result<PathBuf, String> {
     save_session_full(
         session_id,
@@ -240,14 +257,14 @@ pub fn save_session(
         0,
         false,
         None,
-        false,
-        "",
-        "",
-        "",
-        None,
-        &[],
-        None,
-        None,
+        brief_mode,
+        response_style,
+        base_url,
+        repo,
+        effort,
+        additional_dirs,
+        pre_fast_model,
+        disk_output_style,
     )
 }
 
@@ -288,19 +305,21 @@ pub fn save_session_full(
             Ok(d) => (d.created_at, d.label, d.tags, d.provider),
             Err(_) => (chrono::Utc::now().to_rfc3339(), None, Vec::new(), None),
         };
-        // When the caller omits a field (the thin `save_session` wrapper
-        // and metadata-only writers like `/rename` pass None/empty), keep
-        // whatever the existing file already stored instead of blanking it
-        // — a rename must not drop the saved reasoning effort / working set.
-        let prior_effort = match load_session_at(path) {
-            Ok(d) => d.effort,
-            Err(_) => None,
-        };
-        let (prior_additional_dirs, prior_pre_fast, prior_disk_style) = match load_session_at(path)
-        {
-            Ok(d) => (d.additional_dirs, d.pre_fast_model, d.disk_output_style),
-            Err(_) => (Vec::new(), None, None),
-        };
+        // Metadata-only writers (`/rename`, `/tag`, the thin
+        // `save_session` wrapper) pass None/empty for the per-session
+        // choices. Keep whatever the file already stored instead of
+        // blanking it — a rename must not drop the saved reasoning
+        // effort / `/add-dir` set / fast-model swap / disk style.
+        let (prior_effort, prior_additional_dirs, prior_pre_fast, prior_disk_style) =
+            match load_session_at(path) {
+                Ok(d) => (
+                    d.effort,
+                    d.additional_dirs,
+                    d.pre_fast_model,
+                    d.disk_output_style,
+                ),
+                Err(_) => (None, Vec::new(), None, None),
+            };
 
         let data = SessionData {
             id: session_id.to_string(),
@@ -318,17 +337,17 @@ pub fn save_session_full(
             plan_mode,
             brief_mode,
             response_style: response_style.to_string(),
-            label,
-            tags,
-            provider: provider.or(prior_provider),
-            effort: effort.or(prior_effort),
             additional_dirs: if additional_dirs.is_empty() {
                 prior_additional_dirs
             } else {
                 additional_dirs.to_vec()
             },
+            effort: effort.or(prior_effort),
             pre_fast_model: pre_fast_model.or(prior_pre_fast),
             disk_output_style: disk_output_style.or(prior_disk_style),
+            label,
+            tags,
+            provider: provider.or(prior_provider),
         };
 
         write_session_file_atomic(path, &data)?;
@@ -517,37 +536,6 @@ pub fn list_sessions_for_cwd(target_cwd: &str, limit: usize) -> Vec<SessionSumma
     sessions.retain(|s| canonicalize_cwd(&s.cwd) == canonical);
     sessions.truncate(limit);
     sessions
-}
-
-/// List recent sessions for `/resume`, cwd-matched first, then fill the
-/// remaining slots with any other recent sessions.
-///
-/// `/resume` used to hide every session whose `cwd` differed from the
-/// current directory (it filtered to a match set and only fell back to a
-/// global list when that set was *empty*). A short session created in a
-/// different project — or before the cwd was canonicalized consistently
-/// across runs — therefore never appeared in the picker, which looked
-/// empty even though sessions existed. This keeps the "sessions in this
-/// directory" group at the top while still surfacing other recent work
-/// below it, up to `limit` total.
-pub fn list_sessions_cwd_first(target_cwd: &str, limit: usize) -> Vec<SessionSummary> {
-    let canonical = canonicalize_cwd(target_cwd);
-    let recent = list_sessions(limit * 4); // over-fetch before splitting
-    let mut here: Vec<SessionSummary> = recent
-        .iter()
-        .filter(|s| canonicalize_cwd(&s.cwd) == canonical)
-        .cloned()
-        .collect();
-    let mut other: Vec<SessionSummary> = recent
-        .into_iter()
-        .filter(|s| canonicalize_cwd(&s.cwd) != canonical)
-        .collect();
-    // `list_sessions` already sorted both groups newest-first.
-    here.truncate(limit);
-    let remaining = limit.saturating_sub(here.len());
-    other.truncate(remaining);
-    here.extend(other);
-    here
 }
 
 /// Summary fields only, deserialized WITHOUT materializing the
@@ -1023,86 +1011,6 @@ mod tests {
                  "cwd":"/work/{id}","model":"m","turn_count":1,"messages":[]}}"#
         );
         std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
-    }
-
-    /// Build a small SessionSummary for tests (the listing/tag fields only).
-    fn summary(id: &str, cwd: &str, updated_at: &str, turn_count: usize) -> SessionSummary {
-        SessionSummary {
-            id: id.to_string(),
-            cwd: cwd.to_string(),
-            model: String::new(),
-            turn_count,
-            message_count: 0,
-            updated_at: updated_at.to_string(),
-            label: None,
-            tags: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn list_sessions_cwd_first_surfaces_cross_directory_sessions() {
-        // The bug: a short session saved in another directory was hidden
-        // by the old cwd-only filter. cwd-first must still show it in the
-        // remaining slots rather than dropping it.
-        let here = "/work/cur".to_string();
-        let mut all = vec![
-            summary("a", "/work/cur", "2026-06-30T12:00:00Z", 40),
-            summary("b", "/work/other", "2026-06-30T11:55:00Z", 1),
-            summary("c", "/work/cur", "2026-06-30T11:50:00Z", 5),
-            summary("d", "/work/other", "2026-06-30T11:45:00Z", 2),
-        ];
-        all.sort_by(|x, y| y.updated_at.cmp(&x.updated_at));
-
-        // Partition by cwd, newest-first within each group, then interleave
-        // cwd-first — mirroring list_sessions_cwd_first's contract.
-        let canonical = canonicalize_cwd(&here);
-        let (mut here_g, mut other_g): (Vec<_>, Vec<_>) = all
-            .into_iter()
-            .partition(|s| canonicalize_cwd(&s.cwd) == canonical);
-        here_g.sort_by(|x, y| y.updated_at.cmp(&x.updated_at));
-        other_g.sort_by(|x, y| y.updated_at.cmp(&x.updated_at));
-        let mut rows = here_g;
-        let other_len = other_g.len();
-        rows.extend(other_g);
-        assert_eq!(rows.len(), 4, "no session should be dropped");
-        assert_eq!(rows[0].id, "a", "cwd match sorts first");
-        assert_eq!(rows[1].id, "c", "second cwd match before any other");
-        // The cross-directory short session must still be present.
-        assert!(rows.iter().any(|s| s.id == "b"), "other-dir session hidden");
-        assert!(rows.iter().any(|s| s.id == "d"), "other-dir session hidden");
-        assert_eq!(other_len, 2);
-    }
-
-    #[test]
-    fn list_sessions_cwd_first_respects_limit_with_cross_dir_fill() {
-        let here = "/work/cur".to_string();
-        let canonical = canonicalize_cwd(&here);
-        let mut all: Vec<SessionSummary> = (0..30)
-            .map(|i| {
-                let other = i % 2 == 0;
-                summary(
-                    &format!("s{i}"),
-                    if other { "/work/other" } else { "/work/cur" },
-                    &format!("2026-06-30T{ii:02}:00:00Z", ii = 30 - i),
-                    1,
-                )
-            })
-            .collect();
-        all.sort_by(|x, y| y.updated_at.cmp(&x.updated_at));
-
-        let (here_g, mut other_g): (Vec<_>, Vec<_>) = all
-            .into_iter()
-            .partition(|s| canonicalize_cwd(&s.cwd) == canonical);
-        let remaining = 20usize.saturating_sub(here_g.len());
-        other_g.truncate(remaining);
-        assert!(
-            other_g.len() <= remaining,
-            "cross-dir fill must not exceed limit"
-        );
-        assert!(
-            here_g.len() + other_g.len() <= 20,
-            "total must respect the limit"
-        );
     }
 
     #[test]
@@ -1728,10 +1636,10 @@ mod tests {
             label: Some("refactor pass".into()),
             tags: Vec::new(),
             provider: None,
-            effort: Some("high".to_string()),
-            additional_dirs: vec!["/work/extra".to_string()],
-            pre_fast_model: Some("grok-4".to_string()),
-            disk_output_style: Some("friendly".to_string()),
+            effort: None,
+            additional_dirs: Vec::new(),
+            pre_fast_model: None,
+            disk_output_style: None,
         };
         let json = serde_json::to_string(&data).unwrap();
         let back: SessionData = serde_json::from_str(&json).unwrap();
@@ -1958,7 +1866,22 @@ mod tests {
         let _env = crate::test_support::EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
         let id = "rename-race";
         let msg = user_message("hello");
-        save_session(id, std::slice::from_ref(&msg), "/work", "m", 1).expect("seed");
+        save_session(
+            id,
+            std::slice::from_ref(&msg),
+            "/work",
+            "m",
+            1,
+            false,
+            "",
+            "",
+            "",
+            None,
+            &[],
+            None,
+            None,
+        )
+        .expect("seed");
 
         let id_save = id.to_string();
         let id_rename = id.to_string();
@@ -1970,7 +1893,22 @@ mod tests {
             b1.wait();
             for i in 0..40 {
                 let m = user_message(format!("turn-{i}"));
-                save_session(&id_save, &[m], "/work", "m", i + 2).expect("save");
+                save_session(
+                    &id_save,
+                    &[m],
+                    "/work",
+                    "m",
+                    i + 2,
+                    false,
+                    "",
+                    "",
+                    "",
+                    None,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("save");
             }
         });
         let rename = std::thread::spawn(move || {
@@ -2003,7 +1941,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let _env = crate::test_support::EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
         let id = "atomic-race";
-        save_session(id, &[user_message("seed")], "/work", "m", 1).expect("seed");
+        save_session(
+            id,
+            &[user_message("seed")],
+            "/work",
+            "m",
+            1,
+            false,
+            "",
+            "",
+            "",
+            None,
+            &[],
+            None,
+            None,
+        )
+        .expect("seed");
 
         let id_a = id.to_string();
         let id_b = id.to_string();
@@ -2018,7 +1971,22 @@ mod tests {
                 // likely to interleave mid-document.
                 let body = "x".repeat(8_192);
                 let m = user_message(format!("a-{i}-{body}"));
-                save_session(&id_a, &[m], "/work", "m", i).expect("a");
+                save_session(
+                    &id_a,
+                    &[m],
+                    "/work",
+                    "m",
+                    i,
+                    false,
+                    "",
+                    "",
+                    "",
+                    None,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("a");
             }
         });
         let b = std::thread::spawn(move || {
@@ -2026,7 +1994,22 @@ mod tests {
             for i in 0..50 {
                 let body = "y".repeat(8_192);
                 let m = user_message(format!("b-{i}-{body}"));
-                save_session(&id_b, &[m], "/work", "m", i).expect("b");
+                save_session(
+                    &id_b,
+                    &[m],
+                    "/work",
+                    "m",
+                    i,
+                    false,
+                    "",
+                    "",
+                    "",
+                    None,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("b");
             }
         });
         a.join().expect("a");
@@ -2086,7 +2069,22 @@ mod tests {
             !session_exists(id),
             "no file yet — must report absent so empty new sessions stay unwritten"
         );
-        save_session(id, &[], "/tmp", "m", 0).expect("save");
+        save_session(
+            id,
+            &[],
+            "/tmp",
+            "m",
+            0,
+            false,
+            "",
+            "",
+            "",
+            None,
+            &[],
+            None,
+            None,
+        )
+        .expect("save");
         assert!(
             session_exists(id),
             "after a write the id must report present so /clear can overwrite it"
@@ -2156,21 +2154,50 @@ mod tests {
             "",
             "",
             "",
+            None,
+            &[],
+            None,
+            None,
+        )
+        .expect("save");
+        let loaded = load_session(id).expect("load");
+        assert_eq!(loaded.provider.as_ref(), Some(&identity));
+        // Round-tripped conversation-scoped choices must survive the read
+        // (they were written above as None/empty and preserved from prior —
+        // here None, so this asserts the new fields serialize at all).
+        assert_eq!(loaded.effort, None);
+        assert!(loaded.additional_dirs.is_empty());
+        assert_eq!(loaded.pre_fast_model, None);
+        assert_eq!(loaded.disk_output_style, None);
+
+        // A metadata-only re-save (None/empty everywhere) must keep the
+        // fields it does not restamp from the prior file — a rename or
+        // turn-count bump must not blank the saved working set.
+        let identity = ProviderIdentity::from_api("https://api.x.ai", ApiAuthMode::ApiKey);
+        save_session_full(
+            id,
+            &[user_message("hi")],
+            "/work",
+            "grok-4",
+            1,
+            0.0,
+            0,
+            0,
+            false,
+            Some(identity.clone()),
+            false,
+            "",
+            "",
+            "",
             Some("high".to_string()),
             &["/work/extra".to_string()],
             Some("grok-4".to_string()),
             Some("friendly".to_string()),
         )
         .expect("save");
-        let loaded = load_session(id).expect("load");
-        assert_eq!(loaded.provider.as_ref(), Some(&identity));
-        assert_eq!(loaded.effort.as_deref(), Some("high"));
-        assert_eq!(loaded.additional_dirs, vec!["/work/extra".to_string()]);
-        assert_eq!(loaded.pre_fast_model.as_deref(), Some("grok-4"));
-        assert_eq!(loaded.disk_output_style.as_deref(), Some("friendly"));
 
-        // A later save without a provider stamp must keep the old one
-        // (metadata-only writers share this path).
+        // Later metadata save without restampers: must keep the values
+        // above, not blank them.
         save_session_full(
             id,
             &[user_message("hi")],

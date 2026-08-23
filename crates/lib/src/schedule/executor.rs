@@ -166,9 +166,9 @@ impl ScheduleExecutor {
             &crate::services::git::repo_name_sync(std::path::Path::new(&state.cwd))
                 .unwrap_or_default(),
             state.config.api.effort.clone(),
-            &[],
-            None,
-            None,
+            &state.additional_dirs,
+            state.pre_fast_model.clone(),
+            state.disk_output_style.as_ref().map(|s| s.name.clone()),
         );
 
         // Truncate summary.
