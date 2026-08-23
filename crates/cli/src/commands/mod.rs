@@ -1316,6 +1316,13 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             &state.cwd,
                         ))
                         .unwrap_or_default(),
+                        state.config.api.effort.clone(),
+                        &state.additional_dirs,
+                        state.pre_fast_model.clone(),
+                        state
+                            .disk_output_style
+                            .as_ref()
+                            .map(|s| s.name.clone()),
                     );
                 }
             }
@@ -2765,6 +2772,13 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 &state.config.api.base_url,
                 &agent_code_lib::services::git::repo_name_sync(std::path::Path::new(&state.cwd))
                     .unwrap_or_default(),
+                state.config.api.effort.clone(),
+                &state.additional_dirs,
+                state.pre_fast_model.clone(),
+                state
+                    .disk_output_style
+                    .as_ref()
+                    .map(|s| s.name.clone()),
             ) {
                 Ok(_) => {
                     println!("Forked conversation at message {msg_count} -> session {fork_id}",);

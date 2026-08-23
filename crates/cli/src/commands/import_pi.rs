@@ -479,6 +479,10 @@ fn import_pi_session(pi_path: &Path) -> Result<String, String> {
         label: meta.label.or_else(|| Some("Imported from pi.dev".into())),
         tags: vec!["imported".into(), "pi".into()],
         provider: None,
+        effort: None,
+        additional_dirs: Vec::new(),
+        pre_fast_model: None,
+        disk_output_style: None,
     };
 
     let json = serde_json::to_string_pretty(&session)
