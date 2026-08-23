@@ -487,8 +487,23 @@ pub fn build_compact_summary_prompt(messages: &[Message]) -> String {
             Message::User(u) => {
                 context.push_str("User: ");
                 for block in &u.content {
-                    if let ContentBlock::Text { text } = block {
-                        context.push_str(&secret_masker::mask(text));
+                    match block {
+                        ContentBlock::Text { text } => {
+                            context.push_str(&secret_masker::mask(text));
+                        }
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                            ..
+                        } => {
+                            context.push_str(&format!(
+                                "[tool result for {tool_use_id}{}]: {}",
+                                if *is_error { " (error)" } else { "" },
+                                secret_masker::mask(content),
+                            ));
+                        }
+                        _ => {}
                     }
                 }
                 context.push('\n');
@@ -496,8 +511,17 @@ pub fn build_compact_summary_prompt(messages: &[Message]) -> String {
             Message::Assistant(a) => {
                 context.push_str("Assistant: ");
                 for block in &a.content {
-                    if let ContentBlock::Text { text } = block {
-                        context.push_str(&secret_masker::mask(text));
+                    match block {
+                        ContentBlock::Text { text } => {
+                            context.push_str(&secret_masker::mask(text));
+                        }
+                        ContentBlock::Thinking { thinking, .. } => {
+                            context.push_str(&format!("[thinking]: {thinking}"));
+                        }
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            context.push_str(&format!("[tool call: {name}] {input}"));
+                        }
+                        _ => {}
                     }
                 }
                 context.push('\n');
@@ -1466,6 +1490,52 @@ mod tests {
         let prompt = build_compact_summary_prompt(&messages);
         assert!(!prompt.contains(secret));
         assert!(prompt.contains("REDACTED"));
+    }
+
+    #[test]
+    fn build_compact_summary_prompt_includes_tool_calls_and_results() {
+        use crate::llm::message::*;
+        let messages = vec![
+            Message::Assistant(AssistantMessage {
+                uuid: uuid::Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "I should check the file".into(),
+                        signature: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tu_1".into(),
+                        name: "FileRead".into(),
+                        input: serde_json::json!({"path": "src/main.rs"}),
+                    },
+                ],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+            tool_result_message("tu_1", "fn main() {}", false),
+            Message::Assistant(AssistantMessage {
+                uuid: uuid::Uuid::new_v4(),
+                timestamp: String::new(),
+                content: vec![ContentBlock::Text {
+                    text: "The file has a main function".into(),
+                }],
+                model: None,
+                usage: None,
+                stop_reason: None,
+                request_id: None,
+            }),
+        ];
+        let prompt = build_compact_summary_prompt(&messages);
+        // Tool calls and results must no longer be silently dropped.
+        assert!(prompt.contains("[tool call: FileRead]"));
+        assert!(prompt.contains("\"path\":\"src/main.rs\""));
+        assert!(prompt.contains("[tool result for tu_1]: fn main() {}"));
+        assert!(prompt.contains("[thinking]: I should check the file"));
+        // Trailing assistant text also preserved.
+        assert!(prompt.contains("The file has a main function"));
     }
 
     #[test]
