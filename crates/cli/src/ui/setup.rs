@@ -236,7 +236,7 @@ fn resolve_provider_choice(cli_provider: &str) -> Option<String> {
     interactive_provider_choice()
 }
 
-fn map_cli_provider(raw: &str) -> String {
+pub(crate) fn map_cli_provider(raw: &str) -> String {
     match raw.to_ascii_lowercase().as_str() {
         "anthropic" | "claude" => "anthropic".into(),
         "openai" | "gpt" => "openai".into(),
@@ -274,7 +274,7 @@ fn interactive_provider_choice() -> Option<String> {
     }
 }
 
-fn provider_select_options() -> Vec<SelectOption> {
+pub(crate) fn provider_select_options() -> Vec<SelectOption> {
     vec![
         SelectOption {
             label: "ChatGPT / Codex subscription".into(),
@@ -405,7 +405,7 @@ fn finish_provider_setup(choice: &str) -> Option<SetupResult> {
     }
 }
 
-fn api_key_provider_defaults(
+pub(crate) fn api_key_provider_defaults(
     choice: &str,
 ) -> (&'static str, &'static str, &'static str, &'static str) {
     match choice {
@@ -472,7 +472,7 @@ fn api_key_provider_defaults(
     }
 }
 
-fn finish_codex_oauth() -> Option<SetupResult> {
+pub(crate) fn finish_codex_oauth() -> Option<SetupResult> {
     println!();
     println!(
         "  {} Opening browser for ChatGPT / Codex sign-in…",
@@ -506,7 +506,7 @@ fn finish_codex_oauth() -> Option<SetupResult> {
     }
 }
 
-fn finish_xai_oauth() -> Option<SetupResult> {
+pub(crate) fn finish_xai_oauth() -> Option<SetupResult> {
     println!();
     println!(
         "  {} SuperGrok / X Premium device sign-in…",
