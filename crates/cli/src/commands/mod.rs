@@ -14,6 +14,8 @@ mod import_pi;
 mod settings_sync;
 mod uninstall;
 
+use agent_code_lib::config::ApiAuthMode;
+use agent_code_lib::llm::provider::ProviderKind;
 use agent_code_lib::query::QueryEngine;
 
 /// Result of executing a command.
@@ -125,7 +127,13 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "subagent",
         aliases: &[],
-        description: "Show or change the default sub-agent model",
+        description: "Show or change the default sub-agent model/provider",
+        hidden: false,
+    },
+    Command {
+        name: "login",
+        aliases: &[],
+        description: "Pick a provider and save its API key to the config file",
         hidden: false,
     },
     Command {
@@ -746,6 +754,8 @@ pub const INTERACTIVE_SLASH_NAMES: &[&str] = &[
     "powerup",
     // Full interactive uninstall flow.
     "uninstall",
+    // Provider login picker + secret read.
+    "login",
 ];
 
 pub fn is_interactive_slash(cmd: &str) -> bool {
@@ -759,7 +769,15 @@ pub fn is_interactive_slash(cmd: &str) -> bool {
 pub fn needs_real_tty_stdout(cmd: &str) -> bool {
     matches!(
         resolve_slash_name(cmd).as_str(),
-        "session" | "scroll" | "editor" | "open" | "theme" | "model" | "powerup" | "uninstall"
+        "session"
+            | "scroll"
+            | "editor"
+            | "open"
+            | "theme"
+            | "model"
+            | "powerup"
+            | "uninstall"
+            | "login"
     )
 }
 
@@ -1550,18 +1568,173 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             CommandResult::Handled
         }
         Some("subagent") => {
-            if let Some(new_model) = args {
-                engine.state_mut().config.api.subagent_model = Some(new_model.to_string());
-                println!("Sub-agent model changed to: {new_model}");
+            let api = &mut engine.state_mut().config.api;
+            if let Some(raw) = args {
+                let raw = raw.trim();
+                // `clear` / `off` / `reset` inherit the parent for every field.
+                if raw.eq_ignore_ascii_case("clear")
+                    || raw.eq_ignore_ascii_case("off")
+                    || raw.eq_ignore_ascii_case("reset")
+                {
+                    api.subagent_model = None;
+                    api.subagent_base_url = None;
+                    api.subagent_auth_mode = None;
+                    println!("Sub-agent endpoint reset — subagents now inherit the main session.");
+                    return CommandResult::Handled;
+                }
+
+                // Parse `#provider` and/or `#model` tokens. A leading `#`
+                // names a provider when it resolves to a known provider
+                // kind; otherwise it is treated as a raw model id.
+                let mut provider: Option<ProviderKind> = None;
+                let mut model: Option<String> = None;
+                for tok in raw.split_whitespace() {
+                    let tok = tok.trim();
+                    if let Some(name) = tok.strip_prefix('#') {
+                        match ProviderKind::from_name(name) {
+                            Some(k) => provider = Some(k),
+                            None => model = Some(name.to_string()),
+                        }
+                    } else {
+                        model = Some(tok.to_string());
+                    }
+                }
+
+                if provider.is_none() && model.is_none() {
+                    println!(
+                        "Usage: /subagent #<provider> [<model>] | /subagent <model> | /subagent clear"
+                    );
+                    return CommandResult::Handled;
+                }
+
+                if let Some(kind) = provider {
+                    if let Some(url) = kind.default_base_url() {
+                        api.subagent_base_url = Some(url.to_string());
+                    } else {
+                        println!(
+                            "Provider `{}` has no default base URL; subagent base URL left unchanged.",
+                            kind.as_name()
+                        );
+                    }
+                    // Seed a default model unless the call also names one.
+                    if model.is_none()
+                        && let Some(def) = kind.default_model()
+                    {
+                        api.subagent_model = Some(def.to_string());
+                    }
+                }
+                if let Some(m) = model {
+                    api.subagent_model = Some(
+                        agent_code_lib::services::coordinator::resolve_model_alias(&m),
+                    );
+                }
+                let model_now = api
+                    .subagent_model
+                    .as_deref()
+                    .unwrap_or("(inherits main model)");
+                let url_now = api
+                    .subagent_base_url
+                    .as_deref()
+                    .unwrap_or("(inherits main endpoint)");
+                println!("Sub-agent model: {model_now}\nSub-agent endpoint: {url_now}");
             } else {
-                let current = engine
-                    .state()
-                    .config
-                    .api
+                let api = &engine.state().config.api;
+                let model = api
                     .subagent_model
                     .as_deref()
                     .unwrap_or("(not set — inherits main model)");
-                println!("Sub-agent model: {current}");
+                let url = api
+                    .subagent_base_url
+                    .as_deref()
+                    .unwrap_or("(not set — inherits main endpoint)");
+                let auth = api
+                    .subagent_auth_mode
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_else(|| "(not set — inherits main auth)".to_string());
+                println!(
+                    "Sub-agent model: {model}\nSub-agent endpoint: {url}\nSub-agent auth: {auth}"
+                );
+            }
+            CommandResult::Handled
+        }
+        Some("login") => {
+            // Interactive provider picker + API-key capture, persisted to the
+            // user config file. Reuses the same option list as first-run setup
+            // so the two entry points can't drift.
+            let options = crate::ui::setup::provider_select_options();
+            let chosen = crate::ui::selector::select_cancellable(&options);
+            let Some(choice) = chosen else {
+                return CommandResult::Handled;
+            };
+
+            // Map the setup value to a concrete provider id (handles aliases
+            // like "claude"/"gpt"/"grok" the same way first-run does).
+            let provider_id = crate::ui::setup::map_cli_provider(&choice);
+            match provider_id.as_str() {
+                "codex_subscription" => {
+                    crate::ui::setup::finish_codex_oauth();
+                    println!("Signed in via ChatGPT / Codex subscription.");
+                }
+                "xai_subscription" => {
+                    crate::ui::setup::finish_xai_oauth();
+                    println!("Signed in via SuperGrok / X Premium OAuth.");
+                }
+                "ollama" => {
+                    let result = crate::ui::setup::SetupResult {
+                        api_key: "ollama".into(),
+                        auth_mode: "api_key".into(),
+                        provider: "ollama".into(),
+                        base_url: Some("http://127.0.0.1:11434/v1".into()),
+                        model: Some("llama3.2".into()),
+                        theme: "auto".into(),
+                        permission_mode: "accept_edits".into(),
+                    };
+                    crate::ui::setup::write_config(&result);
+                    println!("Saved local Ollama endpoint (no API key needed).");
+                }
+                other => {
+                    let (_provider, env_var, _url, model) =
+                        crate::ui::setup::api_key_provider_defaults(other);
+                    let key = read_secret(&format!("Paste your {env_var} (input hidden): "));
+                    if key.trim().is_empty() {
+                        println!("No key entered — nothing saved.");
+                        return CommandResult::Handled;
+                    }
+                    // Persist endpoint + key. The api_key field stays in the
+                    // file so the agent uses it on next launch (config load
+                    // resolves file keys last, after env).
+                    let result = crate::ui::setup::SetupResult {
+                        api_key: key,
+                        auth_mode: ApiAuthMode::ApiKey.as_str().into(),
+                        provider: other.into(),
+                        base_url: Some(
+                            ProviderKind::from_name(other)
+                                .and_then(|k| k.default_base_url().map(str::to_string))
+                                .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+                        ),
+                        model: Some(model.into()),
+                        theme: "auto".into(),
+                        permission_mode: "accept_edits".into(),
+                    };
+                    crate::ui::setup::write_config(&result);
+                    println!(
+                        "Saved {env_var} for `{other}` — restart the agent to use it, \
+                         or switch providers with /provider."
+                    );
+                    // Make the running session use the new key immediately.
+                    let api = &mut engine.state_mut().config.api;
+                    if let Some(url) = ProviderKind::from_name(other)
+                        .and_then(|k| k.default_base_url().map(str::to_string))
+                    {
+                        api.base_url = url;
+                    }
+                    api.api_key = Some(result.api_key.clone());
+                    api.model = model.to_string();
+                    api.auth_mode = ApiAuthMode::ApiKey;
+                    if engine.reload_llm().is_ok() {
+                        println!("Live session now uses `{other}`.");
+                    }
+                }
             }
             CommandResult::Handled
         }
@@ -4222,6 +4395,58 @@ fn confirm_yes_no(prompt: &str) -> bool {
         return false;
     }
     matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+/// Read a secret from the terminal with echo disabled (where supported),
+/// so an API key is not echoed as the user pastes it. Falls back to a
+/// plain line read when raw mode / termios is unavailable. The prompt is
+/// printed to stdout before entering raw mode; the captured line is
+/// trimmed but otherwise returned intact.
+fn read_secret(prompt: &str) -> String {
+    use std::io::Write;
+    print!("{prompt}");
+    let _ = std::io::stdout().flush();
+    let mut input = String::new();
+
+    // Unix: disable terminal echo for the duration of the read, then
+    // restore the prior flags. This mirrors what `sudo`/`ssh` do when
+    // reading a password. Other platforms keep echo on — the secret is
+    // still captured, just visible while typing.
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        unsafe {
+            let mut attrs: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut attrs) == 0 {
+                let mut no_echo = attrs;
+                no_echo.c_lflag &= !libc::ECHO;
+                if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, &no_echo) == 0 {
+                    // Read bytes directly until newline so we don't depend on
+                    // cooked-line editing while echo is off.
+                    let mut byte = [0u8; 1];
+                    loop {
+                        match std::io::stdin().read(&mut byte) {
+                            Ok(0) => break,
+                            Ok(_) => {
+                                if byte[0] == b'\n' {
+                                    break;
+                                }
+                                input.push(byte[0] as char);
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    let _ = libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, &attrs);
+                    println!();
+                    return input.trim().to_string();
+                }
+            }
+        }
+    }
+
+    // Fallback / non-unix: plain line read with echo on.
+    let _ = std::io::stdin().read_line(&mut input);
+    input.trim().to_string()
 }
 
 /// Walk up from `start` looking for the nearest ancestor that contains
