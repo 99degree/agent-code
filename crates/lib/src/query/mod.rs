@@ -441,10 +441,10 @@ impl QueryEngine {
     /// Emit a cheap context-usage estimate to the sink (used/max).
     fn emit_context_usage(&self, sink: &dyn StreamSink) {
         let used = crate::services::tokens::estimate_context_tokens(&self.state.messages);
-        // Model context windows vary; a fixed ceiling is enough for a
-        // status-bar ratio until a per-model table is wired.
-        const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
-        sink.on_context_usage(used, DEFAULT_CONTEXT_WINDOW);
+        // Use the real per-model context window so the status-bar ratio
+        // matches the warning state (which already consults the model table).
+        let max = crate::services::tokens::context_window_for_model(&self.state.config.api.model);
+        sink.on_context_usage(used, max);
     }
 
     /// Attach content blocks to the next user turn.
