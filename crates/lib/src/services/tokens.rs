@@ -168,6 +168,7 @@ const MODEL_CONTEXT_WINDOWS: &[(&str, u64)] = &[
     // DeepSeek
     ("deepseek-v4-pro", 1_000_000),
     ("deepseek-v4-flash", 1_000_000),
+    ("deepseek-v4-flash-free", 1_000_000),
     ("deepseek-chat", 128_000),
     ("deepseek-r1", 64_000),
     // Google / Gemini
@@ -217,6 +218,18 @@ const MODEL_CONTEXT_WINDOWS: &[(&str, u64)] = &[
     ("muse-glimmer-30b", 131_072),
     // Tencent
     ("hy3", 256_000),
+    ("hy3-free", 262_144),
+    // MiMo (free)
+    ("mimo-v2.5-free", 1_000_000),
+    // Poolside (free)
+    ("laguna-s-2.1-free", 262_144),
+    // Muse (free)
+    ("muse-spark-1.2-contributor-free", 1_000_000),
+    // Kilo auto-routing tiers (aggregate many models)
+    ("kilo-auto/frontier", 1_000_000),
+    ("kilo-auto/balanced", 1_000_000),
+    ("kilo-auto/efficient", 1_000_000),
+    ("kilo-auto/free", 256_000),
     // Misc
     ("big-pickle", 200_000),
 ];
