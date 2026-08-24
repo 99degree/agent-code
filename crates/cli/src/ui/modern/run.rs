@@ -2175,6 +2175,25 @@ pub(super) async fn event_loop(
                 }
                 app.mark_turn_idle();
 
+                // Checkpoint the conversation after every completed turn.
+                // The only other persist points are resume-switch and exit;
+                // without this, a crash or kill between turns silently drops
+                // the user's latest messages (they were in `eng.state()` but
+                // never written). The lock is held only long enough to clone
+                // the history; the serialize+write runs off-thread so a large
+                // transcript can't stall the UI.
+                if completed_ok {
+                    let engine_arc = session.engine();
+                    if let Ok(eng) = engine_arc.try_lock()
+                        && let Some(snap) = session_snapshot(&eng)
+                    {
+                        drop(eng);
+                        tokio::task::spawn_blocking(move || {
+                            let _ = write_session_snapshot(&snap);
+                        });
+                    }
+                }
+
                 // A prompt held aside with its images was submitted before
                 // anything in the queue, so it goes first — and it goes now
                 // rather than waiting for whatever event next wakes the
