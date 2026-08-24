@@ -1555,6 +1555,11 @@ impl QueryEngine {
                                 // over once, so we never ping-pong between the two
                                 // providers.
                                 retry_state.using_failover = true;
+                                // Capture the source provider name before we
+                                // repoint `current_provider_kind`, so the
+                                // warning reports the real transition rather
+                                // than "from X to X".
+                                let from_name = current_provider_kind.as_name();
                                 let base_url = target
                                     .provider
                                     .default_base_url()
@@ -1578,7 +1583,7 @@ impl QueryEngine {
                                 current_provider_kind = target.provider;
                                 sink.on_warning(&format!(
                                     "Failing over from {} to {} ({})",
-                                    current_provider_kind.as_name(),
+                                    from_name,
                                     target.provider.as_name(),
                                     resolved
                                 ));
