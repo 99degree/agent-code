@@ -530,6 +530,11 @@ pub async fn run_modern_tui(
     KEYBOARD_ENHANCEMENT_WANTED.store(caps.kitty_keyboard_safe, Ordering::Relaxed);
 
     let mut terminal = setup_terminal()?;
+    // Set the window title once at startup. Updating it on every paint or
+    // animation tick rewrites the title constantly during streaming, which
+    // is distracting in Termux (Android) terminal tabs — and carries no
+    // information the screen itself does not already show.
+    update_terminal_title(&app);
     let mut term_events = EventStream::new();
     // On Termux, read terminal input from a blocking thread so taps bring up
     // the on-screen keyboard (see term_reader_next / spawn_blocking_event_reader).
@@ -2252,10 +2257,9 @@ pub(super) async fn event_loop(
                 loop_err = Some(e);
                 break;
             }
-            // Keep OSC window title in sync with phase on every paint so
-            // idle after a turn/HITL resets the spinner / "action required"
-            // title (anim_tick alone stops once needs_anim_tick is false).
-            update_terminal_title(app);
+            // (Window title is set once at startup; not rewritten here —
+            // updating it on every paint during streaming is noisy on
+            // Termux and adds no information the screen already shows.)
             // Arm HITL answer keys only after the user has seen a paint of
             // the modal (+ grace). Stops mid-type keystrokes from auto-allow.
             if app.phase == super::app::Phase::Permission {
@@ -2569,7 +2573,6 @@ pub(super) async fn event_loop(
             _ = anim_tick.tick(), if live || app.needs_anim_tick() => {
                 if app.needs_anim_tick() {
                     app.tick();
-                    update_terminal_title(app);
                 }
             }
         }
@@ -4339,27 +4342,45 @@ fn sanitize_osc_title(s: &str) -> String {
         .collect()
 }
 
-/// OSC 0 window title: braille spinner + model when live; calm idle title.
+/// Render the session cwd as a compact `~`-prefixed path for the title bar,
+/// so the tab shows the working directory (e.g. `~/agent-code`) rather than
+/// the model name — which is what the user wants at a glance across tabs.
+fn cwd_title(cwd: &str) -> String {
+    let path = std::path::Path::new(cwd);
+    match dirs::home_dir() {
+        Some(home) if path.starts_with(&home) => {
+            let rel = path.strip_prefix(&home).unwrap().to_string_lossy();
+            if rel.is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{rel}")
+            }
+        }
+        _ => cwd.to_string(),
+    }
+}
+
+/// OSC 0 window title: braille spinner + working dir when live; calm idle title.
 fn update_terminal_title(app: &App) {
     use std::io::Write;
-    let model = sanitize_osc_title(&app.model);
+    let dir = sanitize_osc_title(&cwd_title(&app.cwd));
     let title = match app.phase {
         super::app::Phase::Streaming => {
             format!(
                 "{} agent · {} · {}",
                 super::anim::spinner_glyph(app.tick),
-                model,
+                dir,
                 app.waiting_on.label_with_elapsed(app.thinking_started_at)
             )
         }
         super::app::Phase::Permission => {
             if super::anim::blink_visible(app.tick, app.terminal_focused) {
-                format!("⚠ action required · {model}")
+                format!("⚠ action required · {dir}")
             } else {
-                format!("agent · {model}")
+                format!("agent · {dir}")
             }
         }
-        _ => format!("agent · {model}"),
+        _ => format!("agent · {dir}"),
     };
     let title = sanitize_osc_title(&title);
     // OSC 0 ; title BEL
@@ -4625,6 +4646,23 @@ mod tests {
         assert_eq!(clean, "evil[31mred[0m");
         // Normal model names and unicode remain.
         assert_eq!(sanitize_osc_title("grok-4 · β"), "grok-4 · β");
+    }
+
+    #[test]
+    fn cwd_title_prefixes_home_with_tilde() {
+        // Force a known HOME so the test is environment-independent.
+        // SAFETY: single-threaded test; setting/removing an env var here is
+        // only unsafe under concurrent access, which the test harness avoids.
+        unsafe {
+            std::env::set_var("HOME", "/home/tester");
+        }
+        assert_eq!(cwd_title("/home/tester"), "~");
+        assert_eq!(cwd_title("/home/tester/agent-code"), "~/agent-code");
+        // A path that doesn't live under HOME passes through unchanged.
+        assert_eq!(cwd_title("/tmp/elsewhere"), "/tmp/elsewhere");
+        unsafe {
+            std::env::remove_var("HOME");
+        }
     }
 
     fn key(code: KeyCode) -> KeyEvent {
