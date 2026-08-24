@@ -359,10 +359,6 @@ impl QueryEngine {
         // the model from the session, so there is nothing to go back to.
         state.pre_fast_model = None;
         state.break_cache_next = false;
-        // A queued manual `/compact` is scoped to the conversation that
-        // requested it; dropping it on a session swap avoids a stray
-        // compaction firing on the wrong context.
-        state.compact_requested = false;
         // Per-model breakdown behind `/cost`; the totals are restored
         // from the session file, so a stale breakdown would not add up.
         state.model_usage.clear();
@@ -445,12 +441,10 @@ impl QueryEngine {
     /// Emit a cheap context-usage estimate to the sink (used/max).
     fn emit_context_usage(&self, sink: &dyn StreamSink) {
         let used = crate::services::tokens::estimate_context_tokens(&self.state.messages);
-        // Report against the active model's real context window so the
-        // status-bar meter reflects true headroom instead of a fixed
-        // 200K ceiling (which made smaller windows read ~60% near the
-        // actual limit).
-        let max = crate::services::tokens::context_window_for_model(&self.state.config.api.model);
-        sink.on_context_usage(used, max);
+        // Model context windows vary; a fixed ceiling is enough for a
+        // status-bar ratio until a per-model table is wired.
+        const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
+        sink.on_context_usage(used, DEFAULT_CONTEXT_WINDOW);
     }
 
     /// Attach content blocks to the next user turn.
@@ -627,15 +621,6 @@ impl QueryEngine {
         self.llm = llm;
     }
 
-    /// Borrow the active LLM provider.
-    ///
-    /// Used by `/model` to fetch the provider's model list with the exact
-    /// credentials (API key or OAuth session) the engine is currently using,
-    /// so the dynamic list matches what an actual request would hit.
-    pub fn llm(&self) -> &Arc<dyn Provider> {
-        &self.llm
-    }
-
     /// Rebuild the LLM provider object from the current config.
     ///
     /// `base_url` and `api_key` are baked into the provider at construction
@@ -804,108 +789,6 @@ impl QueryEngine {
         self.hooks
             .run_hooks(&HookEvent::PreCompact, None, &ctx, Some(&self.cancel))
             .await
-    }
-
-    /// Run the compaction cascade (microcompact → LLM → context-collapse
-    /// fallback) at an agent-loop turn boundary. Shared by the automatic
-    /// path (context past threshold) and the manual `/compact` path
-    /// (queued while a turn was running, consumed here). Both fire
-    /// `PreCompact`/`PostCompact` hooks and record tracking state so the
-    /// compaction-reminder prompt can be injected afterwards.
-    ///
-    /// `manual` distinguishes a user-invoked compaction (which should
-    /// always run even when microcompact alone is enough, and is never
-    /// gated by the auto-compact circuit breaker) from an automatic one.
-    async fn run_compaction_cascade(
-        &mut self,
-        model: &str,
-        sink: &dyn StreamSink,
-        compact_tracking: &mut CompactTracking,
-        manual: bool,
-    ) -> crate::error::Result<()> {
-        let token_count = tokens::estimate_context_tokens(self.state.history());
-        let threshold = compact::auto_compact_threshold(model);
-        if manual {
-            info!("Manual compact triggered (~{token_count} tokens in context)");
-        } else {
-            info!("Auto-compact triggered: {token_count} tokens >= {threshold} threshold");
-        }
-
-        // Snapshot for PostCompact: message count + token estimate
-        // BEFORE any of the three compaction paths (microcompact,
-        // LLM, context collapse) have run. We fire one PostCompact
-        // with the realized delta at the end of this block.
-        let messages_before = self.state.messages.len();
-        let tokens_before = token_count;
-
-        // Microcompact first: clear stale tool results.
-        let freed = compact::microcompact(&mut self.state.messages, 5);
-        if freed > 0 {
-            sink.on_compact(freed);
-            info!("Microcompact freed ~{freed} tokens");
-        }
-
-        // Check if microcompact was enough.
-        let post_mc_tokens = tokens::estimate_context_tokens(self.state.history());
-        if post_mc_tokens >= threshold {
-            // Full LLM-based compaction: summarize older messages.
-            info!("Microcompact insufficient, attempting LLM compaction");
-            match compact::compact_with_llm(
-                &mut self.state.messages,
-                &*self.llm,
-                model,
-                self.cancel.clone(),
-            )
-            .await
-            {
-                Some(removed) => {
-                    info!("LLM compaction removed {removed} messages");
-                    compact_tracking.was_compacted = true;
-                    compact_tracking.consecutive_failures = 0;
-                }
-                None => {
-                    compact_tracking.consecutive_failures += 1;
-                    warn!(
-                        "LLM compaction failed (attempt {})",
-                        compact_tracking.consecutive_failures
-                    );
-                    // Fallback: context collapse (snip middle messages).
-                    let effective = compact::effective_context_window(model);
-                    if let Some(collapse) = crate::services::context_collapse::collapse_to_budget(
-                        self.state.history(),
-                        effective,
-                    ) {
-                        info!(
-                            "Context collapse snipped {} messages, freed ~{} tokens",
-                            collapse.snipped_count, collapse.tokens_freed
-                        );
-                        self.state.messages = collapse.api_messages;
-                        sink.on_compact(collapse.tokens_freed);
-                    } else {
-                        // Last resort: aggressive microcompact.
-                        let freed2 = compact::microcompact(&mut self.state.messages, 2);
-                        if freed2 > 0 {
-                            sink.on_compact(freed2);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Fire PostCompact with the realized delta across every
-        // compaction path above. Only fire when something actually
-        // changed — a no-op PostCompact on every turn would spam
-        // user hooks. We treat "no message change AND no token
-        // drop" as a true no-op.
-        let messages_after = self.state.messages.len();
-        let tokens_after = tokens::estimate_context_tokens(self.state.history());
-        let realized_freed = tokens_before.saturating_sub(tokens_after);
-        if messages_after != messages_before || realized_freed > 0 {
-            let _ = self
-                .fire_post_compact_hooks(messages_before, messages_after, realized_freed)
-                .await;
-        }
-        Ok(())
     }
 
     /// Run any configured `PostCompact` hooks with the realized outcome
@@ -1377,19 +1260,99 @@ impl QueryEngine {
 
             debug!("Agent turn {}/{}", turn + 1, max_turns);
 
+            // Track the provider we are currently issuing this turn's
+            // requests to, so retry/failover logic can tell whether a
+            // failure happened on the primary provider or on a failover
+            // target (and thus avoid re-failing-over in a ping-pong loop).
+            let mut current_provider_kind = crate::llm::provider::detect_provider(
+                &self.state.config.api.model,
+                &self.state.config.api.base_url,
+            );
+
             let mut model = self.state.config.api.model.clone();
 
-            // Step 1: Auto-compact if context is too large, OR if a manual
-            // `/compact` was queued while a turn was running (consumed here,
-            // at the turn boundary, so it runs the same cascade the auto
-            // path uses and never races the in-flight request).
-            let manual_compact = self.state.compact_requested;
-            self.state.compact_requested = false;
-            if compact::should_auto_compact(self.state.history(), &model, &compact_tracking)
-                || manual_compact
-            {
-                self.run_compaction_cascade(&model, sink, &mut compact_tracking, manual_compact)
-                    .await?;
+            // Step 1: Auto-compact if context is too large.
+            if compact::should_auto_compact(self.state.history(), &model, &compact_tracking) {
+                let token_count = tokens::estimate_context_tokens(self.state.history());
+                let threshold = compact::auto_compact_threshold(&model);
+                info!("Auto-compact triggered: {token_count} tokens >= {threshold} threshold");
+
+                // Snapshot for PostCompact: message count + token estimate
+                // BEFORE any of the three compaction paths (microcompact,
+                // LLM, context collapse) have run. We fire one PostCompact
+                // with the realized delta at the end of this block.
+                let messages_before = self.state.messages.len();
+                let tokens_before = token_count;
+
+                // Microcompact first: clear stale tool results.
+                let freed = compact::microcompact(&mut self.state.messages, 5);
+                if freed > 0 {
+                    sink.on_compact(freed);
+                    info!("Microcompact freed ~{freed} tokens");
+                }
+
+                // Check if microcompact was enough.
+                let post_mc_tokens = tokens::estimate_context_tokens(self.state.history());
+                if post_mc_tokens >= threshold {
+                    // Full LLM-based compaction: summarize older messages.
+                    info!("Microcompact insufficient, attempting LLM compaction");
+                    match compact::compact_with_llm(
+                        &mut self.state.messages,
+                        &*self.llm,
+                        &model,
+                        self.cancel.clone(),
+                    )
+                    .await
+                    {
+                        Some(removed) => {
+                            info!("LLM compaction removed {removed} messages");
+                            compact_tracking.was_compacted = true;
+                            compact_tracking.consecutive_failures = 0;
+                        }
+                        None => {
+                            compact_tracking.consecutive_failures += 1;
+                            warn!(
+                                "LLM compaction failed (attempt {})",
+                                compact_tracking.consecutive_failures
+                            );
+                            // Fallback: context collapse (snip middle messages).
+                            let effective = compact::effective_context_window(&model);
+                            if let Some(collapse) =
+                                crate::services::context_collapse::collapse_to_budget(
+                                    self.state.history(),
+                                    effective,
+                                )
+                            {
+                                info!(
+                                    "Context collapse snipped {} messages, freed ~{} tokens",
+                                    collapse.snipped_count, collapse.tokens_freed
+                                );
+                                self.state.messages = collapse.api_messages;
+                                sink.on_compact(collapse.tokens_freed);
+                            } else {
+                                // Last resort: aggressive microcompact.
+                                let freed2 = compact::microcompact(&mut self.state.messages, 2);
+                                if freed2 > 0 {
+                                    sink.on_compact(freed2);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Fire PostCompact with the realized delta across every
+                // compaction path above. Only fire when something actually
+                // changed — a no-op PostCompact on every turn would spam
+                // user hooks. We treat "no message change AND no token
+                // drop" as a true no-op.
+                let messages_after = self.state.messages.len();
+                let tokens_after = tokens::estimate_context_tokens(self.state.history());
+                let realized_freed = tokens_before.saturating_sub(tokens_after);
+                if messages_after != messages_before || realized_freed > 0 {
+                    let _ = self
+                        .fire_post_compact_hooks(messages_before, messages_after, realized_freed)
+                        .await;
+                }
             }
 
             // Inject compaction reminder if compacted and feature enabled.
@@ -1425,7 +1388,6 @@ impl QueryEngine {
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 self.state.config.api.model.hash(&mut h);
                 self.state.cwd.hash(&mut h);
-                self.state.session_id.hash(&mut h);
                 self.state.config.mcp_servers.len().hash(&mut h);
                 self.tools.all().len().hash(&mut h);
                 // Include response_style so the cache invalidates
@@ -1541,47 +1503,19 @@ impl QueryEngine {
                             warn!("LLM call cancelled by user; aborting turn");
                             return Ok(());
                         }
-                        let retryable = match &e {
-                            ProviderError::RateLimited { retry_after_ms } => {
-                                crate::llm::retry::RetryableError::RateLimited {
-                                    retry_after: *retry_after_ms,
-                                }
-                            }
-                            ProviderError::Overloaded => {
-                                crate::llm::retry::RetryableError::Overloaded
-                            }
-                            ProviderError::Network(_) => {
-                                // Transport failure before/at the request — no
-                                // status code exists to map (DNS, connection,
-                                // TLS, or the request never left the box). The
-                                // higher-level parser only handles JSON error
-                                // bodies, so this is surfaced as a raw string.
-                                // Classify as a network retry so the existing
-                                // backoff counter applies and the turn aborts
-                                // once retries are exhausted.
-                                crate::llm::retry::RetryableError::Network
-                            }
-                            other => {
-                                crate::llm::retry::RetryableError::NonRetryable(other.to_string())
-                            }
-                        };
+                        let retryable = crate::llm::retry::RetryableError::classify(&e);
 
-                        match retry_state.next_action(&retryable, &retry_config) {
+                        match retry_state.next_action(
+                            &retryable,
+                            &retry_config,
+                            current_provider_kind,
+                            retry_state.using_failover,
+                        ) {
                             crate::llm::retry::RetryAction::Retry { after } => {
                                 // Log the actual cause + status, not a bare
                                 // "Retrying" — otherwise a persistent 402/429/500
                                 // is invisible even at RUST_LOG=debug.
                                 warn!("LLM call failed ({e}); retrying in {}ms", after.as_millis());
-                                // Surface transient transport failures to the
-                                // user too — a persistent network blip would
-                                // otherwise retry silently and look like a hang.
-                                // Stamp the local time so a delayed retry is
-                                // easy to correlate against server logs.
-                                let now = chrono::Local::now().format("%H:%M:%S");
-                                sink.on_warning(&format!(
-                                    "Network error, retrying in {:.1}s (at {now})",
-                                    after.as_secs_f64()
-                                ));
                                 // Backoff can reach 60s — racing the cancel
                                 // token keeps Ctrl+C responsive during it
                                 // (previously the sleep ran to completion and
@@ -1605,6 +1539,55 @@ impl QueryEngine {
                                     "Falling back from {model} to {fallback}"
                                 ));
                                 model = fallback;
+                                continue 'acquire;
+                            }
+                            crate::llm::retry::RetryAction::Failover { target } => {
+                                // Repoint the request at a different provider via
+                                // a static failover rule (e.g. OpenCode `laguna-s`
+                                // → Kilo's mirror). The failover table stores only
+                                // the *fragment* of the mirror model, so we resolve
+                                // the concrete id from the target provider's live
+                                // /models catalog before issuing the request. That
+                                // keeps us from hard-coding free-tier model names
+                                // (like `laguna-s-2.1:free` / `stealth/ox-alpha`)
+                                // that change over time.
+                                // `using_failover` ensures a request only fails
+                                // over once, so we never ping-pong between the two
+                                // providers.
+                                retry_state.using_failover = true;
+                                // Capture the source provider name before we
+                                // repoint `current_provider_kind`, so the
+                                // warning reports the real transition rather
+                                // than "from X to X".
+                                let from_name = current_provider_kind.as_name();
+                                let base_url = target
+                                    .provider
+                                    .default_base_url()
+                                    .unwrap_or_default()
+                                    .to_string();
+                                // Resolve the concrete mirror model id; fall back
+                                // to the fragment if the catalog is unreachable.
+                                let resolved =
+                                    crate::llm::provider::ProviderKind::fetch_matching_model(
+                                        target.provider,
+                                        &target.model_hint,
+                                    )
+                                    .await
+                                    .unwrap_or_else(|| target.model_hint.clone());
+                                let llm = crate::llm::provider::create_provider_from_config(
+                                    &resolved,
+                                    &base_url,
+                                    &self.state.config,
+                                );
+                                self.llm = llm;
+                                current_provider_kind = target.provider;
+                                sink.on_warning(&format!(
+                                    "Failing over from {} to {} ({})",
+                                    from_name,
+                                    target.provider.as_name(),
+                                    resolved
+                                ));
+                                model = resolved.clone();
                                 continue 'acquire;
                             }
                             crate::llm::retry::RetryAction::Abort(reason) => {
@@ -1647,8 +1630,7 @@ impl QueryEngine {
                                     // Consuming a turn keeps `max_turns` as the
                                     // bound, so a persistently-down provider still
                                     // terminates instead of hanging.
-                                    let now = chrono::Local::now().format("%H:%M:%S");
-                                    warn!("Unattended retry: waiting 30s for capacity (at {now})");
+                                    warn!("Unattended retry: waiting 30s for capacity");
                                     tokio::select! {
                                         _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
                                         _ = self.cancel.cancelled() => {
@@ -1753,14 +1735,6 @@ impl QueryEngine {
             // emit into the same pipe the later executor path drains.
             let (tool_event_tx, mut tool_event_rx) = crate::tools::event_sink::tool_event_channel();
             let mut content_blocks = Vec::new();
-            // Text accumulated from `TextDelta`s that have not yet been
-            // finalized by a `ContentBlockComplete`. Tracked so a cancel
-            // mid-stream can persist the partial reply the user already saw
-            // on screen (otherwise it lives only in the UI transcript and
-            // is lost when the process exits). Cleared when the block
-            // completes; reset is unnecessary on cancel since the whole
-            // streaming state dies with the function.
-            let mut pending_text = String::new();
             let mut usage = Usage::default();
             let mut stop_reason: Option<StopReason> = None;
             let mut got_error = false;
@@ -1780,7 +1754,6 @@ impl QueryEngine {
                         match event {
                             Some(StreamEvent::TextDelta(text)) => {
                                 sink.on_text(&text);
-                                pending_text.push_str(&text);
                             }
                             Some(StreamEvent::ContentBlockComplete(block)) => {
                                 if let ContentBlock::ToolUse {
@@ -1911,13 +1884,6 @@ impl QueryEngine {
                                 if let ContentBlock::Thinking { ref thinking, .. } = block {
                                     sink.on_thinking(thinking);
                                 }
-                                if let ContentBlock::Text { .. } = block {
-                                    // The completed block carries the full text,
-                                    // so the in-flight delta buffer is now
-                                    // redundant (and would double-count on a
-                                    // cancel that follows immediately after).
-                                    pending_text.clear();
-                                }
                                 content_blocks.push(block);
                             }
                             Some(StreamEvent::Done {
@@ -1961,18 +1927,6 @@ impl QueryEngine {
                 // Record the partial assistant message so the next turn has a
                 // consistent history (assistant + tool_result pairs). Without
                 // this, orphaned tool_use blocks 400 the next API call.
-                //
-                // Capture the in-flight text the user already saw on screen
-                // (delivered only as `TextDelta`, never assembled into a
-                // `ContentBlockComplete` before the cancel). Without this the
-                // partial reply would live only in the UI transcript and be
-                // lost on exit, leaving the next/resume session without the
-                // tail of the cancelled message.
-                if !pending_text.is_empty() {
-                    content_blocks.push(ContentBlock::Text {
-                        text: pending_text.clone(),
-                    });
-                }
                 if !content_blocks.is_empty() {
                     let assistant_msg = Message::Assistant(AssistantMessage {
                         uuid: Uuid::new_v4(),
@@ -2033,12 +1987,9 @@ impl QueryEngine {
                     retry_config.initial_backoff.as_millis() as u64
                         * 2u64.saturating_pow(no_output_retry_count - 1).min(32),
                 );
-                // Stamp the local time so a delayed retry is easy to correlate
-                // against server logs (mirrors the network-retry warning).
-                let now = chrono::Local::now().format("%H:%M:%S");
                 sink.on_warning(&format!(
                     "No output from model within {}s — server busy or request queue \
-                     saturated. Retrying in {:.1}s (attempt {}/{}) (at {now})",
+                     saturated. Retrying in {:.1}s (attempt {}/{})",
                     self.state.config.api.timeout_secs,
                     backoff.as_secs_f64(),
                     no_output_retry_count,
@@ -2730,31 +2681,6 @@ fn extract_file_path(
     extract_file_paths(tool_calls, use_id).into_iter().next()
 }
 
-/// Fixed model mapping for provider rotation failover.
-fn get_failover_model(current_provider: &str, current_model: &str) -> Option<(String, String)> {
-    // Anthropic Claude -> OpenAI GPT-5.5
-    if current_provider.contains("anthropic") || current_model.to_lowercase().contains("claude") {
-        return Some(("openai".to_string(), "gpt-5.5".to_string()));
-    }
-    // OpenAI GPT -> Anthropic Claude Sonnet 5
-    if current_provider.contains("openai") || current_model.to_lowercase().contains("gpt-") {
-        return Some(("anthropic".to_string(), "claude-sonnet-5".to_string()));
-    }
-    // Xai Grok -> DeepSeek Chat
-    if current_provider.contains("xai") || current_model.to_lowercase().contains("grok") {
-        return Some(("deepseek".to_string(), "deepseek-chat".to_string()));
-    }
-    // DeepSeek -> Mistral Large
-    if current_provider.contains("deepseek") || current_model.to_lowercase().contains("deepseek") {
-        return Some(("mistral".to_string(), "mistral-large-latest".to_string()));
-    }
-    // Google Gemini -> OpenRouter
-    if current_provider.contains("google") || current_model.to_lowercase().contains("gemini") {
-        return Some(("openrouter".to_string(), "openai/gpt-5.5".to_string()));
-    }
-    None
-}
-
 fn get_fallback_model(current: &str) -> String {
     let lower = current.to_lowercase();
     if lower.contains("opus") {
@@ -2789,14 +2715,6 @@ pub fn build_system_prompt(
          by reading, writing, and searching code. Use the tools available to you to \
          accomplish tasks.\n\n",
     );
-
-    // Session boundary marker: a unique per-session ID prepended so that
-    // compacted history (which may contain identical AGENTS.md-derived content
-    // across sessions) is always disambiguated at the inference slot level.
-    prompt.push_str(&format!(
-        "# Session Boundary\nSession ID: {}\n\n",
-        state.session_id,
-    ));
 
     // Environment context.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
@@ -4088,73 +4006,6 @@ mod tests {
         );
     }
 
-    /// Verifies that a mid-stream cancel persists the partial text the user
-    /// already saw on screen, instead of recording an empty assistant message.
-    /// Regression for the "Ctrl+C then Ctrl+D loses the last reply" symptom:
-    /// `TextDelta`s were forwarded to the sink but never assembled into
-    /// `content_blocks`, so a cancelled in-flight reply left no text behind.
-    #[tokio::test]
-    async fn cancelled_streaming_turn_persists_partial_text() {
-        // Emits a couple TextDeltas ("partial..."), then hangs. The cancel
-        // should still capture those deltas into the assistant message.
-        struct PartialThenHangProvider;
-        #[async_trait::async_trait]
-        impl Provider for PartialThenHangProvider {
-            fn name(&self) -> &str {
-                "partial-then-hang-mock"
-            }
-            async fn stream(
-                &self,
-                _request: &ProviderRequest,
-            ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>, ProviderError> {
-                let (tx, rx) = tokio::sync::mpsc::channel(8);
-                tokio::spawn(async move {
-                    let _ = tx.send(StreamEvent::TextDelta("partial... ".into())).await;
-                    let _ = tx.send(StreamEvent::TextDelta("more partial".into())).await;
-                    // Hang forever — no ContentBlockComplete, no Done.
-                    let _tx_holder = tx;
-                    std::future::pending::<()>().await;
-                });
-                Ok(rx)
-            }
-        }
-
-        let mut engine = build_engine(Arc::new(PartialThenHangProvider));
-        schedule_cancel(&engine, 80);
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            engine.run_turn_with_sink("interrupt me", &NullSink),
-        )
-        .await;
-        assert!(result.is_ok(), "cancelled turn should not hang");
-        assert!(result.unwrap().is_ok());
-
-        // The cancelled assistant message must contain the deltas the user
-        // saw, joined into a Text content block.
-        let last = engine
-            .state()
-            .messages
-            .last()
-            .expect("an assistant message was pushed");
-        let assistant_text = match last {
-            crate::llm::message::Message::Assistant(a) => a.content.iter().find_map(|b| {
-                if let crate::llm::message::ContentBlock::Text { text } = b {
-                    Some(text.clone())
-                } else {
-                    None
-                }
-            }),
-            _ => None,
-        };
-        let text = assistant_text.expect(
-            "cancelled streaming turn should leave an assistant message with captured text",
-        );
-        assert!(
-            text.contains("partial...") && text.contains("more partial"),
-            "partial delta text should be persisted on cancel, got: {text:?}"
-        );
-    }
     /// Verifies that cancelling BEFORE any event arrives still interrupts
     /// the turn cleanly (edge case: cancellation races with the first recv).
     #[tokio::test]
@@ -4840,127 +4691,6 @@ mod tests {
             2,
             "turn did not run another iteration to handle steered input"
         );
-    }
-
-    /// A provider that emits a single assistant text reply with no tool
-    /// calls, then `Done`. Used to drive a full (single-iteration) turn so
-    /// we can assert that a queued manual compaction runs before the
-    /// request rather than mid-iteration.
-    struct SingleReplyProvider;
-
-    #[async_trait::async_trait]
-    impl Provider for SingleReplyProvider {
-        fn name(&self) -> &str {
-            "single-reply-mock"
-        }
-
-        async fn stream(
-            &self,
-            _request: &ProviderRequest,
-        ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>, ProviderError> {
-            let (tx, rx) = tokio::sync::mpsc::channel(8);
-            tokio::spawn(async move {
-                let _ = tx.send(StreamEvent::TextDelta("acknowledged".into())).await;
-                let _ = tx
-                    .send(StreamEvent::Done {
-                        usage: Default::default(),
-                        stop_reason: None,
-                    })
-                    .await;
-            });
-            Ok(rx)
-        }
-    }
-
-    /// Build a user message carrying a compactable tool result so
-    /// microcompact has something to clear.
-    fn mk_user_with_tool_result(tool_use_id: &str, content: &str) -> crate::llm::message::Message {
-        use crate::llm::message::{ContentBlock, Message, UserMessage};
-        use uuid::Uuid;
-        Message::User(UserMessage {
-            uuid: Uuid::new_v4(),
-            timestamp: "0".into(),
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: tool_use_id.into(),
-                content: content.into(),
-                is_error: false,
-                extra_content: Vec::new(),
-            }],
-            is_meta: true,
-            is_compact_summary: false,
-        })
-    }
-
-    /// Count how many stored tool-result texts are still the literal
-    /// original (i.e. not cleared by microcompact).
-    fn uncleared_tool_result_count(engine: &QueryEngine, original: &str) -> usize {
-        use crate::llm::message::{ContentBlock, Message};
-        engine
-            .state()
-            .messages
-            .iter()
-            .filter_map(|m| match m {
-                Message::User(u) => Some(&u.content),
-                _ => None,
-            })
-            .flatten()
-            .filter_map(|b| match b {
-                ContentBlock::ToolResult { content, .. } if content == original => Some(()),
-                _ => None,
-            })
-            .count()
-    }
-
-    /// A manual `/compact` issued while a turn is running must NOT mutate
-    /// history immediately. It queues, so the user-visible state is
-    /// untouched until the loop reaches its next turn boundary — which is
-    /// where the running turn itself consumes the flag. We simulate that by
-    /// setting the flag before a fresh (not-yet-started) turn and verifying
-    /// the turn's first request sees the compaction already applied (the
-    /// stale tool results are gone) rather than the compaction happening
-    /// after the request.
-    #[tokio::test]
-    async fn manual_compact_runs_at_turn_boundary_not_mid_turn() {
-        let mut engine = build_engine(Arc::new(SingleReplyProvider));
-        // Seed a compactable tool result for microcompact to clear.
-        engine
-            .state_mut()
-            .push_message(mk_user_with_tool_result("u1", "LARGE_ORIGINAL_CONTENT"));
-        assert_eq!(
-            uncleared_tool_result_count(&engine, "LARGE_ORIGINAL_CONTENT"),
-            1
-        );
-
-        // Simulate `/compact` arriving during a running turn: queue it.
-        engine.state_mut().compact_requested = true;
-        // The flag must be honored at the next turn boundary, so it is NOT
-        // consumed by the command itself (it is still set until run_turn).
-        assert!(engine.state().compact_requested);
-
-        engine
-            .run_turn_with_sink("go", &NullSink)
-            .await
-            .expect("turn ok");
-
-        // The queued compaction ran at the turn boundary, clearing the stale
-        // tool result before/at the start of the request cycle.
-        assert_eq!(
-            uncleared_tool_result_count(&engine, "LARGE_ORIGINAL_CONTENT"),
-            0,
-            "queued manual compaction should have cleared the tool result at the turn boundary"
-        );
-    }
-
-    /// A manual compaction flag that was set but never followed by a turn is
-    /// left pending (not silently dropped) and remains observable until the
-    /// loop consumes it.
-    #[test]
-    fn manual_compact_flag_persists_until_turn_consumes_it() {
-        let mut engine = build_engine(Arc::new(SingleReplyProvider));
-        assert!(!engine.state().compact_requested);
-        engine.state_mut().compact_requested = true;
-        // Still set: nothing ran a turn, so it must remain pending.
-        assert!(engine.state().compact_requested);
     }
 
     #[cfg(unix)]

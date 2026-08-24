@@ -33,16 +33,6 @@ const QUIT_ARM_WINDOW: Duration = Duration::from_millis(1500);
 /// How many recent sessions `/resume` offers.
 const SESSION_PICKER_LIMIT: usize = 50;
 
-/// How often the live conversation is checkpointed to disk while the TUI is
-/// idle (no turn running, nothing buffered, no in-flight resume read). A
-/// process killed mid-turn loses only the in-flight turn; a long session left
-/// parked — or an Android Termux process killed in the background — keeps the
-/// last few minutes instead of the last exit. The write is detached (spawned
-/// on a blocking thread) so it never blocks input or repaint; serialization +
-/// masking of a large transcript is the single most expensive thing this loop
-/// does and must not run on the event thread.
-const SAVE_INTERVAL: Duration = Duration::from_secs(120);
-
 /// A session read from disk plus the transcript rebuilt from it: the id
 /// that was asked for, the restored data, and the display items. Produced
 /// on a blocking thread, applied by the event loop.
@@ -71,7 +61,6 @@ type LoadedSession = (
 );
 
 use agent_code_lib::config::PermissionMode;
-use agent_code_lib::llm::provider::ProviderKind;
 use agent_code_lib::query::{QueryEngine, Session, TurnHandle};
 use agent_code_lib::services::notifier::{NotificationKind, NotifierService};
 use agent_code_lib::tools::PermissionResponse;
@@ -541,11 +530,6 @@ pub async fn run_modern_tui(
     KEYBOARD_ENHANCEMENT_WANTED.store(caps.kitty_keyboard_safe, Ordering::Relaxed);
 
     let mut terminal = setup_terminal()?;
-    // Set the window title once at startup. Updating it on every paint or
-    // animation tick rewrites the title constantly during streaming, which
-    // is distracting in Termux (Android) terminal tabs — and carries no
-    // information the screen itself does not already show.
-    update_terminal_title(&app);
     let mut term_events = EventStream::new();
     // On Termux, read terminal input from a blocking thread so taps bring up
     // the on-screen keyboard (see term_reader_next / spawn_blocking_event_reader).
@@ -555,15 +539,6 @@ pub async fn run_modern_tui(
         None
     };
     let mut draw = |app: &mut App| draw_frame(&mut terminal, app, caps);
-    // Paint the launch surface immediately at startup so the splash is on
-    // screen before the first select! parks waiting for input — an idle
-    // frame with `dirty` set would otherwise not be drawn until some event
-    // arrives (or, on Termux, until the blocking reader thread wakes).
-    if let Err(e) = draw(&mut app) {
-        restore_terminal(&mut terminal)?;
-        return Err(e);
-    }
-    app.dirty = false;
     let result = event_loop(
         &session,
         &mut app,
@@ -858,8 +833,6 @@ fn restore_stdout_modes() {
 }
 
 fn restore_terminal(terminal: &mut Term) -> anyhow::Result<()> {
-    // Hand the terminal tab title back to the shell before tearing down modes.
-    restore_terminal_title();
     pop_keyboard_enhancement(terminal.backend_mut());
     execute!(
         terminal.backend_mut(),
@@ -906,7 +879,6 @@ fn with_main_screen<R>(f: impl FnOnce() -> R) -> R {
 fn install_panic_restore_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal_title();
         restore_stdout_modes();
         prev(info);
     }));
@@ -957,7 +929,7 @@ pub(super) async fn event_loop(
     cli_permissions: &CliPermissionOverride,
     notifier: &mut NotifierService,
     term_events: &mut (impl futures::Stream<Item = std::io::Result<Event>> + Unpin),
-    term_rx: &mut Option<mpsc::UnboundedReceiver<Event>>,
+    mut term_rx: &mut Option<mpsc::UnboundedReceiver<Event>>,
     draw: &mut dyn FnMut(&mut App) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let mut turn: Option<TurnHandle> = None;
@@ -968,28 +940,19 @@ pub(super) async fn event_loop(
     // swallowing it.
     let mut pending_events: std::collections::VecDeque<Event> = std::collections::VecDeque::new();
 
-    // Spinner animation (~3 fps) and coalescer flush deadline (~2.5 fps).
+    // Spinner animation (~12 fps) and coalescer flush deadline (~10 fps).
     // Both are only *polled* while a turn is live / text is buffered, so an
-    // idle session never wakes on them. The cadence is deliberately slow
-    // (4x quieter than the original 80ms/100ms) to cut idle/streaming CPU:
-    // the screen refresh heartbeat was the main cost vs. the line-oriented
-    // classic REPL, which only repainted on new input/output.
-    let mut anim_tick = tokio::time::interval(Duration::from_millis(800));
+    // idle session never wakes on them.
+    let mut anim_tick = tokio::time::interval(Duration::from_millis(80));
     anim_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut flush_tick = tokio::time::interval(super::stream_buffer::FLUSH_INTERVAL);
     flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // Periodic checkpoint of the live conversation to disk (see SAVE_INTERVAL).
-    // Skip missed ticks rather than catching up with a burst of writes after a
-    // long park: the only point is to bound data loss, not to rewrite history.
-    let mut save_tick = tokio::time::interval(SAVE_INTERVAL);
-    save_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Background tasks live in the shared `TaskManager`, which emits no
-    // events, so the pane has to ask. The manager signals on every
-    // transition via `wait_for_change`, so the pane repaints only when
-    // something actually changed — no fixed-interval poll, and an idle
-    // session never wakes for tasks. The arm stays gated on a live turn
-    // or existing working rows; once every row is terminal the notify
-    // won't fire again, exactly matching the old poll's stop condition.
+    // events, so the pane has to ask. Polled only while a turn is live or
+    // rows already exist, so an idle session still never wakes — and the
+    // sync only marks the frame dirty when something actually changed.
+    let mut tasks_tick = tokio::time::interval(Duration::from_millis(750));
+    tasks_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let task_manager = {
         let engine_arc = session.engine();
         let eng = engine_arc.lock().await;
@@ -1009,12 +972,6 @@ pub(super) async fn event_loop(
     // reset a filtered picker, or reopen one the user has already
     // dismissed or selected from.
     let mut session_scan_generation: u64 = 0;
-    // Live model list for the in-TUI picker, fetched off-thread on `/model`.
-    // The static catalog already opened the picker; this receiver upgrades it
-    // in place once the network call lands, so the provider fetch never
-    // stalls input or repaint. `None` until a fetch is in flight and once it
-    // settles (or the picker is dismissed).
-    let mut model_fetch_rx: Option<crate::commands::ModelFetchRx> = None;
     // Loading the *selected* session is the heavier half — a whole
     // transcript read and deserialized — so it is detached too. The
     // payload is boxed because a full conversation is far too big to pass
@@ -1117,18 +1074,15 @@ pub(super) async fn event_loop(
                 Ok(mut eng) => {
                     let current = eng.state().config.api.model.clone();
                     let base_url = eng.state().config.api.base_url.clone();
-                    // Static catalog immediately, so the picker opens without
-                    // blocking on a network fetch; the live list replaces it
-                    // when the off-thread fetch (below) returns. The picker is
-                    // only opened after we know there is something to show.
-                    let static_entries = crate::commands::static_model_entries(&eng);
+                    let entries =
+                        crate::ui::modern::app::model_catalog_entries(&current, &base_url);
                     let mut next_model: Option<String> = None;
                     let mut next_effort: Option<Option<String>> = None;
                     app.apply_model_action(
                         action,
                         &current,
                         &base_url,
-                        static_entries,
+                        entries,
                         |name| next_model = Some(name),
                         |effort| next_effort = Some(effort),
                     );
@@ -1138,11 +1092,6 @@ pub(super) async fn event_loop(
                     if let Some(effort) = next_effort {
                         eng.state_mut().config.api.effort = effort;
                     }
-                    // Reflect the new model in the terminal tab title.
-                    update_terminal_title(app);
-                    // Kick the live model fetch off this thread so the picker
-                    // updates in place without stalling input or repaint.
-                    model_fetch_rx = crate::commands::spawn_model_fetch(&eng);
                 }
                 Err(_) => {
                     app.work.stage_model(action);
@@ -1160,7 +1109,8 @@ pub(super) async fn event_loop(
                     let current = eng.state().config.api.model.clone();
                     let base_url = eng.state().config.api.base_url.clone();
                     let cur = agent_code_lib::llm::provider::detect_provider(&current, &base_url);
-                    let mut next_provider: Option<ProviderKind> = None;
+                    let mut next_provider: Option<agent_code_lib::llm::provider::ProviderKind> =
+                        None;
                     app.apply_provider_action(action, cur.as_name(), |p| next_provider = Some(p));
                     if let Some(p) = next_provider {
                         // Switching providers is only meaningful in the
@@ -1481,7 +1431,7 @@ pub(super) async fn event_loop(
                                     term_events,
                                     draw,
                                     &mut pending_events,
-                                    term_rx,
+                                    &mut term_rx,
                                     async {
                                         let mut eng = engine_arc.lock().await;
                                         // The scope Ctrl+C just cancelled
@@ -1559,7 +1509,7 @@ pub(super) async fn event_loop(
                                 term_events,
                                 draw,
                                 &mut pending_events,
-                                term_rx,
+                                &mut term_rx,
                                 async {
                                     let mut eng = engine_arc.lock().await;
                                     // The working set was announced as
@@ -1660,36 +1610,34 @@ pub(super) async fn event_loop(
                             // Restore per-session presentation state saved
                             // with the conversation.
                             st.brief_mode = data.brief_mode;
-                            if !data.response_style.is_empty()
-                                && let Some(style) = agent_code_lib::state::ResponseStyle::from_name(
+                            if !data.response_style.is_empty() {
+                                if let Some(style) = agent_code_lib::state::ResponseStyle::from_name(
                                     &data.response_style,
-                                )
-                            {
-                                st.response_style = style;
+                                ) {
+                                    st.response_style = style;
+                                }
                             }
                             if !data.base_url.is_empty() {
                                 st.config.api.base_url = data.base_url.clone();
                             }
-                            // Restore the per-session environment the conversation
-                            // was produced in (effort selection, extra working
-                            // dirs, fast-model override, disk output style). These
-                            // are not engine defaults — they are choices the
-                            // session made — so a `/resume` must not silently
-                            // revert them to the process startup values.
-                            if let Some(ref e) = data.effort {
-                                if !e.is_empty() {
-                                    st.config.api.effort = Some(e.clone());
-                                }
-                            }
+                            // Restore per-conversation runtime choices.
+                            // These were reset by reset_for_session_swap to
+                            // the process config defaults; overwrite with
+                            // what the saved session had so /resume
+                            // reconstructs the conversation faithfully.
+                            st.config.api.effort = data.effort.clone();
                             st.additional_dirs = data.additional_dirs.clone();
                             st.pre_fast_model = data.pre_fast_model.clone();
-                            if let Some(ref style_name) = data.disk_output_style {
-                                if let Some(style) = agent_code_lib::output_styles::OutputStyleRegistry::load_all(
-                                    Some(std::path::Path::new(&st.cwd)),
-                                )
-                                .find(style_name)
-                                {
-                                    st.response_style = agent_code_lib::state::ResponseStyle::Default;
+                            // Re-resolve the disk output style by id from
+                            // the live registry instead of stashing the
+                            // body — picks up edits made to the style file
+                            // since the session was saved.
+                            if let Some(id) = &data.disk_output_style {
+                                let registry =
+                                    agent_code_lib::output_styles::OutputStyleRegistry::load_all(
+                                        Some(std::path::Path::new(&st.cwd)),
+                                    );
+                                if let Some(style) = registry.find(id) {
                                     st.disk_output_style = Some(style.clone());
                                 }
                             }
@@ -1790,7 +1738,7 @@ pub(super) async fn event_loop(
                                 term_events,
                                 draw,
                                 &mut pending_events,
-                                term_rx,
+                                &mut term_rx,
                                 async {
                                     let _ =
                                         eng.fire_cwd_changed_hooks(&previous_cwd, "resume").await;
@@ -1818,7 +1766,7 @@ pub(super) async fn event_loop(
                             term_events,
                             draw,
                             &mut pending_events,
-                            term_rx,
+                            &mut term_rx,
                             async {
                                 let eng = engine_arc.lock().await;
                                 let _ = eng.fire_session_start_hooks().await;
@@ -1881,79 +1829,6 @@ pub(super) async fn event_loop(
             // this clear is emptying that conversation too.
             app.new_conversation();
             app.status_message = "context cleared".into();
-            app.dirty = true;
-        }
-
-        // Apply a deferred `/new` to the engine conversation (classic
-        // parity). Mirrors the deferred `/clear` handling: try_lock so a
-        // running turn retries next iteration, and `claim_pending_new_session`
-        // consumes the flag only when nothing withholds it (a resume in
-        // flight keeps it pending).
-        if app.work.new_session_staged()
-            && let Ok(mut eng) = session.engine().try_lock()
-            && app.claim_pending_new_session()
-        {
-            // Persist the conversation being left so it is recoverable via
-            // `/resume` or `/sessions`, then start a brand-new session.
-            {
-                let state = eng.state();
-                if !state.messages.is_empty()
-                    || agent_code_lib::services::session::session_exists(&state.session_id)
-                {
-                    let _ = agent_code_lib::services::session::save_session_full(
-                        &state.session_id,
-                        &state.messages,
-                        &state.cwd,
-                        &state.config.api.model,
-                        state.turn_count,
-                        state.total_cost_usd,
-                        state.total_usage.input_tokens,
-                        state.total_usage.output_tokens,
-                        state.plan_mode,
-                        Some(
-                            agent_code_lib::services::session::ProviderIdentity::from_api(
-                                &state.config.api.base_url,
-                                state.config.api.auth_mode,
-                            ),
-                        ),
-                        state.brief_mode,
-                        state.response_style.name(),
-                        &state.config.api.base_url,
-                        &agent_code_lib::services::git::repo_name_sync(std::path::Path::new(
-                            &state.cwd,
-                        ))
-                        .unwrap_or_default(),
-                        state.config.api.effort.clone(),
-                        &state.additional_dirs,
-                        state.pre_fast_model.clone(),
-                        state
-                            .disk_output_style
-                            .as_ref()
-                            .map(|s| s.name.clone()),
-                    );
-                }
-            }
-            let new_id = agent_code_lib::services::session::new_session_id();
-            {
-                let state = eng.state_mut();
-                state.session_id = new_id.clone();
-                state.messages.clear();
-                state.turn_count = 0;
-                state.total_cost_usd = 0.0;
-                state.total_usage = agent_code_lib::llm::message::Usage::default();
-                state.model_usage.clear();
-                state.plan_mode = false;
-                state.brief_mode = false;
-                state.compact_requested = false;
-            }
-            eng.set_live_plan_mode(false);
-            // `submit` already cleared the view; keep it honest for the
-            // deferred case (a resume applied in between repainted history).
-            app.clear_transcript_view();
-            app.new_conversation();
-            // Mirror the new engine session id into the TUI header.
-            App::set_session_id(&new_id);
-            app.status_message = format!("new session {new_id}");
             app.dirty = true;
         }
 
@@ -2300,6 +2175,25 @@ pub(super) async fn event_loop(
                 }
                 app.mark_turn_idle();
 
+                // Checkpoint the conversation after every completed turn.
+                // The only other persist points are resume-switch and exit;
+                // without this, a crash or kill between turns silently drops
+                // the user's latest messages (they were in `eng.state()` but
+                // never written). The lock is held only long enough to clone
+                // the history; the serialize+write runs off-thread so a large
+                // transcript can't stall the UI.
+                if completed_ok {
+                    let engine_arc = session.engine();
+                    if let Ok(eng) = engine_arc.try_lock()
+                        && let Some(snap) = session_snapshot(&eng)
+                    {
+                        drop(eng);
+                        tokio::task::spawn_blocking(move || {
+                            let _ = write_session_snapshot(&snap);
+                        });
+                    }
+                }
+
                 // A prompt held aside with its images was submitted before
                 // anything in the queue, so it goes first — and it goes now
                 // rather than waiting for whatever event next wakes the
@@ -2361,9 +2255,7 @@ pub(super) async fn event_loop(
             // Keep OSC window title in sync with phase on every paint so
             // idle after a turn/HITL resets the spinner / "action required"
             // title (anim_tick alone stops once needs_anim_tick is false).
-            // (Title is set once at startup; deliberately not rewritten
-            // here — updating it every frame during streaming is noisy on
-            // Termux and adds no information the screen does not show.)
+            update_terminal_title(app);
             // Arm HITL answer keys only after the user has seen a paint of
             // the modal (+ grace). Stops mid-type keystrokes from auto-allow.
             if app.phase == super::app::Phase::Permission {
@@ -2383,7 +2275,7 @@ pub(super) async fn event_loop(
 
         tokio::select! {
             // Terminal input.
-            maybe_ev = next_terminal_event(&mut pending_events, term_events, term_rx) => {
+            maybe_ev = next_terminal_event(&mut pending_events, term_events, &mut term_rx) => {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) if is_cancel_chord(&key)
                         && app.resume.is_loading() =>
@@ -2508,15 +2400,17 @@ pub(super) async fn event_loop(
                     // Summary-only listing: it is index-cached and skips
                     // deserializing every transcript, which is the entire
                     // cost of the full read for data the picker never shows.
-                    // Cwd-matched sessions first, then any other recent
-                    // session fills the remaining slots — so a session
-                    // created in another directory (or before cwd
-                    // canonicalization was consistent) still appears below
-                    // the local ones instead of being hidden.
-                    let rows = agent_code_lib::services::session::list_sessions_cwd_first(
+                    let mut rows = agent_code_lib::services::session::list_sessions_for_cwd(
                         &here,
                         SESSION_PICKER_LIMIT,
                     );
+                    if rows.is_empty() {
+                        // Fallback: no sessions match this cwd — show all
+                        // recent ones so the picker never looks empty.
+                        rows = agent_code_lib::services::session::list_session_summaries(
+                            SESSION_PICKER_LIMIT,
+                        );
+                    }
                     let _ = tx.send((generation, rows));
                 });
             }
@@ -2531,32 +2425,6 @@ pub(super) async fn event_loop(
                 if generation == session_scan_generation && !app.pending_session_list {
                     app.accept_session_scan(rows);
                 }
-            }
-            // Live model list for the picker, fetched off-thread on `/model`.
-            // The static catalog already opened the picker; this arm upgrades
-            // it in place once the network call lands, so the provider fetch
-            // never stalls input or repaint. Mirrors the session-list fetch:
-            // the receiver is held in a local and only polled while present.
-            Some((kind, entries)) = async {
-                match &mut model_fetch_rx {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            }, if model_fetch_rx.is_some() => {
-                // The receiver owns the stream; drop it after the one result
-                // (or close) so the arm stops being ready. The apply only
-                // touches the open picker, so a dismissed picker is harmless.
-                model_fetch_rx = None;
-                if let Some(p) = app.model_picker.as_mut() {
-                    // Re-anchor the selection on the previously active model
-                    // so the user's cursor does not jump to the top.
-                    let cur = p.current.clone();
-                    p.entries = entries;
-                    p.selected = p.entries.iter().position(|(id, _)| id == &cur).unwrap_or(0);
-                    p.top = p.selected.saturating_sub(6);
-                }
-                app.dirty = true;
-                let _ = kind;
             }
             // Read and rebuild the selected session off-thread: a long
             // conversation is megabytes of JSON, and deserializing it on
@@ -2690,45 +2558,19 @@ pub(super) async fn event_loop(
                 app.dirty = true;
             }
             // Background-task rows (`&` shell jobs, workflows, monitors).
-            // Event-driven: the manager wakes `wait_for_change` on every
-            // transition, so we repaint only when something actually
-            // changed. Gated on a live turn or existing working rows so an
-            // idle session with only terminal (e.g. subagent) rows never
-            // wakes — the notify stops firing once nothing can change.
-            _ = task_manager.wait_for_change(), if live || app.has_live_manager_tasks() => {
+            // Gated on work that can still change: polling while any
+            // rows exist at all would tick forever once a subagent row
+            // (which persists for the session) appears.
+            _ = tasks_tick.tick(), if live || app.has_live_manager_tasks() => {
                 let rows = manager_rows(&task_manager).await;
                 app.sync_background_tasks(rows);
             }
             // Micro-animations: spinner, action-required blink, toast decay.
-            // The on-screen spinner handles animation; the window title is
-            // set once at startup and not rewritten here, because doing so
-            // on every tick during streaming spams the title bar (noisy on
-            // Termux) without adding information the screen already shows.
             _ = anim_tick.tick(), if live || app.needs_anim_tick() => {
                 if app.needs_anim_tick() {
                     app.tick();
+                    update_terminal_title(app);
                 }
-            }
-            // Periodic checkpoint of the live conversation (see SAVE_INTERVAL).
-            // Only fires while idle — no turn running, nothing buffered, no
-            // resume read in flight — because a turn holds the engine mutex
-            // for its whole duration; checkpointing during a turn would
-            // either block on the lock or serialize stale state. The write is
-            // detached to a blocking thread so a large transcript never stalls
-            // input or repaint. The session id is captured here (under no lock)
-            // and the snapshot is taken on the worker from a fresh try_lock, so
-            // an epoch change between scheduling and execution is ignored
-            // rather than writing a stale conversation over the live one.
-            _ = save_tick.tick(), if !live && pending_restore.is_none() =>
-            {
-                let engine_arc = session.engine();
-                tokio::task::spawn_blocking(move || {
-                    if let Ok(eng) = engine_arc.try_lock()
-                        && let Some(snap) = session_snapshot(&eng)
-                    {
-                        let _ = write_session_snapshot(&snap);
-                    }
-                });
             }
         }
 
@@ -2802,13 +2644,16 @@ struct SessionSnapshot {
     response_style: String,
     base_url: String,
     repo: String,
-    /// Reasoning effort at save time (so `/resume` re-applies `--effort high`).
+    /// Reasoning effort in effect at save time (`low`/`medium`/`high`).
+    /// Restored on `/resume` so `/effort` survives a restart.
     effort: Option<String>,
-    /// `/add-dir` working set at save time.
+    /// `/add-dir` targets accumulated while the session was live, so the
+    /// restored system prompt re-authorizes reads/edits outside `cwd`.
     additional_dirs: Vec<String>,
-    /// Pre-`/fast` model, so fast mode can be re-entered on resume.
+    /// `config.api.model` saved *before* `/fast` swapped in the fast
+    /// alternative — fast mode is re-activated on resume when Some.
     pre_fast_model: Option<String>,
-    /// Active disk output style id at save time (re-loaded from disk on resume).
+    /// Disk-loaded output style active at save time, by id.
     disk_output_style: Option<String>,
 }
 
@@ -2848,10 +2693,7 @@ fn session_snapshot(eng: &agent_code_lib::query::QueryEngine) -> Option<SessionS
         effort: st.config.api.effort.clone(),
         additional_dirs: st.additional_dirs.clone(),
         pre_fast_model: st.pre_fast_model.clone(),
-        disk_output_style: st
-            .disk_output_style
-            .as_ref()
-            .map(|s| s.name.clone()),
+        disk_output_style: st.disk_output_style.as_ref().map(|s| s.name.clone()),
     })
 }
 
@@ -4497,64 +4339,33 @@ fn sanitize_osc_title(s: &str) -> String {
         .collect()
 }
 
-/// Render the session cwd as a compact `~`-prefixed path for the title bar,
-/// so the tab shows the working directory (e.g. `~/agent-code`) rather than
-/// the model name — which is what the user wants at a glance across tabs.
-fn cwd_title(cwd: &str) -> String {
-    let path = std::path::Path::new(cwd);
-    match dirs::home_dir() {
-        Some(home) if path.starts_with(&home) => {
-            let rel = path.strip_prefix(&home).unwrap().to_string_lossy();
-            if rel.is_empty() {
-                "~".to_string()
-            } else {
-                format!("~/{rel}")
-            }
-        }
-        _ => cwd.to_string(),
-    }
-}
-
-/// OSC 0 window title: braille spinner + working dir when live; calm idle title.
+/// OSC 0 window title: braille spinner + model when live; calm idle title.
 fn update_terminal_title(app: &App) {
-    let dir = sanitize_osc_title(&cwd_title(&app.cwd));
+    use std::io::Write;
+    let model = sanitize_osc_title(&app.model);
     let title = match app.phase {
         super::app::Phase::Streaming => {
             format!(
                 "{} agent · {} · {}",
                 super::anim::spinner_glyph(app.tick),
-                dir,
+                model,
                 app.waiting_on.label_with_elapsed(app.thinking_started_at)
             )
         }
         super::app::Phase::Permission => {
             if super::anim::blink_visible(app.tick, app.terminal_focused) {
-                format!("⚠ action required · {dir}")
+                format!("⚠ action required · {model}")
             } else {
-                format!("agent · {dir}")
+                format!("agent · {model}")
             }
         }
-        _ => format!("agent · {dir}"),
+        _ => format!("agent · {model}"),
     };
     let title = sanitize_osc_title(&title);
-    emit_terminal_title(&title);
-}
-
-/// Write an OSC 0 window title sequence (title BEL) to stdout.
-fn emit_terminal_title(title: &str) {
-    use std::io::Write;
+    // OSC 0 ; title BEL
     let seq = format!("\x1b]0;{title}\x07");
     let _ = std::io::stdout().write_all(seq.as_bytes());
     let _ = std::io::stdout().flush();
-}
-
-/// Restore the terminal tab title on exit by clearing the agent's `agent · <dir>`
-/// string. Termux (and xterm-style terminals) do not reliably report the
-/// previous title back, so rather than leave the agent's title lingering in the
-/// tab after the process ends, we clear it — the shell's prompt repaints the
-/// real title on the next command (plan §M7/§M9).
-fn restore_terminal_title() {
-    emit_terminal_title("");
 }
 
 /// Apply a UI session mode to the engine so it takes effect immediately —
@@ -4814,23 +4625,6 @@ mod tests {
         assert_eq!(clean, "evil[31mred[0m");
         // Normal model names and unicode remain.
         assert_eq!(sanitize_osc_title("grok-4 · β"), "grok-4 · β");
-    }
-
-    #[test]
-    fn cwd_title_prefixes_home_with_tilde() {
-        // Force a known HOME so the test is environment-independent.
-        // SAFETY: single-threaded test; setting/removing an env var here is
-        // only unsafe under concurrent access, which the test harness avoids.
-        unsafe {
-            std::env::set_var("HOME", "/home/tester");
-        }
-        assert_eq!(cwd_title("/home/tester"), "~");
-        assert_eq!(cwd_title("/home/tester/agent-code"), "~/agent-code");
-        // A path that doesn't live under HOME passes through unchanged.
-        assert_eq!(cwd_title("/tmp/elsewhere"), "/tmp/elsewhere");
-        unsafe {
-            std::env::remove_var("HOME");
-        }
     }
 
     fn key(code: KeyCode) -> KeyEvent {

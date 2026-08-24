@@ -384,26 +384,29 @@ impl OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::Network(format!("chat/completions: {e}")))?;
+            .map_err(|e| ProviderError::Network(e.to_string()))?;
 
         let status = response.status();
         if !status.is_success() {
-            // Read Retry-After (header) before text() consumes the response.
-            let header_retry = header_retry_after_ms(&response);
+            // Read Retry-After before text() consumes the response.
+            let ra_ms = retry_after_ms(&response, 1000);
             let body_text = response.text().await.unwrap_or_default();
-            let ra_ms = retry_after_ms(header_retry, &body_text, 1000);
             warn!("OpenAI chat/completions API error {status}: {body_text}");
-            let status_code = status.as_u16();
-            return match status_code {
+            return match status.as_u16() {
                 401 | 403 => Err(ProviderError::Auth(body_text)),
                 429 => Err(ProviderError::RateLimited {
                     retry_after_ms: ra_ms,
                 }),
-                529 | 503 => Err(ProviderError::Overloaded),
+                529 => Err(ProviderError::Overloaded),
                 413 => Err(ProviderError::RequestTooLarge(body_text)),
-                _ => Err(ProviderError::Network(format!(
-                    "{status_code}: {body_text}"
-                ))),
+                // 400/404 on an OpenAI-compatible endpoint almost always mean
+                // the requested model id does not exist on that provider (e.g.
+                // OpenCode `laguna-s-2.1:free` not mirrored). Surface these as
+                // InvalidResponse so the retry/failover layer can treat them as
+                // model-unavailable and repoint the request at a fallback
+                // provider instead of treating them as opaque network errors.
+                400 | 404 => Err(ProviderError::InvalidResponse(body_text)),
+                _ => Err(ProviderError::Network(format!("{status}: {body_text}"))),
             };
         }
 
@@ -445,26 +448,29 @@ impl OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::Network(format!("responses: {e}")))?;
+            .map_err(|e| ProviderError::Network(e.to_string()))?;
 
         let status = response.status();
         if !status.is_success() {
-            // Read Retry-After (header) before text() consumes the response.
-            let header_retry = header_retry_after_ms(&response);
+            // Read Retry-After before text() consumes the response.
+            let ra_ms = retry_after_ms(&response, 1000);
             let body_text = response.text().await.unwrap_or_default();
-            let ra_ms = retry_after_ms(header_retry, &body_text, 1000);
             warn!("OpenAI responses API error {status}: {body_text}");
-            let status_code = status.as_u16();
-            return match status_code {
+            return match status.as_u16() {
                 401 | 403 => Err(ProviderError::Auth(body_text)),
                 429 => Err(ProviderError::RateLimited {
                     retry_after_ms: ra_ms,
                 }),
-                529 | 503 => Err(ProviderError::Overloaded),
+                529 => Err(ProviderError::Overloaded),
                 413 => Err(ProviderError::RequestTooLarge(body_text)),
-                _ => Err(ProviderError::Network(format!(
-                    "{status_code}: {body_text}"
-                ))),
+                // 400/404 on an OpenAI-compatible endpoint almost always mean
+                // the requested model id does not exist on that provider (e.g.
+                // OpenCode `laguna-s-2.1:free` not mirrored). Surface these as
+                // InvalidResponse so the retry/failover layer can treat them as
+                // model-unavailable and repoint the request at a fallback
+                // provider instead of treating them as opaque network errors.
+                400 | 404 => Err(ProviderError::InvalidResponse(body_text)),
+                _ => Err(ProviderError::Network(format!("{status}: {body_text}"))),
             };
         }
 
@@ -492,94 +498,22 @@ impl Provider for OpenAiProvider {
             OpenAiApi::Nemotron => self.stream_nemotron(request).await,
         }
     }
-
-    async fn fetch_models(&self) -> Result<Vec<(String, String)>, ProviderError> {
-        // Fetch models from the OpenAI-compatible endpoint
-        let url = format!("{}/models", self.base_url);
-
-        let mut headers = self.auth_headers().await?;
-        headers.insert(
-            reqwest::header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
-
-        let response = self
-            .http
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Network(format!("models: {e}")))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body_text = response.text().await.unwrap_or_default();
-            let status_code = status.as_u16();
-            return Err(match status_code {
-                401 | 403 => ProviderError::Auth(body_text),
-                429 => ProviderError::RateLimited {
-                    retry_after_ms: 1000,
-                },
-                529 | 503 => ProviderError::Overloaded,
-                _ => ProviderError::InvalidResponse(format!("{status_code}: {body_text}")),
-            });
-        }
-
-        let json: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
-
-        let mut models = Vec::new();
-        if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
-            for model in data {
-                if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
-                    // Use the ID as both name and description for now
-                    // Could enhance by trying to get more descriptive info if available
-                    models.push((id.to_string(), id.to_string()));
-                }
-            }
-        }
-
-        Ok(models)
-    }
 }
 
-/// Parse the `Retry-After` wait from a 429 response, preferring the
-/// `Retry-After` header value (already extracted to avoid moving the
-/// response) and falling back to a `retry_after` field in the JSON body when
-/// the header is absent or unparseable. Returns milliseconds so a 429
-/// backoff honors the server's requested wait instead of a fixed guess.
-/// HTTP-date header form is not parsed (unusual for LLM APIs). Falls back to
-/// `default_ms` when neither is present or the parsed value is 0/non-positive.
-fn retry_after_ms(header_retry_ms: Option<u64>, body: &str, default_ms: u64) -> u64 {
-    if let Some(secs_ms) = header_retry_ms.filter(|ms| *ms > 0) {
-        return secs_ms;
-    }
-
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
-        && let Some(retry) = v
-            .get("error")
-            .and_then(|e| e.get("retry_after"))
-            .and_then(|r| r.as_f64())
-        && retry > 0.0
-    {
-        return (retry * 1000.0) as u64;
-    }
-
-    default_ms
-}
-
-/// Extract the `Retry-After` header (delta-seconds; integer or fractional)
-/// as milliseconds before the response is consumed by `text()`.
-fn header_retry_after_ms(response: &reqwest::Response) -> Option<u64> {
+/// Parse the `Retry-After` header (delta-seconds; integer or fractional) into
+/// milliseconds, so a 429 backoff honors the server's requested wait instead of
+/// a fixed guess. HTTP-date form is not parsed (unusual for LLM APIs); falls
+/// back to `default_ms` when the header is absent or unparseable. Must be called
+/// before `response.text()`, which consumes the response.
+fn retry_after_ms(response: &reqwest::Response, default_ms: u64) -> u64 {
     response
         .headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<f64>().ok())
-        .filter(|secs| *secs > 0.0)
+        .filter(|secs| *secs >= 0.0)
         .map(|secs| (secs * 1000.0) as u64)
+        .unwrap_or(default_ms)
 }
 
 fn spawn_chat_completions_stream(
@@ -616,9 +550,7 @@ fn spawn_chat_completions_stream(
             let chunk = match chunk_result {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = tx
-                        .send(StreamEvent::Error(format!("stream read error: {e}")))
-                        .await;
+                    let _ = tx.send(StreamEvent::Error(e.to_string())).await;
                     break;
                 }
             };
@@ -807,9 +739,7 @@ fn spawn_nemotron_stream(
             let chunk = match chunk_result {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = tx
-                        .send(StreamEvent::Error(format!("stream read error: {e}")))
-                        .await;
+                    let _ = tx.send(StreamEvent::Error(e.to_string())).await;
                     break;
                 }
             };
@@ -995,9 +925,7 @@ fn spawn_responses_stream(
             let chunk = match chunk_result {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = tx
-                        .send(StreamEvent::Error(format!("stream read error: {e}")))
-                        .await;
+                    let _ = tx.send(StreamEvent::Error(e.to_string())).await;
                     break;
                 }
             };
@@ -1575,5 +1503,58 @@ mod tests {
         );
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.output_tokens, 0);
+    }
+
+    // 404/400 on an OpenAI-compatible endpoint means the model id is not
+    // served by that provider; the retry/failover layer relies on these
+    // being surfaced as InvalidResponse (not a generic Network error) so
+    // it can repoint the request at a fallback provider. This test spins
+    // up a throwaway TCP server that answers the chat/completions POST
+    // with a 404 and asserts the mapping.
+    #[tokio::test]
+    async fn stream_maps_404_on_unknown_model_to_invalid_response() {
+        use crate::llm::provider::ProviderError;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}/v1");
+
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = s.read(&mut buf).await;
+            let body = r#"{"error":{"message":"model laguna-s-2.1:free not found","type":"invalid_request_error"}}"#;
+            let mut resp = String::new();
+            resp.push_str("HTTP/1.1 404 Not Found\r\n");
+            resp.push_str("Content-Type: application/json\r\n");
+            resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
+            resp.push_str("Connection: close\r\n\r\n");
+            resp.push_str(body);
+            let _ = s.write_all(resp.as_bytes()).await;
+        });
+
+        let provider = OpenAiProvider::new(&base, "test-key");
+        let request = ProviderRequest {
+            model: "laguna-s-2.1:free".into(),
+            system_prompt: String::new(),
+            messages: vec![],
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_tokens: 100,
+            temperature: None,
+            enable_caching: false,
+            metadata: None,
+            cancel: CancellationToken::new(),
+            stream_timeout: None,
+        };
+
+        let err = provider.stream(&request).await.unwrap_err();
+        server.await.unwrap();
+        assert!(
+            matches!(err, ProviderError::InvalidResponse(_)),
+            "expected InvalidResponse, got {err:?}"
+        );
     }
 }

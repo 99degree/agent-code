@@ -696,6 +696,49 @@ impl ProviderKind {
             _ => None,
         }
     }
+
+    /// Resolve a concrete model id from a provider's live `/models`
+    /// catalog by substring match against `search_fragment`. Used by the
+    /// cross-provider failover path, where the failover table stores only
+    /// the *fragment* of the mirror model (e.g. OpenCode `laguna-s` →
+    /// Kilo `laguna-s-2.1:free`, or OpenCode `x-preview-f-free` → Kilo
+    /// `stealth/ox-alpha`) and we must not hard-code free-tier names that
+    /// change over time.
+    ///
+    /// Returns `None` when the provider exposes no `/models` endpoint, has
+    /// no API key, or no listed model matches the fragment. The caller
+    /// decides how to proceed (fall back to the fragment, or abort).
+    pub async fn fetch_matching_model(
+        provider: ProviderKind,
+        search_fragment: &str,
+    ) -> Option<String> {
+        let base = provider
+            .default_base_url()?
+            .trim_end_matches('/')
+            .to_string();
+        let key = provider.api_key_from_env()?;
+        let url = format!("{base}/models");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .ok()?;
+        let resp = client.get(&url).bearer_auth(&key).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let body: serde_json::Value = resp.json().await.ok()?;
+        // OpenAI-compatible endpoints return { "data": [ { "id": ... }, ... ] }.
+        let items = body.get("data").and_then(|v| v.as_array())?;
+        let needle = search_fragment.to_ascii_lowercase();
+        for item in items {
+            if let Some(id) = item.get("id").and_then(|v| v.as_str())
+                && id.to_ascii_lowercase().contains(&needle)
+            {
+                return Some(id.to_string());
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1168,5 +1211,21 @@ mod tests {
         assert_eq!(ProviderKind::OpenCode.default_model(), Some("big-pickle"));
         // Providers without a curated catalog have no default model.
         assert_eq!(ProviderKind::OpenAiCompatible.default_model(), None);
+    }
+
+    // fetch_matching_model is a network + API-key call; the only hermetic
+    // guarantee we can assert is that it short-circuits to None when no
+    // key is configured for the target provider (no request is sent).
+    // Skip the assertion when a key is present, since then it would make
+    // a real network call.
+    #[tokio::test]
+    async fn fetch_matching_model_is_none_without_key() {
+        if std::env::var("KILO_API_KEY").is_ok() {
+            return;
+        }
+        assert_eq!(
+            ProviderKind::fetch_matching_model(ProviderKind::Kilo, "ox-alpha").await,
+            None
+        );
     }
 }

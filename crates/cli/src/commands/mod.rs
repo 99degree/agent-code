@@ -15,213 +15,8 @@ mod settings_sync;
 mod uninstall;
 
 use agent_code_lib::config::ApiAuthMode;
-use agent_code_lib::llm::provider::{Provider, ProviderKind};
+use agent_code_lib::llm::provider::ProviderKind;
 use agent_code_lib::query::QueryEngine;
-
-use once_cell::sync::Lazy;
-use std::collections::HashMap;
-use std::process::Stdio;
-use std::sync::Mutex;
-use tokio::runtime::Handle;
-use tokio::task::block_in_place;
-
-/// A `(model_id, description)` pair in a model picker list.
-pub(crate) type ModelEntries = (String, String);
-
-/// Channel payload for the off-thread model-list fetch: the resolved provider
-/// kind plus the merged `(static + live)` entries.
-pub(crate) type ModelFetchRx =
-    tokio::sync::mpsc::UnboundedReceiver<(ProviderKind, Vec<ModelEntries>)>;
-
-/// Live-fetched model lists keyed by provider kind. Fetched once per provider
-/// (see [`model_picker_entries`]); reused on later `/model` invocations and
-/// after switching away and back to a provider.
-type ModelCache = HashMap<ProviderKind, Vec<ModelEntries>>;
-
-pub(crate) static MODEL_CACHE: Lazy<Mutex<ModelCache>> = Lazy::new(|| Mutex::new(HashMap::new()));
-
-/// Build the interactive `/model` list for the *current* provider only.
-///
-/// The engine already holds a provider wired with the exact credentials it
-/// uses for requests (API key, or an OAuth session for xAI/Codex), so its
-/// `/models` list is the authoritative catalog. Start from the static catalog
-/// and override it with the live list when the endpoint returns models.
-///
-/// The fetch is cached per provider kind in [`MODEL_CACHE`] (fetch once, read
-/// many). Switching providers keeps the prior list, so returning to it reuses
-/// the cached models instead of re-hitting the network. An empty live result
-/// (e.g. Anthropic's `/models` stub) keeps the static catalog and is not
-/// cached.
-/// Merge the static catalog with a live model list.
-///
-/// Static entries are preserved (their curated descriptions are better than
-/// the raw id the live endpoint returns). Live models not present in the
-/// static catalog are appended, so a newly surfaced model is selectable
-/// without replacing the human-curated entries.
-fn merge_models(
-    static_catalog: &[(String, String)],
-    live: &[(String, String)],
-) -> Vec<(String, String)> {
-    let mut models: Vec<(String, String)> = static_catalog
-        .iter()
-        .map(|(n, d)| (n.to_string(), d.to_string()))
-        .collect();
-    for (id, desc) in live {
-        if !models.iter().any(|(n, _)| n.eq_ignore_ascii_case(id)) {
-            models.push((id.clone(), desc.clone()));
-        }
-    }
-    models
-}
-
-#[cfg(test)]
-mod catalog_tests {
-    use super::merge_models;
-
-    #[test]
-    fn static_entries_are_preserved_and_live_appended() {
-        let static_catalog = vec![
-            ("gpt-4o".to_string(), "GPT-4o".to_string()),
-            ("gpt-4o-mini".to_string(), "GPT-4o mini".to_string()),
-        ];
-        let live = vec![
-            ("gpt-4o".to_string(), "gpt-4o".to_string()),
-            ("gpt-5".to_string(), "gpt-5".to_string()),
-        ];
-        let merged = merge_models(&static_catalog, &live);
-        // Static descriptions win over the raw live id.
-        assert_eq!(merged[0], ("gpt-4o".to_string(), "GPT-4o".to_string()));
-        // No duplicate for the static model that also appeared live.
-        assert_eq!(merged.iter().filter(|(n, _)| n == "gpt-4o").count(), 1);
-        // Newly surfaced live model is appended and selectable.
-        assert!(merged.iter().any(|(n, _)| n == "gpt-5"));
-        // Everything from the static catalog is still present.
-        assert!(merged.iter().any(|(n, _)| n == "gpt-4o-mini"));
-    }
-
-    #[test]
-    fn empty_live_keeps_static_catalog() {
-        let static_catalog = vec![("a".to_string(), "A".to_string())];
-        let live: Vec<(String, String)> = vec![];
-        let merged = merge_models(&static_catalog, &live);
-        assert_eq!(merged, static_catalog);
-    }
-}
-
-/// Resolve the provider and whether it is configured (API key set or
-/// non-API-key auth) for the engine's current model/base URL.
-fn provider_configured(engine: &QueryEngine) -> (ProviderKind, bool) {
-    let state = engine.state();
-    let kind = agent_code_lib::llm::provider::detect_provider(
-        &state.config.api.model,
-        &state.config.api.base_url,
-    );
-    let api_key = agent_code_lib::llm::provider::resolve_api_key(kind, &state.config);
-    let configured = state.config.api.auth_mode != agent_code_lib::config::ApiAuthMode::ApiKey
-        || api_key.is_some();
-    (kind, configured)
-}
-
-/// The static, curated catalog for the engine's current provider. Cheap and
-/// always available, so the model picker can open instantly without a trip
-/// to the network.
-pub(crate) fn static_model_entries(engine: &QueryEngine) -> Vec<(String, String)> {
-    let (kind, _) = provider_configured(engine);
-    agent_code_lib::llm::provider::models_for_provider(kind)
-        .iter()
-        .map(|(n, d)| (n.to_string(), d.to_string()))
-        .collect()
-}
-
-/// Kick the live model-list fetch off this thread. Returns a receiver that
-/// yields the merged `(static + live)` list (and writes it to the per-provider
-/// cache) when the request finishes, or `None` when the provider is
-/// unconfigured and there is nothing to fetch. The picker shows the static
-/// catalog until this arrives, keeping input and repaint responsive.
-pub(crate) fn spawn_model_fetch(engine: &QueryEngine) -> Option<ModelFetchRx> {
-    let (kind, configured) = provider_configured(engine);
-    if !configured {
-        return None;
-    }
-    // Already cached: return it synchronously as a one-shot so the picker
-    // upgrades without a round-trip.
-    if let Some(cached) = MODEL_CACHE.lock().unwrap().get(&kind).cloned() {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let static_catalog = agent_code_lib::llm::provider::models_for_provider(kind)
-            .iter()
-            .map(|(n, d)| (n.to_string(), d.to_string()))
-            .collect::<Vec<_>>();
-        let _ = tx.send((kind, merge_models(&static_catalog, &cached)));
-        return Some(rx);
-    }
-
-    let provider: std::sync::Arc<dyn Provider> = engine.llm().clone();
-    let static_catalog: Vec<(String, String)> =
-        agent_code_lib::llm::provider::models_for_provider(kind)
-            .iter()
-            .map(|(n, d)| (n.to_string(), d.to_string()))
-            .collect();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        match provider.fetch_models().await {
-            Ok(live) if !live.is_empty() => {
-                MODEL_CACHE
-                    .lock()
-                    .unwrap()
-                    .entry(kind)
-                    .or_insert(live.clone());
-                let _ = tx.send((kind, merge_models(&static_catalog, &live)));
-            }
-            // Empty or failed: keep the static catalog; nothing to upgrade to.
-            _ => {}
-        }
-    });
-    Some(rx)
-}
-
-/// Build the merged (static + live) model list for the engine's current
-/// provider, fetching live models inline. Kept for the CLI slash path where a
-/// synchronous fetch is acceptable.
-pub(crate) fn model_picker_entries(engine: &QueryEngine) -> Vec<(String, String)> {
-    let (kind, configured) = provider_configured(engine);
-
-    let static_catalog: Vec<(String, String)> =
-        agent_code_lib::llm::provider::models_for_provider(kind)
-            .iter()
-            .map(|(n, d)| (n.to_string(), d.to_string()))
-            .collect();
-    let mut models: Vec<(String, String)> = static_catalog.clone();
-
-    if configured {
-        let cached = MODEL_CACHE.lock().unwrap().get(&kind).cloned();
-        let live = if let Some(c) = cached {
-            c
-        } else {
-            match block_in_place(|| {
-                let handle = Handle::current();
-                handle.block_on(engine.llm().fetch_models())
-            }) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("Failed to fetch models for {kind:?}: {e}");
-                    Vec::new()
-                }
-            }
-        };
-        // Only trust the live list when it actually returned models; an empty
-        // result keeps the static catalog and is not cached.
-        if !live.is_empty() {
-            MODEL_CACHE
-                .lock()
-                .unwrap()
-                .entry(kind)
-                .or_insert(live.clone());
-            models = merge_models(&static_catalog, &live);
-        }
-    }
-
-    models
-}
 
 /// Result of executing a command.
 pub enum CommandResult {
@@ -261,12 +56,6 @@ pub const COMMANDS: &[Command] = &[
         name: "clear",
         aliases: &[],
         description: "Clear conversation history",
-        hidden: false,
-    },
-    Command {
-        name: "new",
-        aliases: &[],
-        description: "Start a fresh session (saves current, new id, empty history)",
         hidden: false,
     },
     Command {
@@ -930,8 +719,6 @@ pub fn slash_rewrites_conversation(cmd: &str) -> bool {
         resolve_slash_name(cmd).as_str(),
         // Whole-conversation swaps.
         "resume" | "session" | "pick-session"
-        // Fresh session: new id + empty history.
-        | "new"
         // Truncation and deletion (`/undo` resolves to `rewind`).
         | "rewind" | "snip"
         // `App::submit` intercepts a bare `/clear`, but only on an exact
@@ -1171,9 +958,6 @@ mod slash_lookup_tests {
             "/rewind 3",
             "/undo",
             "/snip 3-7",
-            // Fresh session: new id + empty history replaces the conversation.
-            "/new",
-            "/new anything",
             // `App::submit` only intercepts an exact `/clear`; the
             // argument form reaches the bridge and empties history there.
             "/clear",
@@ -1295,109 +1079,35 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             println!("Conversation cleared.");
             CommandResult::Handled
         }
-        Some("new") => {
-            // Persist the conversation being left so it is recoverable via
-            // `/resume` or `/sessions`, then start a brand-new session with a
-            // fresh id and empty history. Mirrors the conversation-scoped
-            // reset that `/resume` performs, but without loading any file.
-            //
-            // Reachable from the TUI too: `run` only dispatches a bare
-            // `/new` through the classic bridge when a turn does not hold
-            // the engine lock, and otherwise defers via `App::work` — the
-            // swap below is the single source of truth for both paths.
-            {
-                let state = engine.state();
-                if !state.messages.is_empty()
-                    || agent_code_lib::services::session::session_exists(&state.session_id)
-                {
-                    let _ = agent_code_lib::services::session::save_session_full(
-                        &state.session_id,
-                        &state.messages,
-                        &state.cwd,
-                        &state.config.api.model,
-                        state.turn_count,
-                        state.total_cost_usd,
-                        state.total_usage.input_tokens,
-                        state.total_usage.output_tokens,
-                        state.plan_mode,
-                        Some(
-                            agent_code_lib::services::session::ProviderIdentity::from_api(
-                                &state.config.api.base_url,
-                                state.config.api.auth_mode,
-                            ),
-                        ),
-                        state.brief_mode,
-                        state.response_style.name(),
-                        &state.config.api.base_url,
-                        &agent_code_lib::services::git::repo_name_sync(std::path::Path::new(
-                            &state.cwd,
-                        ))
-                        .unwrap_or_default(),
-                        state.config.api.effort.clone(),
-                        &state.additional_dirs,
-                        state.pre_fast_model.clone(),
-                        state.disk_output_style.as_ref().map(|s| s.name.clone()),
-                    );
-                }
-            }
-            let new_id = agent_code_lib::services::session::new_session_id();
-            {
-                let state = engine.state_mut();
-                state.session_id = new_id.clone();
-                state.messages.clear();
-                state.turn_count = 0;
-                state.total_cost_usd = 0.0;
-                state.total_usage = agent_code_lib::llm::message::Usage::default();
-                state.model_usage.clear();
-                state.plan_mode = false;
-                state.brief_mode = false;
-                state.compact_requested = false;
-            }
-            engine.set_live_plan_mode(false);
-            println!("Started a new session {new_id}.");
-            CommandResult::Handled
-        }
         Some("compact") => {
-            let is_running = engine.state().is_query_active;
-            if is_running {
-                // A turn is in flight. Queue the full compaction cascade to
-                // run at the next loop turn boundary (right before the next
-                // API request) so it reuses the auto-compact path — including
-                // the LLM summary and context-collapse fallback — and never
-                // mutates history in the middle of an iteration. The flag is
-                // consumed in `QueryEngine::run_turn_inner`.
-                engine.state_mut().compact_requested = true;
-                println!("Compaction queued — it will run before the next API request.");
+            // Snapshot the stats the user would see, then fire PreCompact
+            // hooks before we mutate history. This lets users archive or
+            // export before compaction replaces older messages.
+            let pre_len = engine.state().messages.len();
+            let estimated = agent_code_lib::services::compact::estimate_compactable_tokens(
+                engine.state().messages.as_slice(),
+                2,
+            );
+            let handle = tokio::runtime::Handle::try_current();
+            if let Ok(ref h) = handle {
+                let _ = h.block_on(engine.fire_pre_compact_hooks(pre_len, estimated));
+            }
+            let freed = agent_code_lib::services::compact::microcompact(
+                &mut engine.state_mut().messages,
+                2,
+            );
+            if freed > 0 {
+                println!("Freed ~{freed} estimated tokens.");
             } else {
-                // No turn running: fire PreCompact hooks before mutating
-                // history so users can archive/export first, then run the
-                // microcompact pass they expect from a manual invocation.
-                let pre_len = engine.state().messages.len();
-                let estimated = agent_code_lib::services::compact::estimate_compactable_tokens(
-                    engine.state().messages.as_slice(),
-                    2,
-                );
-                let handle = tokio::runtime::Handle::try_current();
-                if let Ok(ref h) = handle {
-                    let _ = h.block_on(engine.fire_pre_compact_hooks(pre_len, estimated));
-                }
-                let freed = agent_code_lib::services::compact::microcompact(
-                    &mut engine.state_mut().messages,
-                    2,
-                );
-                if freed > 0 {
-                    println!("Freed ~{freed} estimated tokens.");
-                } else {
-                    println!("Nothing to compact.");
-                }
-                // PostCompact fires with the realized outcome so audit hooks
-                // can pair the estimate with ground truth. Even when nothing
-                // was freed (freed == 0), firing gives hooks a chance to log
-                // the no-op — /compact was still user-invoked.
-                let post_len = engine.state().messages.len();
-                if let Ok(h) = handle {
-                    let _ = h.block_on(engine.fire_post_compact_hooks(pre_len, post_len, freed));
-                }
+                println!("Nothing to compact.");
+            }
+            // PostCompact fires with the realized outcome so audit hooks
+            // can pair the estimate with ground truth. Even when nothing
+            // was freed (freed == 0), firing gives hooks a chance to log
+            // the no-op — /compact was still user-invoked.
+            let post_len = engine.state().messages.len();
+            if let Ok(h) = handle {
+                let _ = h.block_on(engine.fire_post_compact_hooks(pre_len, post_len, freed));
             }
             CommandResult::Handled
         }
@@ -1628,109 +1338,46 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
 
                 println!("Model changed to: {new_model} [{provider_kind:?}]");
             } else {
-                // Interactive model selector for the *current* provider only.
-                //
-                // The engine already holds a provider wired with the exact
-                // credentials it uses for requests (API key, or an OAuth
-                // session for xAI/Codex), so its `/models` list is the
-                // authoritative catalog. The previous code probed every
-                // provider's env var and skipped OAuth entirely, which both
-                // hid the live list behind the static fallback and never
-                // reached OAuth endpoints. We start from the static catalog
-                // and override it with the live list when the endpoint returns
-                // models.
-                //
-                // The fetch is cached in `MODEL_CACHE` keyed by provider kind:
-                // fetch once, read many. Switching providers keeps the prior
-                // list, so returning to it reuses the cached models instead of
-                // re-hitting the network.
+                // Interactive model selector showing all configured providers.
                 let current = engine.state().config.api.model.clone();
-                let (kind, configured) = {
-                    let state = engine.state();
-                    let kind = agent_code_lib::llm::provider::detect_provider(
-                        &state.config.api.model,
-                        &state.config.api.base_url,
-                    );
-                    let api_key =
-                        agent_code_lib::llm::provider::resolve_api_key(kind, &state.config);
-                    let configured = state.config.api.auth_mode
-                        != agent_code_lib::config::ApiAuthMode::ApiKey
-                        || api_key.is_some();
-                    (kind, configured)
-                };
 
-                let static_catalog: Vec<(String, String)> =
-                    agent_code_lib::llm::provider::models_for_provider(kind)
-                        .iter()
-                        .map(|(n, d)| (n.to_string(), d.to_string()))
-                        .collect();
-                let mut models: Vec<(String, String)> = static_catalog.clone();
-
-                if configured {
-                    let cached = MODEL_CACHE.lock().unwrap().get(&kind).cloned();
-                    let live = if let Some(c) = cached {
-                        c
-                    } else {
-                        match block_in_place(|| {
-                            let handle = Handle::current();
-                            handle.block_on(engine.llm().fetch_models())
-                        }) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                eprintln!("Failed to fetch models for {kind:?}: {e}");
-                                // Record the failed fetch as a system message so
-                                // the next `/model` invocation retries it (the
-                                // cache only stores successes). No inline retry
-                                // here — surfacing the failure and letting the
-                                // next invocation re-attempt keeps the picker
-                                // responsive on a flaky endpoint.
-                                engine
-                                    .state_mut()
-                                    .messages
-                                    .push(agent_code_lib::llm::message::Message::System(
-                                        agent_code_lib::llm::message::SystemMessage {
-                                            uuid: uuid::Uuid::new_v4(),
-                                            timestamp: chrono::Utc::now().to_rfc3339(),
-                                            subtype:
-                                                agent_code_lib::llm::message::SystemMessageType::Informational,
-                                            content: format!(
-                                                "Failed to fetch live models for {kind:?}: {e}"
-                                            ),
-                                            level: agent_code_lib::llm::message::MessageLevel::Warning,
-                                        },
-                                    ));
-                                Vec::new()
-                            }
-                        }
-                    };
-                    // Only trust the live list when it actually returned
-                    // models (e.g. Anthropic's `/models` stub yields none); an
-                    // empty result keeps the static catalog and is not cached.
-                    if !live.is_empty() {
-                        MODEL_CACHE
-                            .lock()
-                            .unwrap()
-                            .entry(kind)
-                            .or_insert(live.clone());
-                        models = merge_models(&static_catalog, &live);
+                // Collect (model_name, description, provider_kind) tuples.
+                let mut all_models: Vec<(
+                    String,
+                    String,
+                    agent_code_lib::llm::provider::ProviderKind,
+                )> = Vec::new();
+                for &kind in agent_code_lib::llm::provider::ProviderKind::all() {
+                    if !kind.is_configured() {
+                        continue;
+                    }
+                    let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                    if models.is_empty() {
+                        continue;
+                    }
+                    for (name, desc) in models {
+                        all_models.push((name.to_string(), desc.to_string(), kind));
                     }
                 }
 
-                if models.is_empty() {
+                if all_models.is_empty() {
                     println!("Model: {current}");
                     println!(
-                        "No models available for the current provider ({}). \
-                         Set an API key or check the endpoint.",
-                        kind.env_var_name()
+                        "No providers configured. Set an API key (e.g. {}) to browse models.",
+                        agent_code_lib::llm::provider::detect_provider(
+                            &current,
+                            &engine.state().config.api.base_url,
+                        )
+                        .env_var_name()
                     );
                 } else {
                     println!();
                     println!("  Select model");
                     println!();
 
-                    let options: Vec<crate::ui::selector::SelectOption> = models
+                    let options: Vec<crate::ui::selector::SelectOption> = all_models
                         .iter()
-                        .map(|(name, desc)| {
+                        .map(|(name, desc, kind)| {
                             let check = if *name == current { " ✔" } else { "" };
                             crate::ui::selector::SelectOption {
                                 label: format!("{name}{check}"),
@@ -1743,21 +1390,18 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
 
                     let chosen = crate::ui::selector::select(&options);
                     if !chosen.is_empty() {
-                        // If this provider has a default base URL that differs
-                        // from the live config, repoint to it so the selection
-                        // takes effect for the next request.
-                        if let Some(url) = kind.default_base_url()
-                            && engine.state().config.api.base_url != url
-                        {
-                            engine.state_mut().config.api.base_url = url.to_string();
-                            if engine.state().config.api.auth_mode
-                                == agent_code_lib::config::ApiAuthMode::ApiKey
-                            {
-                                engine.reload_llm().ok();
+                        // Find the provider for this model and update base_url.
+                        let found_kind = all_models
+                            .iter()
+                            .find(|(n, _, _)| n == &chosen)
+                            .map(|(_, _, k)| *k);
+                        if let Some(kind) = found_kind {
+                            if let Some(url) = kind.default_base_url() {
+                                engine.state_mut().config.api.base_url = url.to_string();
                             }
                         }
                         engine.state_mut().config.api.model = chosen.clone();
-                        println!("Model changed to: {chosen} [{kind:?}]");
+                        println!("Model changed to: {chosen} [{found_kind:?}]");
                         // Record model change in conversation history.
                         engine
                             .state_mut()
@@ -1841,10 +1485,11 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             let filter_tag = args.and_then(|a| {
                 let after_tag = a.strip_prefix("--tag ")?.trim();
                 // Don't treat --all as a tag name.
-                after_tag
+                let tag_val = after_tag
                     .split_whitespace()
                     .next()
-                    .filter(|t| !t.eq_ignore_ascii_case("all"))
+                    .filter(|t| !t.eq_ignore_ascii_case("all"));
+                tag_val
             });
             let show_all = args
                 .map(|a| a.contains("--all") || a.contains("-a"))
@@ -1854,10 +1499,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             let mut sessions = if show_all {
                 agent_code_lib::services::session::list_sessions(100)
             } else {
-                // Cwd-matched first, then any other recent session fills the
-                // remaining slots — so a short/cross-directory session still
-                // appears below the local ones instead of being hidden.
-                agent_code_lib::services::session::list_sessions_cwd_first(&cwd, 100)
+                agent_code_lib::services::session::list_sessions_for_cwd(&cwd, 100)
             };
 
             if let Some(tag) = filter_tag {
@@ -3075,12 +2717,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             CommandResult::Handled
         }
         Some("version") => {
-            let sha = env!("AGENT_CODE_GIT_SHA");
-            if sha.is_empty() {
-                println!("agent {}", env!("CARGO_PKG_VERSION"));
-            } else {
-                println!("agent {}+{}", env!("CARGO_PKG_VERSION"), sha);
-            }
+            println!("agent {}", env!("CARGO_PKG_VERSION"));
             CommandResult::Handled
         }
         Some("update") => {
@@ -4828,7 +4465,6 @@ fn nearest_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
 fn git_user_email() -> Option<String> {
     let out = std::process::Command::new("git")
         .args(["config", "user.email"])
-        .stdin(Stdio::null())
         .output()
         .ok()?;
     if !out.status.success() {
@@ -6917,10 +6553,11 @@ fn execute_files(engine: &QueryEngine) {
 /// Esc/q leaves the current session untouched.
 fn execute_session_picker(engine: &mut QueryEngine) {
     let cwd = engine.state().cwd.clone();
-    // Cwd-matched sessions first; any other recent session fills the
-    // remaining slots so a short/cross-directory session still shows up
-    // below the local ones instead of being hidden.
-    let sessions = agent_code_lib::services::session::list_sessions_cwd_first(&cwd, 20);
+    let mut sessions = agent_code_lib::services::session::list_sessions_for_cwd(&cwd, 20);
+    if sessions.is_empty() {
+        // Fallback: show all sessions if none match this cwd.
+        sessions = agent_code_lib::services::session::list_sessions(20);
+    }
     if sessions.is_empty() {
         println!("No saved sessions to pick from.");
         return;
