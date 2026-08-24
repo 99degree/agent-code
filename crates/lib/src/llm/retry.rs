@@ -188,9 +188,9 @@ impl RetryState {
     pub fn reset(&mut self) {
         self.consecutive_failures = 0;
         self.rate_limit_retries = 0;
-        // Don't reset overload_retries or using_fallback — those persist.
-        // `using_failover` is per-turn, so it is also left intact
-        // here; the caller resets it between turns.
+        self.using_failover = false;
+        // Don't reset overload_retries or using_fallback — those persist
+        // across turns (once we've dropped to the small model, stay there).
     }
 }
 
@@ -400,6 +400,8 @@ mod tests {
                 retry_after: 3_600_000,
             },
             &config,
+            ProviderKind::OpenAi,
+            false,
         ) {
             RetryAction::Abort(msg) => assert!(msg.contains("long-wait"), "{msg}"),
             other => panic!("Expected Abort on long wait, got {other:?}"),
@@ -413,7 +415,12 @@ mod tests {
             long_wait_after_ms: 3_600_000,
             ..Default::default()
         };
-        match state.next_action(&RetryableError::RateLimited { retry_after: 500 }, &config) {
+        match state.next_action(
+            &RetryableError::RateLimited { retry_after: 500 },
+            &config,
+            ProviderKind::OpenAi,
+            false,
+        ) {
             RetryAction::Retry { after } => assert!(after.as_millis() >= 500),
             other => panic!("Expected Retry on short wait, got {other:?}"),
         }
@@ -587,18 +594,18 @@ mod tests {
         let err = RetryableError::Network;
 
         // First two transport failures should retry with backoff.
-        match state.next_action(&err, &config) {
+        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
             RetryAction::Retry { .. } => {}
             other => panic!("Expected Retry, got {other:?}"),
         }
-        match state.next_action(&err, &config) {
+        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
             RetryAction::Retry { .. } => {}
             other => panic!("Expected Retry, got {other:?}"),
         }
 
         // Third failure exceeds max_retries => abort, so the turn stops
         // instead of looping forever on an unreachable endpoint.
-        match state.next_action(&err, &config) {
+        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
             RetryAction::Abort(msg) => assert!(msg.contains("Network")),
             other => panic!("Expected Abort, got {other:?}"),
         }
@@ -611,7 +618,12 @@ mod tests {
         // not the short initial_backoff (1s).
         let mut state = RetryState::default();
         let config = RetryConfig::default();
-        match state.next_action(&RetryableError::Network, &config) {
+        match state.next_action(
+            &RetryableError::Network,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+        ) {
             RetryAction::Retry { after } => {
                 assert!(
                     after.as_millis() >= 5000,
