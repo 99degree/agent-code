@@ -17,6 +17,10 @@ mod uninstall;
 use agent_code_lib::config::ApiAuthMode;
 use agent_code_lib::llm::provider::ProviderKind;
 use agent_code_lib::query::QueryEngine;
+use std::collections::{HashMap, HashSet};
+use std::sync::{LazyLock, Mutex};
+use tokio::runtime::Handle;
+use tokio::task::block_in_place;
 
 /// Result of executing a command.
 pub enum CommandResult {
@@ -28,6 +32,60 @@ pub enum CommandResult {
     Passthrough(String),
     /// Command wants to inject a prompt for the agent.
     Prompt(String),
+}
+
+/// Per-provider cache of the merged (static + live) model list fetched from
+/// the API. Populated lazily on first `/model` and reused for the session.
+type ModelCache = LazyLock<Mutex<HashMap<ProviderKind, Vec<(String, String)>>>>;
+
+static MODEL_CACHE: ModelCache = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Merge static curated entries (whose descriptions win) with the live catalog.
+/// Live models that shadow a static id keep the curated description; new live
+/// ids are appended.
+pub(crate) fn merge_models(
+    static_list: &[(String, String)],
+    live: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = static_list.to_vec();
+    let known: HashSet<String> = out.iter().map(|(m, _)| m.clone()).collect();
+    for (m, d) in live {
+        if known.contains(m) {
+            continue;
+        }
+        out.push((m.clone(), d.clone()));
+    }
+    out
+}
+
+/// Whether to attempt a live fetch for this provider in the current config.
+/// API-key providers need their key present; OAuth providers (no key env var)
+/// attempt the fetch whenever auth mode isn't plain ApiKey.
+fn provider_wants_live(kind: ProviderKind, cfg: &agent_code_lib::config::Config) -> bool {
+    kind.api_key_from_env().is_some() || cfg.api.auth_mode != ApiAuthMode::ApiKey
+}
+
+/// Merged (static + live) model list for a provider, blocking on the API call.
+/// `execute()` runs inside the TUI's multi-threaded tokio runtime, so
+/// `block_in_place` + `Handle::current().block_on` is valid here.
+pub fn fetch_model_entries(engine: &QueryEngine, kind: ProviderKind) -> Vec<(String, String)> {
+    if let Some(cached) = MODEL_CACHE.lock().unwrap().get(&kind) {
+        return cached.clone();
+    }
+    let static_list: Vec<(String, String)> =
+        agent_code_lib::llm::provider::models_for_provider(kind)
+            .iter()
+            .map(|(m, d)| (m.to_string(), d.to_string()))
+            .collect();
+    let mut merged = merge_models(&static_list, &[]);
+    if provider_wants_live(kind, &engine.state().config) {
+        let provider = engine.provider();
+        if let Ok(live) = block_in_place(|| Handle::current().block_on(provider.fetch_models())) {
+            merged = merge_models(&static_list, &live);
+        }
+    }
+    MODEL_CACHE.lock().unwrap().insert(kind, merged.clone());
+    merged
 }
 
 /// A built-in command definition.
@@ -1351,12 +1409,12 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     if !kind.is_configured() {
                         continue;
                     }
-                    let models = agent_code_lib::llm::provider::models_for_provider(kind);
+                    let models = fetch_model_entries(engine, kind);
                     if models.is_empty() {
                         continue;
                     }
                     for (name, desc) in models {
-                        all_models.push((name.to_string(), desc.to_string(), kind));
+                        all_models.push((name, desc, kind));
                     }
                 }
 
@@ -1395,10 +1453,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             .iter()
                             .find(|(n, _, _)| n == &chosen)
                             .map(|(_, _, k)| *k);
-                        if let Some(kind) = found_kind {
-                            if let Some(url) = kind.default_base_url() {
-                                engine.state_mut().config.api.base_url = url.to_string();
-                            }
+                        if let Some(kind) = found_kind
+                            && let Some(url) = kind.default_base_url()
+                        {
+                            engine.state_mut().config.api.base_url = url.to_string();
                         }
                         engine.state_mut().config.api.model = chosen.clone();
                         println!("Model changed to: {chosen} [{found_kind:?}]");
@@ -1485,11 +1543,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             let filter_tag = args.and_then(|a| {
                 let after_tag = a.strip_prefix("--tag ")?.trim();
                 // Don't treat --all as a tag name.
-                let tag_val = after_tag
+                after_tag
                     .split_whitespace()
                     .next()
-                    .filter(|t| !t.eq_ignore_ascii_case("all"));
-                tag_val
+                    .filter(|t| !t.eq_ignore_ascii_case("all"))
             });
             let show_all = args
                 .map(|a| a.contains("--all") || a.contains("-a"))
@@ -7125,6 +7182,55 @@ mod tests {
     // Serialize tests that mutate the global VISUAL/EDITOR env vars so
     // parallel test execution on Windows doesn't see each other's writes.
     static EDITOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn merge_models_prefers_static_description_and_appends_live() {
+        let static_list = vec![
+            (
+                "anthropic:claude-3-5-sonnet".to_string(),
+                "Claude 3.5 Sonnet".to_string(),
+            ),
+            (
+                "anthropic:claude-3-7-sonnet".to_string(),
+                "Claude 3.7 Sonnet".to_string(),
+            ),
+        ];
+        let live_list = vec![
+            (
+                "anthropic:claude-3-7-sonnet".to_string(),
+                "claude-3-7-sonnet".to_string(),
+            ),
+            (
+                "anthropic:claude-3-8-sonnet".to_string(),
+                "claude-3-8-sonnet".to_string(),
+            ),
+        ];
+        let merged = merge_models(&static_list, &live_list);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(
+            merged[0],
+            (
+                "anthropic:claude-3-5-sonnet".to_string(),
+                "Claude 3.5 Sonnet".to_string()
+            )
+        );
+        // Static description wins when a model id overlaps the live list.
+        assert_eq!(
+            merged[1],
+            (
+                "anthropic:claude-3-7-sonnet".to_string(),
+                "Claude 3.7 Sonnet".to_string()
+            )
+        );
+        // Pure-live entries are appended.
+        assert_eq!(
+            merged[2],
+            (
+                "anthropic:claude-3-8-sonnet".to_string(),
+                "claude-3-8-sonnet".to_string()
+            )
+        );
+    }
 
     // ---- /cd helpers ----
 

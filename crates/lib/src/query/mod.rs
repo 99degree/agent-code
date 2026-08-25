@@ -110,6 +110,8 @@ pub struct QueryEngine {
     /// Live plan-mode flag readable at every tool decision without the
     /// engine mutex (mid-turn Shift+Tab / EnterPlanMode).
     live_plan_mode: Arc<std::sync::atomic::AtomicBool>,
+    pending_model: Arc<std::sync::Mutex<Option<String>>>,
+    pending_effort: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// Callback for streaming events to the UI.
@@ -235,6 +237,8 @@ impl QueryEngine {
         let initial_disk_output_style = state.disk_output_style.clone();
         let initial_effort = state.config.api.effort.clone();
         let live_plan_mode = Arc::new(std::sync::atomic::AtomicBool::new(state.plan_mode));
+        let pending_model = Arc::new(std::sync::Mutex::new(None));
+        let pending_effort = Arc::new(std::sync::Mutex::new(None));
         Self {
             llm,
             tools,
@@ -267,17 +271,27 @@ impl QueryEngine {
             steer_tx,
             steer_rx,
             live_plan_mode,
+            pending_model,
+            pending_effort,
         }
-    }
-
-    /// Shared permission checker (same Arc the tool executor uses).
-    pub fn permissions_handle(&self) -> Arc<PermissionChecker> {
-        self.permissions.clone()
     }
 
     /// Live plan-mode flag (lock-free mid-turn updates).
     pub fn live_plan_mode_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
         self.live_plan_mode.clone()
+    }
+
+    pub fn pending_model_handle(&self) -> Arc<std::sync::Mutex<Option<String>>> {
+        self.pending_model.clone()
+    }
+
+    pub fn pending_effort_handle(&self) -> Arc<std::sync::Mutex<Option<String>>> {
+        self.pending_effort.clone()
+    }
+
+    /// Shared permission checker (same Arc the tool executor uses).
+    pub fn permissions_handle(&self) -> Arc<PermissionChecker> {
+        self.permissions.clone()
     }
 
     /// Reset every piece of conversation-scoped state that a saved
@@ -338,6 +352,9 @@ impl QueryEngine {
         // Steered text typed at the old conversation but never drained
         // would be injected as a user message into the restored one.
         while self.steer_rx.try_recv().is_ok() {}
+
+        *self.pending_model.lock().unwrap() = None;
+        *self.pending_effort.lock().unwrap() = None;
 
         let initial_style = self.initial_disk_output_style.clone();
         let initial_effort = self.initial_effort.clone();
@@ -619,6 +636,15 @@ impl QueryEngine {
     /// [`crate::llm::provider::create_provider_from_config`].
     pub fn set_llm(&mut self, llm: Arc<dyn Provider>) {
         self.llm = llm;
+    }
+
+    /// Clone the active LLM provider handle.
+    ///
+    /// Lets CLI surfaces call provider methods (e.g. `fetch_models`, which
+    /// populates the `/model` picker with the provider's live catalog)
+    /// without taking ownership of the engine. The clone is cheap — `Arc`.
+    pub fn provider(&self) -> Arc<dyn Provider> {
+        self.llm.clone()
     }
 
     /// Rebuild the LLM provider object from the current config.
@@ -1066,6 +1092,26 @@ impl QueryEngine {
     /// iteration boundary *and* just before a turn would complete, so a
     /// message queued after the last iteration's drain is consumed by the
     /// current turn rather than leaking into the next one.
+    fn apply_pending_model_switch(&mut self, sink: &dyn StreamSink) {
+        let next_model = self.pending_model.lock().unwrap().take();
+        let next_effort = self.pending_effort.lock().unwrap().take();
+        if let Some(m) = &next_model {
+            sink.on_warning(&format!("MODEL_SWITCH_TO={m}"));
+        }
+        if let Some(e) = &next_effort {
+            sink.on_warning(&format!("EFFORT_TO={e}"));
+        }
+        if next_model.is_some() || next_effort.is_some() {
+            self.reset_system_prompt_cache();
+        }
+        if let Some(m) = next_model {
+            self.state.config.api.model = m;
+        }
+        if let Some(e) = next_effort {
+            self.state.config.api.effort = Some(e);
+        }
+    }
+
     async fn drain_steering(&mut self, sink: &dyn StreamSink) -> bool {
         let mut injected = false;
         while let Ok(steer) = self.steer_rx.try_recv() {
@@ -1214,6 +1260,8 @@ impl QueryEngine {
             // input reads as new user input rather than splitting a
             // tool-use/tool-result pair.
             self.drain_steering(sink).await;
+
+            self.apply_pending_model_switch(sink);
 
             // Budget check before each turn.
             let budget_config = crate::services::budget::BudgetConfig::default();
@@ -4539,6 +4587,132 @@ mod tests {
                 .await
                 .expect("cancelled turn should reach terminal status");
         assert_eq!(final_status, TurnStatus::Aborted);
+    }
+
+    // ---- mid-turn /model switch (lock-free pending handle) ----
+
+    /// A /model picked while a turn is running must take effect on the NEXT
+    /// request the turn issues, not only after the turn finishes. The switch
+    /// rides the lock-free pending_model arc so it never needs the engine
+    /// mutex the turn holds for its whole duration.
+    #[tokio::test]
+    async fn a_mid_turn_model_switch_applies_on_the_next_request() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // Park the FIRST request until the test has set the pending model, so
+        // the switch is guaranteed to land on the request that follows it
+        // (the in-flight first request keeps the old model; the next one
+        // uses the new one).
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let seen2 = seen.clone();
+        let release2 = release.clone();
+
+        struct GatedProvider {
+            calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+            seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+            release: std::sync::Arc<tokio::sync::Notify>,
+        }
+        #[async_trait::async_trait]
+        impl Provider for GatedProvider {
+            fn name(&self) -> &str {
+                "gated-mock"
+            }
+            async fn stream(
+                &self,
+                request: &ProviderRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>, ProviderError> {
+                let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    // Park before recording the model so the request is truly
+                    // in flight when the test flips the pending switch.
+                    self.release.notified().await;
+                }
+                self.seen.lock().unwrap().push(request.model.clone());
+                let (tx, rx) = tokio::sync::mpsc::channel(8);
+                tokio::spawn(async move {
+                    if n == 0 {
+                        // Tool-use so the turn loops and issues a 2nd request.
+                        let _ = tx.send(StreamEvent::TextDelta("hold".into())).await;
+                        let _ = tx
+                            .send(StreamEvent::ContentBlockComplete(ContentBlock::ToolUse {
+                                id: "t1".into(),
+                                name: "Glob".into(),
+                                input: serde_json::json!({"pattern": "*"}),
+                            }))
+                            .await;
+                    } else {
+                        let _ = tx
+                            .send(StreamEvent::ContentBlockComplete(ContentBlock::Text {
+                                text: "ok".into(),
+                            }))
+                            .await;
+                    }
+                    let _ = tx
+                        .send(StreamEvent::Done {
+                            usage: Usage::default(),
+                            stop_reason: Some(StopReason::EndTurn),
+                        })
+                        .await;
+                });
+                Ok(rx)
+            }
+        }
+
+        let mut engine = build_engine_with_max_turns(
+            std::sync::Arc::new(GatedProvider {
+                calls: calls.clone(),
+                seen: seen2.clone(),
+                release: release2.clone(),
+            }),
+            4,
+        );
+        engine.state.config.api.model = "first-model".into();
+
+        let session = Session::new(engine);
+        let mut handle = session
+            .spawn_turn("go".to_string(), std::sync::Arc::new(NullSink))
+            .await
+            .expect("spawn");
+
+        // Wait until the turn has started its first (in-flight) request, then
+        // request a switch through the lock-free handle -- exactly what the
+        // TUI does while the turn holds the engine lock.
+        loop {
+            if calls.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        session.request_model("second-model".into());
+        release.notify_one();
+
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_status())
+            .await
+            .expect("turn finishes");
+        assert_eq!(status, TurnStatus::Completed);
+
+        let seen_models = seen2.lock().unwrap().clone();
+        assert!(
+            seen_models.contains(&"first-model".to_string()),
+            "first request keeps the old model"
+        );
+        assert!(
+            seen_models.contains(&"second-model".to_string()),
+            "pending switch applied on a subsequent request"
+        );
+        assert_eq!(
+            *seen_models.last().unwrap(),
+            "second-model",
+            "the turn keeps running on the switched model"
+        );
+        assert_eq!(
+            seen_models[0], "first-model",
+            "first request keeps the old model"
+        );
+        assert_eq!(
+            seen_models[1], "second-model",
+            "second request should run on the pending-switched model"
+        );
     }
 
     // ---- steering ----
