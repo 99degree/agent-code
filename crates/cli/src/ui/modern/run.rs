@@ -949,16 +949,16 @@ pub(super) async fn event_loop(
     // Spinner animation (~12 fps) and coalescer flush deadline (~10 fps).
     // Both are only *polled* while a turn is live / text is buffered, so an
     // idle session never wakes on them.
-    let mut anim_tick = tokio::time::interval(Duration::from_millis(80));
+    let mut anim_tick = tokio::time::interval(Duration::from_millis(800));
     anim_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut flush_tick = tokio::time::interval(super::stream_buffer::FLUSH_INTERVAL);
     flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // Background tasks live in the shared `TaskManager`, which emits no
-    // events, so the pane has to ask. Polled only while a turn is live or
-    // rows already exist, so an idle session still never wakes — and the
-    // sync only marks the frame dirty when something actually changed.
-    let mut tasks_tick = tokio::time::interval(Duration::from_millis(750));
-    tasks_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Background tasks live in the shared `TaskManager`, which owns a
+    // `Notify` that fires on every task transition — so the pane repaints
+    // only when something actually changes (no fixed-interval poll, and
+    // an idle session never wakes for tasks). The arm stays gated on a
+    // live turn or existing working rows; once every row is terminal the
+    // notify won't fire again.
     let task_manager = {
         let engine_arc = session.engine();
         let eng = engine_arc.lock().await;
@@ -2589,10 +2589,11 @@ pub(super) async fn event_loop(
                 app.dirty = true;
             }
             // Background-task rows (`&` shell jobs, workflows, monitors).
-            // Gated on work that can still change: polling while any
-            // rows exist at all would tick forever once a subagent row
-            // (which persists for the session) appears.
-            _ = tasks_tick.tick(), if live || app.has_live_manager_tasks() => {
+            // Event-driven: the manager wakes `wait_for_change` on every
+            // transition, so the pane repaints only when something changed
+            // — the notify stops firing once no row can change, exactly
+            // matching the old poll's stop condition.
+            _ = task_manager.wait_for_change(), if live || app.has_live_manager_tasks() => {
                 let rows = manager_rows(&task_manager).await;
                 app.sync_background_tasks(rows);
             }
