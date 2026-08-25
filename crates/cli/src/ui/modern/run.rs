@@ -23,6 +23,7 @@ use futures::StreamExt;
 
 use super::resume_state::WorkScope;
 use super::terminal_caps::TerminalCaps;
+use crate::ui::modern::app::PendingModelAction;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
@@ -934,7 +935,7 @@ pub(super) async fn event_loop(
     cli_permissions: &CliPermissionOverride,
     notifier: &mut NotifierService,
     term_events: &mut (impl futures::Stream<Item = std::io::Result<Event>> + Unpin),
-    mut term_rx: &mut Option<mpsc::UnboundedReceiver<Event>>,
+    term_rx: &mut Option<mpsc::UnboundedReceiver<Event>>,
     draw: &mut dyn FnMut(&mut App) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let mut turn: Option<TurnHandle> = None;
@@ -1077,10 +1078,13 @@ pub(super) async fn event_loop(
             let engine_arc = session.engine();
             match engine_arc.try_lock() {
                 Ok(mut eng) => {
+                    // Idle (no turn holds the engine lock): apply directly to
+                    // the engine config as before, so the next turn starts on
+                    // the new model.
                     let current = eng.state().config.api.model.clone();
                     let base_url = eng.state().config.api.base_url.clone();
-                    let entries =
-                        crate::ui::modern::app::model_catalog_entries(&current, &base_url);
+                    let kind = agent_code_lib::llm::provider::detect_provider(&current, &base_url);
+                    let entries = crate::commands::fetch_model_entries(&eng, kind);
                     let mut next_model: Option<String> = None;
                     let mut next_effort: Option<Option<String>> = None;
                     app.apply_model_action(
@@ -1099,7 +1103,30 @@ pub(super) async fn event_loop(
                     }
                 }
                 Err(_) => {
-                    app.work.stage_model(action);
+                    // Engine is locked by a running turn: route the switch
+                    // through the lock-free pending handle so it takes effect
+                    // on the next in-flight request, instead of staging to be
+                    // retried after the turn finishes.
+                    if let PendingModelAction::Set { model, effort } = action {
+                        session.request_model(model.clone());
+                        // Mirror into the App badge immediately so the header
+                        // reflects the pending switch, like the idle path does.
+                        app.model = model.clone();
+                        if let Some(e) = effort {
+                            session.request_effort(e.clone());
+                            app.effort = Some(e.clone());
+                        }
+                        app.status_message = format!("model → {model} (next request)");
+                        app.transcript
+                            .push(super::app::TranscriptItem::System(format!(
+                                "Model change queued: {model} (applies to next request)"
+                            )));
+                        app.dirty = true;
+                    } else {
+                        // Show/SetEffort without a turn: re-stage for the next
+                        // idle loop so the catalog can open / effort apply.
+                        app.work.stage_model(action);
+                    }
                 }
             }
         }
@@ -1436,7 +1463,7 @@ pub(super) async fn event_loop(
                                     term_events,
                                     draw,
                                     &mut pending_events,
-                                    &mut term_rx,
+                                    term_rx,
                                     async {
                                         let mut eng = engine_arc.lock().await;
                                         // The scope Ctrl+C just cancelled
@@ -1514,7 +1541,7 @@ pub(super) async fn event_loop(
                                 term_events,
                                 draw,
                                 &mut pending_events,
-                                &mut term_rx,
+                                term_rx,
                                 async {
                                     let mut eng = engine_arc.lock().await;
                                     // The working set was announced as
@@ -1615,12 +1642,12 @@ pub(super) async fn event_loop(
                             // Restore per-session presentation state saved
                             // with the conversation.
                             st.brief_mode = data.brief_mode;
-                            if !data.response_style.is_empty() {
-                                if let Some(style) = agent_code_lib::state::ResponseStyle::from_name(
+                            if !data.response_style.is_empty()
+                                && let Some(style) = agent_code_lib::state::ResponseStyle::from_name(
                                     &data.response_style,
-                                ) {
-                                    st.response_style = style;
-                                }
+                                )
+                            {
+                                st.response_style = style;
                             }
                             if !data.base_url.is_empty() {
                                 st.config.api.base_url = data.base_url.clone();
@@ -1743,7 +1770,7 @@ pub(super) async fn event_loop(
                                 term_events,
                                 draw,
                                 &mut pending_events,
-                                &mut term_rx,
+                                term_rx,
                                 async {
                                     let _ =
                                         eng.fire_cwd_changed_hooks(&previous_cwd, "resume").await;
@@ -1771,7 +1798,7 @@ pub(super) async fn event_loop(
                             term_events,
                             draw,
                             &mut pending_events,
-                            &mut term_rx,
+                            term_rx,
                             async {
                                 let eng = engine_arc.lock().await;
                                 let _ = eng.fire_session_start_hooks().await;
@@ -2279,7 +2306,7 @@ pub(super) async fn event_loop(
 
         tokio::select! {
             // Terminal input.
-            maybe_ev = next_terminal_event(&mut pending_events, term_events, &mut term_rx) => {
+            maybe_ev = next_terminal_event(&mut pending_events, term_events, term_rx) => {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) if is_cancel_chord(&key)
                         && app.resume.is_loading() =>

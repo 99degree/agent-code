@@ -498,6 +498,47 @@ impl Provider for OpenAiProvider {
             OpenAiApi::Nemotron => self.stream_nemotron(request).await,
         }
     }
+
+    async fn fetch_models(&self) -> Result<Vec<(String, String)>, ProviderError> {
+        let url = format!("{}/models", self.base_url);
+        let headers = self.auth_headers().await?;
+        let response = self
+            .http
+            .get(&url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| ProviderError::Network(format!("models: {e}")))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            let status_code = status.as_u16();
+            return Err(match status_code {
+                401 | 403 => ProviderError::Auth(body_text),
+                429 => ProviderError::RateLimited {
+                    retry_after_ms: 1000,
+                },
+                529 | 503 => ProviderError::Overloaded,
+                _ => ProviderError::InvalidResponse(format!("{status_code}: {body_text}")),
+            });
+        }
+
+        let json: Value = response
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+
+        let mut models = Vec::new();
+        if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+            for model in data {
+                if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
+                    models.push((id.to_string(), id.to_string()));
+                }
+            }
+        }
+        Ok(models)
+    }
 }
 
 /// Parse the `Retry-After` header (delta-seconds; integer or fractional) into

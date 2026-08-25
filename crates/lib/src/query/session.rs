@@ -30,6 +30,12 @@ pub struct Session {
     engine: Arc<Mutex<QueryEngine>>,
     /// Lock-free plan-mode flag (same Arc the engine uses).
     live_plan_mode: Arc<AtomicBool>,
+    /// Live pending-model handle (same Arc the engine uses). A `/model`
+    /// picked mid-turn stores here so the running turn can apply it to the
+    /// next request without grabbing the engine lock it holds.
+    pending_model: Arc<std::sync::Mutex<Option<String>>>,
+    /// Live pending-effort handle (see [`Self::pending_model`]).
+    pending_effort: Arc<std::sync::Mutex<Option<String>>>,
     /// Live permission checker (same Arc the tool executor uses).
     permissions: Arc<PermissionChecker>,
 }
@@ -38,10 +44,14 @@ impl Session {
     /// Wrap an engine for spawnable-turn execution.
     pub fn new(engine: QueryEngine) -> Self {
         let live_plan_mode = engine.live_plan_mode_handle();
+        let pending_model = engine.pending_model_handle();
+        let pending_effort = engine.pending_effort_handle();
         let permissions = engine.permissions_handle();
         Self {
             engine: Arc::new(Mutex::new(engine)),
             live_plan_mode,
+            pending_model,
+            pending_effort,
             permissions,
         }
     }
@@ -96,6 +106,30 @@ impl Session {
     /// Whether live plan mode is currently enabled.
     pub fn live_plan_mode(&self) -> bool {
         self.live_plan_mode.load(Ordering::SeqCst)
+    }
+
+    /// Request a model change that takes effect on the next request a turn
+    /// makes. Lock-free: can be called while a turn holds the engine mutex,
+    /// so a mid-turn `/model` switch doesn't block or wait for the turn to
+    /// finish. The running turn reads this at its next iteration boundary.
+    pub fn request_model(&self, model: String) {
+        *self.pending_model.lock().unwrap() = Some(model);
+    }
+
+    /// Cancel any pending model change (e.g. when the request is abandoned).
+    pub fn clear_pending_model(&self) {
+        *self.pending_model.lock().unwrap() = None;
+    }
+
+    /// Request a reasoning-effort change for the next request (see
+    /// [`Self::request_model`]).
+    pub fn request_effort(&self, effort: String) {
+        *self.pending_effort.lock().unwrap() = Some(effort);
+    }
+
+    /// Cancel any pending effort change.
+    pub fn clear_pending_effort(&self) {
+        *self.pending_effort.lock().unwrap() = None;
     }
 
     /// Subscribe to the engine's turn-status stream.
