@@ -172,9 +172,6 @@ impl ConfigItem {
 pub struct ConfigPanel {
     items: Vec<ConfigItem>,
     cursor: usize,
-    /// First visible row (scroll offset), so the highlight stays pinned in
-    /// view on long lists — mirrors `ProviderPicker`.
-    top: usize,
     /// When editing an `enum` setting, the in-progress value picker overlay
     /// (its own ratatui modal, like the model/provider pickers).
     value_picker: Option<ValuePicker>,
@@ -197,7 +194,6 @@ impl ConfigPanel {
         Self {
             items,
             cursor: 0,
-            top: 0,
             value_picker: None,
         }
     }
@@ -229,15 +225,25 @@ impl ConfigPanel {
                 }
             };
             match key.code {
-                KeyCode::Up => {
+                KeyCode::Up | KeyCode::Char('k') => {
                     if self.cursor > 0 {
                         self.cursor -= 1;
                     }
                 }
-                KeyCode::Down => {
+                KeyCode::Down | KeyCode::Char('j') => {
                     if self.cursor + 1 < self.items.len() {
                         self.cursor += 1;
                     }
+                }
+                KeyCode::Home => self.cursor = 0,
+                KeyCode::End => {
+                    self.cursor = self.items.len().saturating_sub(1);
+                }
+                KeyCode::PageUp => {
+                    self.cursor = self.cursor.saturating_sub(10);
+                }
+                KeyCode::PageDown => {
+                    self.cursor = (self.cursor + 10).min(self.items.len().saturating_sub(1));
                 }
                 KeyCode::Esc | KeyCode::Char('q') => break,
                 KeyCode::Enter => {
@@ -348,6 +354,22 @@ impl ConfigPanel {
             .collect()
     }
 
+    /// Count the scope group headers that will be rendered for the current
+    /// (unsliced) item list, so the scroll window can reserve space for them.
+    /// Every contiguous run of settings sharing a scope emits exactly one
+    /// header; an empty list emits none.
+    fn scope_header_count(&self) -> usize {
+        let mut count = 0usize;
+        let mut prev: Option<Scope> = None;
+        for item in &self.items {
+            if prev != Some(item.setting.scope) {
+                count += 1;
+                prev = Some(item.setting.scope);
+            }
+        }
+        count
+    }
+
     /// Render the panel into a ratatui frame, reusing the same centered
     /// bordered modal box every other picker draws (`draw_modal_box`) so the
     /// look matches the model/provider pickers. The `value` column is the
@@ -360,17 +382,22 @@ impl ConfigPanel {
         let cols = (area.width.saturating_sub(6).clamp(40, 76).saturating_sub(2)) as usize;
         let max_rows = (area.height.saturating_sub(10) as usize).clamp(3, 12);
         let total = self.items.len();
-        // Keep `top` within a page of the cursor so the highlight is always
-        // visible regardless of how the list changed (mirrors the picker).
-        let mut top = self.top.min(total.saturating_sub(1));
-        if self.cursor < top {
-            top = self.cursor;
-        }
-        if self.cursor >= top.saturating_add(max_rows) {
-            top = self.cursor + 1 - max_rows;
-        }
+        // Recompute the scroll window from the *rendered* (post-group-header)
+        // line count, so the highlight and the last item always stay inside the
+        // visible box. `draw_modal_box` sizes the body from the rows the text
+        // will actually occupy once wrapped, which includes the scope group
+        // headers — so `max_rows` here must count those headers too, otherwise
+        // the window over-counts visible rows and the last item scrolls out of
+        // view with the first one clipped off the top.
+        let header_count = self.scope_header_count();
+        // Reserve one row per group header. On a pathologically short terminal
+        // this could eat the whole box, so never drop below one visible item.
+        let visible_budget = max_rows.saturating_sub(header_count).max(1);
+        let mut top = self.cursor.saturating_sub(visible_budget.saturating_sub(1));
+        top = top.min(total.saturating_sub(visible_budget));
+        top = top.min(self.cursor);
         let start = top;
-        let end = (start + max_rows).min(total);
+        let end = (start + visible_budget).min(total);
 
         // Settings are grouped by scope; a single dim header (e.g. `■ user`)
         // marks each group instead of repeating a `[scope]` tag on every row,
@@ -433,7 +460,9 @@ impl ConfigPanel {
             lines,
             " configuration ",
             t.accent,
-            Some(key_hint_line("[↑↓] move   [Enter] edit   [Esc/q] exit")),
+            Some(key_hint_line(
+                "[↑/k↓/j] move   [PgUp/PgDn/Hm/End] jump   [Enter] edit   [Esc/q] exit",
+            )),
         );
     }
 
@@ -688,7 +717,6 @@ mod tests {
         ConfigPanel {
             items,
             cursor: 0,
-            top: 0,
             value_picker: None,
         }
     }
