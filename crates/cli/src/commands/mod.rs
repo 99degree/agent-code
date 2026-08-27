@@ -261,6 +261,12 @@ pub const COMMANDS: &[Command] = &[
         hidden: false,
     },
     Command {
+        name: "config",
+        aliases: &["cfg"],
+        description: "Interactive configuration panel",
+        hidden: false,
+    },
+    Command {
         name: "fast",
         aliases: &[],
         description: "Toggle between the main model and a cheaper fast model",
@@ -402,12 +408,6 @@ pub const COMMANDS: &[Command] = &[
         name: "color",
         aliases: &[],
         description: "Switch color theme mid-session",
-        hidden: false,
-    },
-    Command {
-        name: "config",
-        aliases: &[],
-        description: "Show current configuration",
         hidden: false,
     },
     Command {
@@ -814,6 +814,8 @@ pub const INTERACTIVE_SLASH_NAMES: &[&str] = &[
     "uninstall",
     // Provider login picker + secret read.
     "login",
+    // Interactive `/config` panel (owns the raw terminal).
+    "config",
 ];
 
 pub fn is_interactive_slash(cmd: &str) -> bool {
@@ -836,6 +838,7 @@ pub fn needs_real_tty_stdout(cmd: &str) -> bool {
             | "powerup"
             | "uninstall"
             | "login"
+            | "config"
     )
 }
 
@@ -2549,25 +2552,19 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             CommandResult::Handled
         }
         Some("config") => {
-            let config = &engine.state().config;
-            println!("API:");
-            println!("  base_url: {}", config.api.base_url);
-            println!("  model: {}", config.api.model);
-            println!("  max_output_tokens: {:?}", config.api.max_output_tokens);
-            println!("  timeout: {}s", config.api.timeout_secs);
-            println!("  max_retries: {}", config.api.max_retries);
-            if let Some(max_cost) = config.api.max_cost_usd {
-                println!("  max_cost: ${:.2}", max_cost);
+            // `/config` is an interactive, full-screen panel — it owns the
+            // real terminal (raw mode + arrow keys), so it must run off the
+            // alt-screen like the other pickers. Bail out cleanly (and tell
+            // the user why) when stdout can't be a TTY.
+            if let Some(msg) = crate::ui::modern::non_interactive_reason_from_env() {
+                println!("Cannot open the configuration panel: {msg}");
+                return CommandResult::Handled;
             }
-            println!("\nPermissions:");
-            println!("  mode: {:?}", config.permissions.default_mode);
-            println!("  rules: {}", config.permissions.rules.len());
-            println!("\nUI:");
-            println!("  theme: {}", config.ui.theme);
-            println!("  edit_mode: {}", config.ui.edit_mode);
-            println!("  markdown: {}", config.ui.markdown);
-            println!("\nMCP servers: {}", config.mcp_servers.len());
-            println!("Hooks: {}", config.hooks.len());
+            use crate::ui::modern::config_panel::ConfigPanel;
+            crate::ui::modern::with_main_screen(|| match ConfigPanel::new(engine).run(engine) {
+                Ok(()) => {}
+                Err(e) => eprintln!("Failed to run config panel: {e}"),
+            });
             CommandResult::Handled
         }
         Some("snip") => {
