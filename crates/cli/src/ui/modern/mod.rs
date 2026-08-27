@@ -6,6 +6,7 @@ mod anim;
 mod app;
 mod colors;
 mod completion;
+pub mod config_panel;
 mod diffview;
 #[cfg(test)]
 mod fake_engine;
@@ -29,6 +30,7 @@ mod session_picker;
 mod session_views;
 pub mod session_work;
 mod sink;
+pub(crate) use run::with_main_screen;
 #[cfg(test)]
 mod snapshot;
 mod stream_buffer;

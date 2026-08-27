@@ -821,7 +821,7 @@ fn draw_question_modal(
 
 /// Sticky footer style for modal keybindings — always visible, never clipped
 /// by a long body/preview.
-fn key_hint_line(text: impl Into<String>) -> Line<'static> {
+pub(crate) fn key_hint_line(text: impl Into<String>) -> Line<'static> {
     let warning = palette().warning;
     Line::from(Span::styled(
         text.into(),
@@ -878,7 +878,7 @@ fn wrapped_rows(text: &str, width: u16) -> u16 {
 /// Shared centered modal box with a border + title and an optional sticky
 /// footer (key hints). The footer is laid out in its own row so wrapped body
 /// text cannot push it off-screen.
-fn draw_modal_box(
+pub(crate) fn draw_modal_box(
     frame: &mut Frame<'_>,
     area: Rect,
     lines: Vec<Line<'static>>,

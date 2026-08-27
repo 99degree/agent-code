@@ -59,7 +59,7 @@ Type `/` followed by a command name in the REPL. Unknown commands are passed to 
 |---------|-------------|
 | `/init` | Create `.agent/settings.toml` for this project |
 | `/doctor` | Check environment health (tools, config, git) |
-| `/config` | Show current configuration |
+| `/config` | Interactive configuration panel (edit allow-listed settings) |
 | `/mcp` | List connected MCP servers |
 | `/hooks` | Show hook configuration |
 | `/plugins` | List loaded plugins |

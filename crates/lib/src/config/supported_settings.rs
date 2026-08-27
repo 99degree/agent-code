@@ -114,6 +114,12 @@ pub const SUPPORTED_SETTINGS: &[SupportedSetting] = &[
         kind: SettingKind::String,
         scope: Scope::Project,
     },
+    SupportedSetting {
+        key: "api.max_turns",
+        description: "Maximum agent turns per run for this project (leave unset to use the default of 50).",
+        kind: SettingKind::Int,
+        scope: Scope::Project,
+    },
 ];
 
 /// Look up a setting by its dotted key. Returns `None` for any key

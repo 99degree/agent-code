@@ -865,7 +865,7 @@ fn restore_terminal(terminal: &mut Term) -> anyhow::Result<()> {
 /// Temporarily leave alt-screen / raw mode so an interactive slash command
 /// (picker, scrollback viewer, `$EDITOR`) can own the real terminal, then
 /// re-enter the modern TUI modes.
-fn with_main_screen<R>(f: impl FnOnce() -> R) -> R {
+pub(crate) fn with_main_screen<R>(f: impl FnOnce() -> R) -> R {
     restore_stdout_modes();
     let result = f();
     // Best-effort re-enter; draw path will recover on the next frame.
