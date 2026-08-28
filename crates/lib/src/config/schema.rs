@@ -173,6 +173,14 @@ pub struct SecurityConfig {
     /// Disable inline shell execution within skill templates.
     #[serde(default)]
     pub disable_skill_shell_execution: bool,
+    /// Block detached-process wrappers (`nohup`, `setsid`, `disown`) in
+    /// subagent contexts. A subagent runs as an ephemeral child turn; a
+    /// detached process it spawns would outlive that turn and keep
+    /// running after the parent returns, which is almost never intended.
+    /// Defaults to `true` (block). Set `false` to allow subagents to
+    /// launch detached processes.
+    #[serde(default = "default_true")]
+    pub block_nohup_in_subagents: bool,
 }
 
 /// Session-persistence configuration.

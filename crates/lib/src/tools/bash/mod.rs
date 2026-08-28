@@ -41,7 +41,9 @@ use tokio::process::Command;
 use super::{Tool, ToolContext, ToolResult};
 use crate::error::ToolError;
 
-pub use bash_security::{DestructiveFinding, DestructivenessLevel, classify_destructive};
+pub use bash_security::{
+    DestructiveFinding, DestructivenessLevel, classify_destructive, requires_nohup_block,
+};
 pub use command_semantics::{Effect, classify, classify_single, is_read_only};
 pub use read_only_validation::{PermissionProfile, ReadOnlyViolation, validate_read_only};
 pub use sandbox_decision::{ExecutionContext, SandboxDecision, decide};
@@ -210,6 +212,17 @@ impl Tool for BashTool {
         // the lexical pass, but only here is the cwd available to
         // resolve relative destinations through symlinks — `out ->
         // .git` in the cwd must make `printf x > out/config` refuse.
+        // Subagent nohup block: a subagent is an ephemeral child turn, so a
+        // detached process (`nohup`/`setsid`/`disown`/trailing `&`) would outlive
+        // the parent and keep running after it returns. This is operator-
+        // controllable via `security.block_nohup_in_subagents` (defaults on).
+        if ctx.is_subagent && ctx.block_nohup && requires_nohup_block(&parsed) {
+            return Err(ToolError::PermissionDenied(
+                "Detached-process wrappers (nohup/setsid/disown/& ) are blocked in subagent contexts so a child agent cannot leak a process that outlives the parent turn. Set `security.block_nohup_in_subagents = false` to allow them."
+                    .to_string(),
+            ));
+        }
+
         if let Err(violation) = protected_paths::check_at(command, &ctx.cwd) {
             return Err(ToolError::InvalidInput(violation.reason));
         }
@@ -448,6 +461,8 @@ mod stream_emit_tests {
             permission_prompter: None,
             question_asker: None,
             agent_origin: None,
+            is_subagent: false,
+            block_nohup: false,
             sandbox: None,
             active_disk_output_style: None,
             agent_limiter: None,
@@ -508,6 +523,60 @@ mod plan_mode_tests {
             assert!(
                 matches!(err, ToolError::PermissionDenied(_)),
                 "{cmd}: expected PermissionDenied, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_blocks_nohup_wrappers() {
+        let tool = BashTool;
+        // Subagent context with the block enabled (the default).
+        let mut ctx = ToolContext::for_tests();
+        ctx.is_subagent = true;
+        ctx.block_nohup = true;
+        for cmd in [
+            "nohup sleep 1000",
+            "setsid ./server &",
+            "disown",
+            "sleep 1 &",
+        ] {
+            let err = tool
+                .call(json!({"command": cmd}), &ctx)
+                .await
+                .expect_err(&format!("subagent must refuse: {cmd}"));
+            assert!(
+                matches!(err, ToolError::PermissionDenied(_)),
+                "{cmd}: expected PermissionDenied, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_allows_nohup_when_flag_disabled() {
+        let tool = BashTool;
+        let mut ctx = ToolContext::for_tests();
+        ctx.is_subagent = true;
+        ctx.block_nohup = false;
+        // Use quick-exiting commands: with the block disabled these actually
+        // run, so a long sleep would hang the test.
+        for cmd in ["nohup true", "setsid true &", "true &"] {
+            assert!(
+                tool.call(json!({"command": cmd}), &ctx).await.is_ok(),
+                "must allow when block disabled: {cmd}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn main_loop_allows_nohup_wrappers() {
+        let tool = BashTool;
+        // Main-thread context never gates detached processes.
+        let ctx = ToolContext::for_tests();
+        // Quick-exiting commands (these actually run on the main loop).
+        for cmd in ["nohup true", "setsid true &", "true &"] {
+            assert!(
+                tool.call(json!({"command": cmd}), &ctx).await.is_ok(),
+                "main loop must allow: {cmd}"
             );
         }
     }

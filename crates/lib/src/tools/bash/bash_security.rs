@@ -109,11 +109,61 @@ const DESTRUCTIVE_PIPELINE_BASES: &[&str] = &[
 
 /// Classify the destructiveness of a parsed command.
 ///
-/// Both the parsed AST and the original raw string are consulted so
-/// that we catch:
-/// - Substring patterns that appear inside arguments (e.g. SQL).
-/// - Pipeline segments whose head command is intrinsically destructive.
-/// - `&&`/`;`-chained subcommands that match destructive patterns.
+/// Both the parsed AST and the original raw string are consulted so that we
+/// catch substring patterns inside arguments, pipeline heads that are
+/// intrinsically destructive, and `&&`/`;`-chained subcommands that match
+/// destructive patterns.
+///
+/// Detect whether `cmd` launches a detached or long-lived process that would
+/// survive the caller's shell — the `nohup`, `setsid`, and `disown` wrappers
+/// plus a trailing background `&`.
+///
+/// The subagent nohup-block gates on this result. A subagent is an ephemeral
+/// child turn, so a detached process it spawns would keep running after the
+/// parent returns. The scan is conservative: it only flags the wrapper words
+/// and a bare trailing `&`, not a `&` that is part of an `&&`/`||` chain or an
+/// `&>`/`&<` redirection.
+pub fn requires_nohup_block(cmd: &ParsedCommand) -> bool {
+    let tokens: Vec<&str> = cmd
+        .raw
+        .split(|c: char| c.is_whitespace())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return false;
+    }
+    // Walk statement starts (after `;`, `&&`, `||`, `|`, newlines) so a wrapper
+    // buried in data after a separator does not count. Any token that is one
+    // of the detach wrappers, or a `disown` builtin, trips the block.
+    let mut statement_start = true;
+    for (i, tok) in tokens.iter().enumerate() {
+        let bare = tok.trim_start_matches('(').trim_end_matches(')');
+        let base = bare.rsplit('/').next().unwrap_or(bare).to_lowercase();
+        if statement_start {
+            // Allow benign leading wrappers (`env`, `command`, `exec`, `time`)
+            // and assignments to fall through to the real command word.
+            if matches!(
+                base.as_str(),
+                "env" | "command" | "exec" | "time" | "builtin"
+            ) {
+                continue;
+            }
+            if matches!(base.as_str(), "nohup" | "setsid") {
+                return true;
+            }
+            if base == "disown" {
+                return true;
+            }
+        }
+        statement_start =
+            tok.ends_with(';') || *tok == "&&" || *tok == "||" || *tok == "|" || *tok == "&";
+        // A trailing bare `&` (not `&&`/`||`/`&>`/`&<`) detaches the process.
+        let _ = i;
+    }
+    // Trailing background: last token is exactly `&`.
+    matches!(tokens.last(), Some(&"&"))
+}
+
 pub fn classify_destructive(cmd: &ParsedCommand) -> DestructivenessLevel {
     let findings = find_destructive(cmd);
     findings
@@ -3923,5 +3973,43 @@ mod tests {
                 .all(|f| f.level != DestructivenessLevel::Destructive),
             "validate_input would reject this before any prompt"
         );
+    }
+}
+#[cfg(test)]
+mod nohup_tests {
+    use super::requires_nohup_block;
+    use crate::tools::bash_parse::parse_bash;
+
+    fn blocks(cmd: &str) -> bool {
+        requires_nohup_block(parse_bash(cmd).as_ref().unwrap())
+    }
+
+    #[test]
+    fn blocks_nohup_setsid_disown() {
+        assert!(blocks("nohup sleep 1000"));
+        assert!(blocks("setsid ./server &"));
+        assert!(blocks("disown"));
+        assert!(blocks("env nohup tail -f log"));
+        assert!(blocks("command nohup ./worker"));
+    }
+
+    #[test]
+    fn blocks_trailing_background_amp() {
+        assert!(blocks("sleep 1000 &"));
+        assert!(blocks("./server --port 8080 &"));
+    }
+
+    #[test]
+    fn allows_normal_chains_and_main_loop() {
+        assert!(!blocks("true && echo hi"));
+        assert!(!blocks("false || echo no"));
+        assert!(!blocks("echo out &> file"));
+        assert!(!blocks("cat <&3"));
+        assert!(!blocks("ls -la"));
+    }
+
+    #[test]
+    fn allows_after_chain_separator() {
+        assert!(blocks("echo hi ; nohup sleep 1"));
     }
 }

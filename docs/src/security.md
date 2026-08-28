@@ -62,6 +62,21 @@ disable_skill_shell_execution = true
 
 Shell blocks in skill templates are stripped. Non-shell code blocks are preserved.
 
+## Subagent Detached-Process Block
+
+A subagent is an ephemeral child turn. To stop it from leaking a process that
+outlives the parent, the Bash tool blocks detached-process wrappers
+(`nohup`, `setsid`, `disown`) and a trailing background `&` **in subagent
+contexts only**:
+
+```toml
+[security]
+block_nohup_in_subagents = true  # default: on
+```
+
+The main agent and one-shot prompts are unaffected. Set it to `false` to let
+subagents launch detached processes.
+
 ## MCP Server Security
 
 - Servers run as local subprocesses (your permissions)

@@ -149,6 +149,8 @@ impl TaskExecutor for LocalAgentExecutor {
             permission_prompter: None,
             question_asker: None,
             agent_origin: None,
+            is_subagent: true,
+            block_nohup: true,
             sandbox: None,
             active_disk_output_style: None,
             agent_limiter: None,
