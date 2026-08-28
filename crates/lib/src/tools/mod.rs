@@ -349,6 +349,17 @@ pub struct ToolContext {
     pub question_asker: Option<Arc<dyn QuestionAsker>>,
     /// Origin agent id for permission attribution (subagent / bg task).
     pub agent_origin: Option<String>,
+    /// Whether this context belongs to a spawned subagent. Main-thread and
+    /// one-shot prompts are `false`. Used to gate behaviors that must only
+    /// apply when a child agent runs (e.g. blocking detached-process
+    /// wrappers like `nohup`/`setsid`/`disown` so a subagent cannot leak a
+    /// process that outlives the parent turn).
+    pub is_subagent: bool,
+    /// Whether detached-process wrappers (`nohup`/`setsid`/`disown`) are
+    /// blocked in this context (derived from
+    /// `security.block_nohup_in_subagents`). Only consulted for subagent
+    /// contexts — the main loop leaves detached processes alone.
+    pub block_nohup: bool,
     /// Process-level sandbox executor.
     ///
     /// `None` means sandboxing is unavailable for this context
@@ -422,6 +433,8 @@ impl ToolContext {
             permission_prompter: None,
             question_asker: None,
             agent_origin: None,
+            is_subagent: false,
+            block_nohup: false,
             sandbox: None,
             active_disk_output_style: None,
             agent_limiter: None,
@@ -469,6 +482,8 @@ impl ToolContext {
             permission_prompter: self.permission_prompter.clone(),
             question_asker: self.question_asker.clone(),
             agent_origin: self.agent_origin.clone(),
+            is_subagent: self.is_subagent,
+            block_nohup: self.block_nohup,
             sandbox: self.sandbox.clone(),
             active_disk_output_style: self.active_disk_output_style.clone(),
             agent_limiter: self.agent_limiter.clone(),

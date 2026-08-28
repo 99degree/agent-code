@@ -167,6 +167,8 @@ pub async fn execute_tool_calls(
                                     permission_prompter: ctx_prompter,
                                     question_asker: None,
                                     agent_origin: ctx_origin,
+                                    is_subagent: false,
+                                    block_nohup: false,
                                     // Read-only tools spawn no subprocesses, so
                                     // the sandbox would be inert here anyway.
                                     sandbox: None,
