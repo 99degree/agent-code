@@ -218,7 +218,12 @@ impl Tool for BashTool {
         // controllable via `security.block_nohup_in_subagents` (defaults on).
         if ctx.is_subagent && ctx.block_nohup && requires_nohup_block(&parsed) {
             return Err(ToolError::PermissionDenied(
-                "Detached-process wrappers (nohup/setsid/disown/& ) are blocked in subagent contexts so a child agent cannot leak a process that outlives the parent turn. Set `security.block_nohup_in_subagents = false` to allow them."
+                "Detached-process wrappers (nohup/setsid/disown/& ) are blocked in \
+                 subagent contexts so a child agent cannot leak a process that \
+                 outlives the parent turn. If you need a long-running background \
+                 task, run it from the main agent (not a subagent) or use the \
+                 Agent tool's `run_in_background` flag instead of nohup. Set \
+                 `security.block_nohup_in_subagents = false` to disable this guard."
                     .to_string(),
             ));
         }
