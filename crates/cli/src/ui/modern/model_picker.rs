@@ -113,6 +113,13 @@ impl App {
             self.dirty = true;
             return;
         }
+        if p.query.pop().is_none() {
+            return;
+        }
+        if p.query.is_empty() {
+            p.selected = 0;
+            p.top = 0;
+        }
         p.top = p.selected.saturating_sub(6);
         self.dirty = true;
     }
