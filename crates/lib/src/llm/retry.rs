@@ -20,6 +20,13 @@ pub struct RetryConfig {
     pub max_backoff: Duration,
     /// Backoff multiplier (exponential).
     pub multiplier: f64,
+    /// Fixed per-attempt backoff schedule applied to overload (529/503) and
+    /// stream-interrupt retries. Indexed 1-based by attempt; once the list is
+    /// exhausted the final entry is reused (subject to `max_backoff`). This
+    /// gives a predictable staircase — the first retry is quick, later retries
+    /// back off much further — rather than pure exponential growth. Defaults to
+    /// 1s, 5s, 15s, then 35s.
+    pub backoff_schedule: Vec<Duration>,
     /// Maximum 529/503 (overloaded) retries before falling back.
     pub max_overload_retries: u32,
     /// Maximum retry-after duration we'll accept from the API (milliseconds).
@@ -51,7 +58,16 @@ impl Default for RetryConfig {
             initial_backoff: Duration::from_millis(1000),
             max_backoff: Duration::from_secs(60),
             multiplier: 2.0,
-            max_overload_retries: 3,
+            max_overload_retries: 4,
+            // Predictable staircase: first retry quick, later retries back off
+            // far further (1s → 5s → 15s → 35s) so a transient overload is
+            // given real breathing room before we fall back to the small model.
+            backoff_schedule: vec![
+                Duration::from_secs(1),
+                Duration::from_secs(5),
+                Duration::from_secs(15),
+                Duration::from_secs(35),
+            ],
             max_retry_after_ms: 10_000, // 10 seconds
             // An hour: long enough that a 429 requesting this much wait is a
             // "stop and come back later" signal, not a retriable delay.
@@ -134,11 +150,10 @@ impl RetryState {
                     }
                     return RetryAction::Abort("Overload retries exhausted on fallback".into());
                 }
-                let backoff = calculate_backoff(
+                let backoff = schedule_backoff(
                     self.overload_retries,
-                    config.initial_backoff,
+                    &config.backoff_schedule,
                     config.max_backoff,
-                    config.multiplier,
                 );
                 RetryAction::Retry { after: backoff }
             }
@@ -146,11 +161,10 @@ impl RetryState {
                 if self.consecutive_failures > config.max_retries {
                     return RetryAction::Abort("Stream retry limit reached".into());
                 }
-                let backoff = calculate_backoff(
+                let backoff = schedule_backoff(
                     self.consecutive_failures,
-                    config.initial_backoff,
+                    &config.backoff_schedule,
                     config.max_backoff,
-                    config.multiplier,
                 );
                 RetryAction::Retry { after: backoff }
             }
@@ -367,6 +381,28 @@ fn calculate_backoff(attempt: u32, initial: Duration, max: Duration, multiplier:
     Duration::from_millis((capped + jitter) as u64)
 }
 
+/// Resolve a backoff duration from a fixed per-attempt schedule.
+///
+/// `attempt` is 1-based. The schedule is indexed 0-based, so attempt N maps to
+/// `schedule[N-1]`; once the attempt count runs past the end of the schedule
+/// the final entry is reused (subject to `max`). A small amount of jitter is
+/// added so concurrent retries don't all wake at the same instant. The schedule
+/// is intentionally a flat staircase (e.g. 1s/5s/15s/35s) rather than pure
+/// exponential growth, so the first retry is quick but later retries back off
+/// much further — giving a transient overload real breathing room.
+fn schedule_backoff(attempt: u32, schedule: &[Duration], max: Duration) -> Duration {
+    let idx = (attempt.saturating_sub(1) as usize).min(schedule.len().saturating_sub(1));
+    let base = schedule
+        .get(idx)
+        .copied()
+        .unwrap_or_default()
+        .as_millis() as f64;
+    let capped = base.min(max.as_millis() as f64);
+    // Add 10% jitter.
+    let jitter = capped * 0.1 * rand_f64();
+    Duration::from_millis((capped + jitter) as u64)
+ }
+
 /// Simple pseudo-random f64 in [0, 1) using timestamp.
 fn rand_f64() -> f64 {
     let nanos = std::time::SystemTime::now()
@@ -505,6 +541,44 @@ mod tests {
         // With multiplier 2.0: attempt 1 ~1s, attempt 2 ~2s, attempt 3 ~4s.
         assert!(b2.as_millis() >= 1500, "b2 should be >= 1.5s, got {:?}", b2);
         assert!(b3.as_millis() >= 3000, "b3 should be >= 3s, got {:?}", b3);
+    }
+
+    #[test]
+    fn test_schedule_backoff_staircase() {
+        // The default overload/stream schedule is a flat staircase the user
+        // expects: first retry quick, then 5s, 15s, 35s, capped at max_backoff.
+        let schedule = vec![
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+            Duration::from_secs(15),
+            Duration::from_secs(35),
+        ];
+        let max = Duration::from_secs(60);
+
+        let b1 = schedule_backoff(1, &schedule, max);
+        let b2 = schedule_backoff(2, &schedule, max);
+        let b3 = schedule_backoff(3, &schedule, max);
+        let b4 = schedule_backoff(4, &schedule, max);
+        // Past the end of the schedule the final entry (35s) is reused.
+        let b5 = schedule_backoff(5, &schedule, max);
+
+        assert!(b1.as_millis() >= 1000 && b1.as_millis() < 2000, "b1 ~1s, got {:?}", b1);
+        assert!(b2.as_millis() >= 5000 && b2.as_millis() < 6000, "b2 ~5s, got {:?}", b2);
+        assert!(b3.as_millis() >= 15000 && b3.as_millis() < 17000, "b3 ~15s, got {:?}", b3);
+        assert!(b4.as_millis() >= 35000 && b4.as_millis() < 39000, "b4 ~35s, got {:?}", b4);
+        assert!(b5.as_millis() >= 35000, "b5 should reuse 35s, got {:?}", b5);
+    }
+
+    #[test]
+    fn test_schedule_backoff_capped_by_max() {
+        let schedule = vec![Duration::from_secs(35), Duration::from_secs(90)];
+        let max = Duration::from_secs(60);
+        let b = schedule_backoff(2, &schedule, max);
+        assert!(
+            (b.as_millis() as f64) <= 60_000.0 * 1.1,
+            "schedule entry must be capped by max_backoff, got {:?}",
+            b
+        );
     }
 
     #[test]
