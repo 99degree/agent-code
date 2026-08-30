@@ -397,7 +397,7 @@ impl OpenAiProvider {
                 429 => Err(ProviderError::RateLimited {
                     retry_after_ms: ra_ms,
                 }),
-                529 => Err(ProviderError::Overloaded),
+                529 | 503 => Err(ProviderError::Overloaded),
                 413 => Err(ProviderError::RequestTooLarge(body_text)),
                 // 400/404 on an OpenAI-compatible endpoint almost always mean
                 // the requested model id does not exist on that provider (e.g.
@@ -461,7 +461,7 @@ impl OpenAiProvider {
                 429 => Err(ProviderError::RateLimited {
                     retry_after_ms: ra_ms,
                 }),
-                529 => Err(ProviderError::Overloaded),
+                529 | 503 => Err(ProviderError::Overloaded),
                 413 => Err(ProviderError::RequestTooLarge(body_text)),
                 // 400/404 on an OpenAI-compatible endpoint almost always mean
                 // the requested model id does not exist on that provider (e.g.
