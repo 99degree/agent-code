@@ -399,13 +399,26 @@ impl OpenAiProvider {
                 }),
                 529 | 503 => Err(ProviderError::Overloaded),
                 413 => Err(ProviderError::RequestTooLarge(body_text)),
-                // 400/404 on an OpenAI-compatible endpoint almost always mean
-                // the requested model id does not exist on that provider (e.g.
-                // OpenCode `laguna-s-2.1:free` not mirrored). Surface these as
-                // InvalidResponse so the retry/failover layer can treat them as
-                // model-unavailable and repoint the request at a fallback
-                // provider instead of treating them as opaque network errors.
-                400 | 404 => Err(ProviderError::InvalidResponse(body_text)),
+                // A 400 whose body reports the prompt exceeding the model's
+                // maximum input length is a context-overflow, not a malformed
+                // request or an unknown model id — route it to RequestTooLarge
+                // so the query loop can reactively compact instead of treating
+                // it as a model-not-found abort/failover.
+                400 => {
+                    if is_context_too_long(&body_text) {
+                        Err(ProviderError::RequestTooLarge(body_text))
+                    } else {
+                        Err(ProviderError::InvalidResponse(body_text))
+                    }
+                }
+                // 404 (and non-overflow 400) on an OpenAI-compatible endpoint
+                // almost always mean the requested model id does not exist on
+                // that provider (e.g. OpenCode `laguna-s-2.1:free` not
+                // mirrored). Surface these as InvalidResponse so the
+                // retry/failover layer can treat them as model-unavailable and
+                // repoint the request at a fallback provider instead of
+                // treating them as opaque network errors.
+                404 => Err(ProviderError::InvalidResponse(body_text)),
                 _ => Err(ProviderError::Network(format!("{status}: {body_text}"))),
             };
         }
@@ -463,13 +476,26 @@ impl OpenAiProvider {
                 }),
                 529 | 503 => Err(ProviderError::Overloaded),
                 413 => Err(ProviderError::RequestTooLarge(body_text)),
-                // 400/404 on an OpenAI-compatible endpoint almost always mean
-                // the requested model id does not exist on that provider (e.g.
-                // OpenCode `laguna-s-2.1:free` not mirrored). Surface these as
-                // InvalidResponse so the retry/failover layer can treat them as
-                // model-unavailable and repoint the request at a fallback
-                // provider instead of treating them as opaque network errors.
-                400 | 404 => Err(ProviderError::InvalidResponse(body_text)),
+                // A 400 whose body reports the prompt exceeding the model's
+                // maximum input length is a context-overflow, not a malformed
+                // request or an unknown model id — route it to RequestTooLarge
+                // so the query loop can reactively compact instead of treating
+                // it as a model-not-found abort/failover.
+                400 => {
+                    if is_context_too_long(&body_text) {
+                        Err(ProviderError::RequestTooLarge(body_text))
+                    } else {
+                        Err(ProviderError::InvalidResponse(body_text))
+                    }
+                }
+                // 404 (and non-overflow 400) on an OpenAI-compatible endpoint
+                // almost always mean the requested model id does not exist on
+                // that provider (e.g. OpenCode `laguna-s-2.1:free` not
+                // mirrored). Surface these as InvalidResponse so the
+                // retry/failover layer can treat them as model-unavailable and
+                // repoint the request at a fallback provider instead of
+                // treating them as opaque network errors.
+                404 => Err(ProviderError::InvalidResponse(body_text)),
                 _ => Err(ProviderError::Network(format!("{status}: {body_text}"))),
             };
         }
@@ -555,6 +581,20 @@ fn retry_after_ms(response: &reqwest::Response, default_ms: u64) -> u64 {
         .filter(|secs| *secs >= 0.0)
         .map(|secs| (secs * 1000.0) as u64)
         .unwrap_or(default_ms)
+}
+
+/// Detect a 400 response that indicates the prompt exceeded the model's
+/// maximum input length (rather than a malformed request or an unknown
+/// model). OpenAI-compatible upstreams (e.g. Kilo/OpenCode via Poolside)
+/// return HTTP 400 with a body like `"Input length 262243 exceeds the
+/// maximum allowed input length of 262112 tokens."`. Such errors should be
+/// treated as `RequestTooLarge` so the query loop can reactively compact,
+/// not as `InvalidResponse` (model-unavailable) which would abort/failover.
+fn is_context_too_long(body: &str) -> bool {
+    let lowered = body.to_ascii_lowercase();
+    lowered.contains("exceeds the maximum allowed input length")
+        || lowered.contains("maximum context length")
+        || lowered.contains("input length") && lowered.contains("exceeds")
 }
 
 fn spawn_chat_completions_stream(
@@ -1569,6 +1609,110 @@ mod tests {
             let body = r#"{"error":{"message":"model laguna-s-2.1:free not found","type":"invalid_request_error"}}"#;
             let mut resp = String::new();
             resp.push_str("HTTP/1.1 404 Not Found\r\n");
+            resp.push_str("Content-Type: application/json\r\n");
+            resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
+            resp.push_str("Connection: close\r\n\r\n");
+            resp.push_str(body);
+            let _ = s.write_all(resp.as_bytes()).await;
+        });
+
+        let provider = OpenAiProvider::new(&base, "test-key");
+        let request = ProviderRequest {
+            model: "laguna-s-2.1:free".into(),
+            system_prompt: String::new(),
+            messages: vec![],
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_tokens: 100,
+            temperature: None,
+            enable_caching: false,
+            metadata: None,
+            cancel: CancellationToken::new(),
+            stream_timeout: None,
+        };
+
+        let err = provider.stream(&request).await.unwrap_err();
+        server.await.unwrap();
+        assert!(
+            matches!(err, ProviderError::InvalidResponse(_)),
+            "expected InvalidResponse, got {err:?}"
+        );
+    }
+
+    // A 400 whose body reports the prompt exceeding the model's maximum input
+    // length is a context-overflow, not an unknown model id. The query loop
+    // treats `RequestTooLarge` specially (reactive compaction), so it must be
+    // mapped as such rather than as `InvalidResponse` (which would trigger a
+    // model-unavailable abort/failover). This is the exact Kilo/OpenCode-via-
+    // Poolside shape from production: HTTP 400 with "Input length N exceeds
+    // the maximum allowed input length of M tokens."
+    #[tokio::test]
+    async fn stream_maps_400_context_too_long_to_request_too_large() {
+        use crate::llm::provider::ProviderError;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}/v1");
+
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = s.read(&mut buf).await;
+            let body = r#"{"error":{"message":"Input length 262243 exceeds the maximum allowed input length of 262112 tokens.","type":"Bad Request"}}"#;
+            let mut resp = String::new();
+            resp.push_str("HTTP/1.1 400 Bad Request\r\n");
+            resp.push_str("Content-Type: application/json\r\n");
+            resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
+            resp.push_str("Connection: close\r\n\r\n");
+            resp.push_str(body);
+            let _ = s.write_all(resp.as_bytes()).await;
+        });
+
+        let provider = OpenAiProvider::new(&base, "test-key");
+        let request = ProviderRequest {
+            model: "kilo-alpha".into(),
+            system_prompt: String::new(),
+            messages: vec![],
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_tokens: 100,
+            temperature: None,
+            enable_caching: false,
+            metadata: None,
+            cancel: CancellationToken::new(),
+            stream_timeout: None,
+        };
+
+        let err = provider.stream(&request).await.unwrap_err();
+        server.await.unwrap();
+        assert!(
+            matches!(err, ProviderError::RequestTooLarge(_)),
+            "expected RequestTooLarge, got {err:?}"
+        );
+    }
+
+    // A 400 with a non-overflow body (e.g. a genuinely malformed request) must
+    // still map to `InvalidResponse` so it can be classified as
+    // model-unavailable and fail over to a mirror provider.
+    #[tokio::test]
+    async fn stream_maps_400_unknown_model_to_invalid_response() {
+        use crate::llm::provider::ProviderError;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}/v1");
+
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = s.read(&mut buf).await;
+            let body = r#"{"error":{"message":"model laguna-s-2.1:free not found","type":"invalid_request_error"}}"#;
+            let mut resp = String::new();
+            resp.push_str("HTTP/1.1 400 Bad Request\r\n");
             resp.push_str("Content-Type: application/json\r\n");
             resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
             resp.push_str("Connection: close\r\n\r\n");
