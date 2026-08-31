@@ -7,3 +7,9 @@
 
 # agent telemetry logs
 .tlogs/
+
+# worktree build artifacts
+.wt_parent/
+
+# agent runtime/state
+.agent/
