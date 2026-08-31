@@ -77,8 +77,18 @@ use agent_code_lib::services::notifier::{NotificationKind, NotifierService};
 use agent_code_lib::tools::PermissionResponse;
 
 use super::app::App;
+use super::app::Modal;
 use super::render;
 use super::sink::{ChannelSink, EngineEvent, ModernPrompter, ModernQuestionAsker};
+
+/// Count the rendered lines of the front plan modal's markdown, so the
+/// scroll clamp mirrors what the renderer will actually show.
+fn plan_total_lines(app: &App) -> usize {
+    match app.front_modal() {
+        Some(Modal::Plan(p)) => super::markdown::render_markdown(&p.plan_md).lines.len(),
+        _ => 0,
+    }
+}
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -3318,15 +3328,33 @@ fn handle_key_inner(app: &mut App, key: KeyEvent) {
                 }
                 _ => {}
             },
-            Some(Modal::Plan(_)) => match (key.modifiers, key.code) {
-                (_, KeyCode::Char('a')) => {
-                    app.resolve_plan(true, false);
+            Some(Modal::Plan(_)) => {
+                // Scroll the plan view read-only, so a long plan can be read
+                // in full before approving. Reuses perm_scroll (only one modal
+                // is shown at a time); it is reset when the modal queue advances.
+                let step = match key.code {
+                    KeyCode::Up => Some(-1isize),
+                    KeyCode::Down => Some(1),
+                    KeyCode::PageUp => Some(-10),
+                    KeyCode::PageDown => Some(10),
+                    _ => None,
+                };
+                if let Some(step) = step {
+                    let max = plan_total_lines(app).saturating_sub(1);
+                    app.perm_scroll = app.perm_scroll.saturating_add_signed(step).min(max);
+                    app.dirty = true;
+                    return;
                 }
-                (_, KeyCode::Char('k')) => {
-                    app.resolve_plan(false, true);
+                match (key.modifiers, key.code) {
+                    (_, KeyCode::Char('a')) => {
+                        app.resolve_plan(true, false);
+                    }
+                    (_, KeyCode::Char('k')) => {
+                        app.resolve_plan(false, true);
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             Some(Modal::Question(_)) => match (key.modifiers, key.code) {
                 (_, KeyCode::Up) => app.question_move(-1),
                 (_, KeyCode::Down) => app.question_move(1),
