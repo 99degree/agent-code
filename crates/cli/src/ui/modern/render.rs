@@ -173,7 +173,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             crate::ui::modern::app::Modal::Permission(p) => {
                 draw_permission_modal(frame, area, &p, behind, app.perm_scroll)
             }
-            crate::ui::modern::app::Modal::Plan(p) => draw_plan_modal(frame, area, &p, behind),
+            crate::ui::modern::app::Modal::Plan(p) => {
+                draw_plan_modal(frame, area, &p, behind, app.perm_scroll)
+            }
             crate::ui::modern::app::Modal::Question(q) => {
                 draw_question_modal(frame, area, &q, behind)
             }
@@ -726,11 +728,14 @@ fn draw_provider_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 /// Plan-approval modal: renders the plan markdown with approve/keep/dismiss.
+/// `scroll` pans the rendered plan (↑/↓ and PgUp/PgDn) so long plans can be
+/// read in full before answering.
 fn draw_plan_modal(
     frame: &mut Frame<'_>,
     area: Rect,
     plan: &crate::ui::modern::app::PlanReview,
     pending_behind: usize,
+    scroll: usize,
 ) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     if pending_behind > 0 {
@@ -740,17 +745,32 @@ fn draw_plan_modal(
         )));
         lines.push(Line::from(""));
     }
-    // Show up to a bounded slice of the rendered plan markdown.
+    // Adaptive viewport over the FULL rendered plan markdown: tall terminals
+    // show more rows; ↑/↓ (and PgUp/PgDn) pan the rest so a long plan can be
+    // inspected before approving. The floor keeps the plan readable on small
+    // terminals.
     let rendered = super::markdown::render_markdown(&plan.plan_md).lines;
-    let max_body = area.height.saturating_sub(8) as usize;
     let total = rendered.len();
-    for l in rendered.into_iter().take(max_body) {
+    let viewport = (area.height as usize).saturating_sub(8).clamp(4, 40);
+    let scroll = scroll.min(total.saturating_sub(viewport));
+    if scroll > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("… {scroll} earlier lines (↑ to scroll)"),
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
+    for l in rendered.into_iter().skip(scroll).take(viewport) {
         lines.push(l);
     }
-    if total > max_body {
+    let below = total.saturating_sub(scroll + viewport);
+    if below > 0 {
         lines.push(Line::from(Span::styled(
-            format!("… {} more lines", total - max_body),
-            Style::default().fg(palette().muted),
+            format!("… {below} more lines (↓ to scroll)"),
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::ITALIC),
         )));
     }
     let title = match &plan.path {
@@ -765,7 +785,7 @@ fn draw_plan_modal(
         &title,
         accent,
         Some(key_hint_line(
-            "[a] approve & start   [k] keep planning   [Esc] dismiss",
+            "[a] approve & start   [k] keep planning   [Esc] dismiss   ↑↓/PgDn scroll",
         )),
     );
 }

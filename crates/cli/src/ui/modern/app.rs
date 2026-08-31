@@ -6490,6 +6490,27 @@ mod tests {
     }
 
     #[test]
+    fn plan_modal_scroll_clamps_and_resets_on_advance() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.phase = Phase::Permission;
+        let plan_md = (0..200)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.apply_engine(EngineEvent::PlanProposed {
+            plan_md,
+            path: None,
+        });
+        assert!(matches!(app.front_modal(), Some(Modal::Plan(_))));
+        // perm_scroll is shared with the permission modal; resolving the
+        // plan advances the modal queue, which must reset the offset.
+        app.perm_scroll = 9999;
+        assert_eq!(app.perm_scroll, 9999);
+        app.resolve_plan(true, false);
+        assert_eq!(app.perm_scroll, 0, "scroll resets on modal advance");
+    }
+
+    #[test]
     fn plan_proposed_opens_modal_and_approve_switches_mode() {
         let mut app = App::new("m", "/tmp", "s");
         // These model a MID-TURN modal; the run loop sets this at spawn.
