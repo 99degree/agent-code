@@ -175,13 +175,9 @@ impl OpenAiProvider {
                     // The system subtypes (CompactBoundary, ApiError,
                     // Informational, TurnDuration, MemorySaved, ToolProgress)
                     // are all bookkeeping; none of their content is meant to
-                    // drive inference. Forward them as empty role:"user" so
-                    // turn alternation in the wire payload is preserved
-                    // without burning tokens.
-                    messages.push(serde_json::json!({
-                        "role": "user",
-                        "content": "",
-                    }));
+                    // drive inference. Dropping them entirely (rather than
+                    // emitting an empty message) avoids providers that reject
+                    // empty `content` ("message content cannot be empty").
                 }
             }
         }
@@ -1160,12 +1156,8 @@ fn messages_to_responses_input(messages: &[Message]) -> Vec<Value> {
                 }
             }
             Message::System(_) => {
-                // Bookkeeping subtypes flush to empty role:"user".
-                input.push(serde_json::json!({
-                    "type": "message",
-                    "role": "user",
-                    "content": "",
-                }));
+                // Bookkeeping subtypes are dropped; emitting an empty message
+                // triggers "message content cannot be empty" on strict providers.
             }
         }
     }
@@ -1370,7 +1362,7 @@ fn blocks_to_openai_content(blocks: &[ContentBlock]) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::message::{AssistantMessage, UserMessage};
+    use crate::llm::message::{AssistantMessage, SystemMessage, SystemMessageType, MessageLevel, UserMessage};
     use crate::tools::ToolSchema;
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
@@ -1745,5 +1737,79 @@ mod tests {
             matches!(err, ProviderError::InvalidResponse(_)),
             "expected InvalidResponse, got {err:?}"
         );
+    }
+
+    #[test]
+    fn chat_body_omits_bookkeeping_system_messages() {
+        let provider = OpenAiProvider::new("https://example.test/v1", "test-key");
+        let request = ProviderRequest {
+            messages: vec![
+                Message::System(SystemMessage {
+                    uuid: Uuid::new_v4(),
+                    timestamp: "2026-04-27T00:00:00Z".to_string(),
+                    subtype: SystemMessageType::Informational,
+                    content: "flushing turn 3".to_string(),
+                    level: MessageLevel::Info,
+                }),
+                user_message(vec![ContentBlock::Text {
+                    text: "hi".to_string(),
+                }]),
+            ],
+            system_prompt: String::new(),
+            tools: Vec::new(),
+            model: "gpt-5.4".to_string(),
+            max_tokens: 1024,
+            temperature: None,
+            enable_caching: false,
+            tool_choice: ToolChoice::Auto,
+            metadata: None,
+            cancel: CancellationToken::new(),
+            stream_timeout: None,
+        };
+
+        let body = provider.build_body(&request);
+        let messages = body["messages"].as_array().unwrap();
+        // The bookkeeping System message must NOT produce an empty user
+        // message (which strict providers reject as "message content cannot
+        // be empty"); only the real user turn remains.
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"], "hi");
+    }
+
+    #[test]
+    fn responses_body_omits_bookkeeping_system_messages() {
+        let provider = OpenAiProvider::new("https://example.test/v1", "test-key");
+        let request = ProviderRequest {
+            messages: vec![
+                Message::System(SystemMessage {
+                    uuid: Uuid::new_v4(),
+                    timestamp: "2026-04-27T00:00:00Z".to_string(),
+                    subtype: SystemMessageType::Informational,
+                    content: "flushing turn 3".to_string(),
+                    level: MessageLevel::Info,
+                }),
+                user_message(vec![ContentBlock::Text {
+                    text: "hi".to_string(),
+                }]),
+            ],
+            system_prompt: String::new(),
+            tools: Vec::new(),
+            model: "gpt-5.4".to_string(),
+            max_tokens: 1024,
+            temperature: None,
+            enable_caching: false,
+            tool_choice: ToolChoice::Auto,
+            metadata: None,
+            cancel: CancellationToken::new(),
+            stream_timeout: None,
+        };
+
+        let body = provider.build_responses_body(&request);
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["text"], "hi");
     }
 }
