@@ -67,6 +67,22 @@ impl Default for Config {
             "nvidia/*".to_string(),
             ("kilo".to_string(), "tencent/hy3:free".to_string()),
         );
+        failover_mapping.insert(
+            "openrouter".to_string(),
+            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+        );
+        failover_mapping.insert(
+            "openrouter/*".to_string(),
+            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+        );
+        failover_mapping.insert(
+            "opencodego".to_string(),
+            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+        );
+        failover_mapping.insert(
+            "opencodego/*".to_string(),
+            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+        );
         Self {
             api: ApiConfig::default(),
             permissions: PermissionsConfig::default(),

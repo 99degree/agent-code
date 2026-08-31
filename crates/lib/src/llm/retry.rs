@@ -5,6 +5,7 @@
 //! - Fall back to a smaller model on repeated overload errors
 //! - Apply exponential backoff with jitter
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::llm::provider::ProviderKind;
@@ -110,6 +111,8 @@ impl RetryState {
         config: &RetryConfig,
         current_provider: ProviderKind,
         using_failover: bool,
+        current_model: &str,
+        failover_mapping: &HashMap<String, (String, String)>,
     ) -> RetryAction {
         self.consecutive_failures += 1;
 
@@ -189,7 +192,13 @@ impl RetryState {
             // applies (no rule, wrong provider, or already failed over), the
             // request is unrecoverable and we abort.
             RetryableError::ModelUnavailable { .. } => {
-                if let Some(target) = error.failover_target(current_provider, using_failover) {
+                if let Some(target) = crate::llm::retry::failover_target_configured(
+                    error,
+                    current_provider,
+                    current_model,
+                    using_failover,
+                    failover_mapping,
+                ) {
                     RetryAction::Failover { target }
                 } else {
                     RetryAction::Abort("model unavailable".into())
@@ -372,6 +381,61 @@ impl RetryableError {
     }
 }
 
+/// Resolve a cross-provider failover for this error, honoring the user's
+/// `failover_mapping` config first and falling back to the static
+/// [`FAILOVER_RULES`] table. Returns `None` if no applicable, credentialed
+/// target exists.
+///
+/// The mapping supports three key shapes:
+/// - `"provider"` — matches any model on that provider (e.g. `"openrouter"`)
+/// - `"provider/*"` — same as above, explicit wildcard
+/// - `"provider/model"` — matches a specific model fragment (e.g.
+///   `"openrouter/anthropic/claude-3.5-sonnet"`)
+///
+/// A target is only used when its provider key is actually configured
+/// (`is_configured()`), so we never rotate into a provider the user has no
+/// credentials for.
+pub fn failover_target_configured(
+    error: &RetryableError,
+    current_provider: ProviderKind,
+    current_model: &str,
+    using_failover: bool,
+    mapping: &HashMap<String, (String, String)>,
+) -> Option<FailoverTarget> {
+    if using_failover {
+        return None;
+    }
+    let RetryableError::ModelUnavailable { .. } = error else {
+        return None;
+    };
+    let pname = current_provider.as_name();
+
+    for (key, (to, hint)) in mapping {
+        let matches = if let Some(stripped) = key.strip_suffix("/*") {
+            stripped == pname
+        } else if let Some((kp, km)) = key.split_once('/') {
+            kp == pname && current_model.to_lowercase().contains(&km.to_lowercase())
+        } else {
+            key == pname
+        };
+        if !matches {
+            continue;
+        }
+        if let Some(to_kind) = ProviderKind::from_name(to)
+            && to_kind.is_configured()
+        {
+            return Some(FailoverTarget {
+                provider: to_kind,
+                model_hint: hint.clone(),
+            });
+        }
+    }
+
+    // No configured/valid target — fall back to the built-in rules
+    // (e.g. OpenCode → Kilo mirrors), which also respect `using_failover`.
+    error.failover_target(current_provider, using_failover)
+}
+
 /// Calculate exponential backoff with jitter.
 fn calculate_backoff(attempt: u32, initial: Duration, max: Duration, multiplier: f64) -> Duration {
     let base = initial.as_millis() as f64 * multiplier.powi(attempt as i32 - 1);
@@ -392,16 +456,12 @@ fn calculate_backoff(attempt: u32, initial: Duration, max: Duration, multiplier:
 /// much further — giving a transient overload real breathing room.
 fn schedule_backoff(attempt: u32, schedule: &[Duration], max: Duration) -> Duration {
     let idx = (attempt.saturating_sub(1) as usize).min(schedule.len().saturating_sub(1));
-    let base = schedule
-        .get(idx)
-        .copied()
-        .unwrap_or_default()
-        .as_millis() as f64;
+    let base = schedule.get(idx).copied().unwrap_or_default().as_millis() as f64;
     let capped = base.min(max.as_millis() as f64);
     // Add 10% jitter.
     let jitter = capped * 0.1 * rand_f64();
     Duration::from_millis((capped + jitter) as u64)
- }
+}
 
 /// Simple pseudo-random f64 in [0, 1) using timestamp.
 fn rand_f64() -> f64 {
@@ -438,6 +498,8 @@ mod tests {
             &config,
             ProviderKind::OpenAi,
             false,
+            "",
+            &HashMap::new(),
         ) {
             RetryAction::Abort(msg) => assert!(msg.contains("long-wait"), "{msg}"),
             other => panic!("Expected Abort on long wait, got {other:?}"),
@@ -456,6 +518,8 @@ mod tests {
             &config,
             ProviderKind::OpenAi,
             false,
+            "",
+            &HashMap::new(),
         ) {
             RetryAction::Retry { after } => assert!(after.as_millis() >= 500),
             other => panic!("Expected Retry on short wait, got {other:?}"),
@@ -467,7 +531,14 @@ mod tests {
         let mut state = RetryState::default();
         let config = RetryConfig::default();
         let err = RetryableError::RateLimited { retry_after: 500 };
-        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::Retry { after } => assert!(after.as_millis() >= 500),
             other => panic!("Expected Retry, got {other:?}"),
         }
@@ -481,8 +552,22 @@ mod tests {
             ..Default::default()
         };
         let err = RetryableError::RateLimited { retry_after: 100 };
-        let _ = state.next_action(&err, &config, ProviderKind::OpenAi, false); // First retry.
-        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
+        let _ = state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        ); // First retry.
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::Abort(_) => {}
             other => panic!("Expected Abort, got {other:?}"),
         }
@@ -493,7 +578,14 @@ mod tests {
         let mut state = RetryState::default();
         let config = RetryConfig::default();
         let err = RetryableError::NonRetryable("bad request".into());
-        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::Abort(msg) => assert!(msg.contains("bad request")),
             other => panic!("Expected Abort, got {other:?}"),
         }
@@ -507,9 +599,30 @@ mod tests {
             ..Default::default()
         };
         let err = RetryableError::Overloaded;
-        let _ = state.next_action(&err, &config, ProviderKind::OpenAi, false);
-        let _ = state.next_action(&err, &config, ProviderKind::OpenAi, false);
-        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
+        let _ = state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        );
+        let _ = state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        );
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::FallbackModel => {}
             other => panic!("Expected FallbackModel, got {other:?}"),
         }
@@ -562,10 +675,26 @@ mod tests {
         // Past the end of the schedule the final entry (35s) is reused.
         let b5 = schedule_backoff(5, &schedule, max);
 
-        assert!(b1.as_millis() >= 1000 && b1.as_millis() < 2000, "b1 ~1s, got {:?}", b1);
-        assert!(b2.as_millis() >= 5000 && b2.as_millis() < 6000, "b2 ~5s, got {:?}", b2);
-        assert!(b3.as_millis() >= 15000 && b3.as_millis() < 17000, "b3 ~15s, got {:?}", b3);
-        assert!(b4.as_millis() >= 35000 && b4.as_millis() < 39000, "b4 ~35s, got {:?}", b4);
+        assert!(
+            b1.as_millis() >= 1000 && b1.as_millis() < 2000,
+            "b1 ~1s, got {:?}",
+            b1
+        );
+        assert!(
+            b2.as_millis() >= 5000 && b2.as_millis() < 6000,
+            "b2 ~5s, got {:?}",
+            b2
+        );
+        assert!(
+            b3.as_millis() >= 15000 && b3.as_millis() < 17000,
+            "b3 ~15s, got {:?}",
+            b3
+        );
+        assert!(
+            b4.as_millis() >= 35000 && b4.as_millis() < 39000,
+            "b4 ~35s, got {:?}",
+            b4
+        );
         assert!(b5.as_millis() >= 35000, "b5 should reuse 35s, got {:?}", b5);
     }
 
@@ -607,26 +736,54 @@ mod tests {
         let err = RetryableError::Overloaded;
 
         // First overload: retry with backoff.
-        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::Retry { .. } => {}
             other => panic!("Expected Retry, got {other:?}"),
         }
 
         // Second overload: exceeds max_overload_retries, triggers fallback.
-        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::FallbackModel => {}
             other => panic!("Expected FallbackModel, got {other:?}"),
         }
         assert!(state.using_fallback);
 
         // Now on fallback model, overload again: retry.
-        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::Retry { .. } => {}
             other => panic!("Expected Retry on fallback, got {other:?}"),
         }
 
         // Exceed overloads on fallback: abort.
-        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::Abort(msg) => assert!(msg.contains("fallback")),
             other => panic!("Expected Abort, got {other:?}"),
         }
@@ -642,17 +799,38 @@ mod tests {
         let err = RetryableError::StreamInterrupted;
 
         // First two interruptions should retry.
-        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::Retry { .. } => {}
             other => panic!("Expected Retry, got {other:?}"),
         }
-        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::Retry { .. } => {}
             other => panic!("Expected Retry, got {other:?}"),
         }
 
         // Third interruption exceeds max_retries => abort.
-        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::Abort(msg) => assert!(msg.contains("Stream")),
             other => panic!("Expected Abort, got {other:?}"),
         }
@@ -668,18 +846,39 @@ mod tests {
         let err = RetryableError::Network;
 
         // First two transport failures should retry with backoff.
-        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::Retry { .. } => {}
             other => panic!("Expected Retry, got {other:?}"),
         }
-        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::Retry { .. } => {}
             other => panic!("Expected Retry, got {other:?}"),
         }
 
         // Third failure exceeds max_retries => abort, so the turn stops
         // instead of looping forever on an unreachable endpoint.
-        match state.next_action(&err, &config, ProviderKind::OpenAi, false) {
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenAi,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::Abort(msg) => assert!(msg.contains("Network")),
             other => panic!("Expected Abort, got {other:?}"),
         }
@@ -697,6 +896,8 @@ mod tests {
             &config,
             ProviderKind::OpenAi,
             false,
+            "",
+            &HashMap::new(),
         ) {
             RetryAction::Retry { after } => {
                 assert!(
@@ -786,7 +987,14 @@ mod tests {
         let err = RetryableError::ModelUnavailable {
             model: "laguna-s".into(),
         };
-        match state.next_action(&err, &config, ProviderKind::OpenCode, false) {
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenCode,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::Failover { target } => {
                 assert_eq!(target.provider, ProviderKind::Kilo);
                 assert_eq!(target.model_hint, "laguna-s");
@@ -802,9 +1010,129 @@ mod tests {
         let err = RetryableError::ModelUnavailable {
             model: "some-other-model".into(),
         };
-        match state.next_action(&err, &config, ProviderKind::OpenCode, false) {
+        match state.next_action(
+            &err,
+            &config,
+            ProviderKind::OpenCode,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
             RetryAction::Abort(_) => {}
             other => panic!("Expected Abort, got {other:?}"),
         }
     }
+}
+
+#[test]
+fn test_failover_mapping_configured_openrouter_to_kilo() {
+    // openrouter -> kilo is in the default mapping. Set KILO_API_KEY so the
+    // rule is guaranteed to fire regardless of the ambient/parallel env,
+    // then restore whatever was there.
+    let prior = std::env::var("KILO_API_KEY").ok();
+    unsafe {
+        std::env::set_var("KILO_API_KEY", "test-key");
+    }
+    let mut mapping = HashMap::new();
+    mapping.insert(
+        "openrouter".to_string(),
+        ("kilo".to_string(), "tencent/hy3:free".to_string()),
+    );
+    let err = RetryableError::ModelUnavailable {
+        model: "anthropic/claude-3.5-sonnet".into(),
+    };
+    let target = failover_target_configured(
+        &err,
+        ProviderKind::OpenRouter,
+        "anthropic/claude-3.5-sonnet",
+        false,
+        &mapping,
+    );
+    unsafe {
+        match prior {
+            Some(v) => std::env::set_var("KILO_API_KEY", v),
+            None => std::env::remove_var("KILO_API_KEY"),
+        }
+    }
+    match target {
+        Some(t) => {
+            assert_eq!(t.provider, ProviderKind::Kilo);
+            assert_eq!(t.model_hint, "tencent/hy3:free");
+        }
+        None => panic!("expected openrouter -> kilo failover from mapping"),
+    }
+}
+
+#[test]
+fn test_failover_mapping_skips_unknown_provider() {
+    // A mapped target whose provider name is not recognized must be skipped,
+    // so no failover is produced. This does not depend on the ambient env.
+    let mut mapping = HashMap::new();
+    mapping.insert(
+        "openrouter".to_string(),
+        ("zzz_no_such_provider".to_string(), "whatever".to_string()),
+    );
+    let err = RetryableError::ModelUnavailable {
+        model: "anthropic/claude-3.5-sonnet".into(),
+    };
+    let target = failover_target_configured(
+        &err,
+        ProviderKind::OpenRouter,
+        "anthropic/claude-3.5-sonnet",
+        false,
+        &mapping,
+    );
+    // Unknown target is skipped; the static table has no openrouter rule.
+    assert!(target.is_none());
+}
+
+#[test]
+fn test_failover_mapping_specific_model_key() {
+    // "provider/model" keys only match when the model fragment is present.
+    let mut mapping = HashMap::new();
+    mapping.insert(
+        "openrouter/anthropic/claude-3.5-sonnet".to_string(),
+        ("kilo".to_string(), "tencent/hy3:free".to_string()),
+    );
+    let err = RetryableError::ModelUnavailable {
+        model: "anthropic/claude-3.5-sonnet".into(),
+    };
+    let matched = failover_target_configured(
+        &err,
+        ProviderKind::OpenRouter,
+        "anthropic/claude-3.5-sonnet",
+        false,
+        &mapping,
+    );
+    assert!(matched.is_some());
+    let unmatched = failover_target_configured(
+        &err,
+        ProviderKind::OpenRouter,
+        "google/gemini-pro",
+        false,
+        &mapping,
+    );
+    assert!(unmatched.is_none());
+}
+
+#[test]
+fn test_failover_mapping_only_once_per_turn() {
+    // Once a failover has already happened (using_failover = true), no
+    // further rotation is attempted, even with a valid mapping.
+    let mut mapping = HashMap::new();
+    mapping.insert(
+        "openrouter".to_string(),
+        ("kilo".to_string(), "tencent/hy3:free".to_string()),
+    );
+    let err = RetryableError::ModelUnavailable {
+        model: "anthropic/claude-3.5-sonnet".into(),
+    };
+    let target = failover_target_configured(
+        &err,
+        ProviderKind::OpenRouter,
+        "anthropic/claude-3.5-sonnet",
+        true,
+        &mapping,
+    );
+    assert!(target.is_none());
 }

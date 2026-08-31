@@ -1558,6 +1558,8 @@ impl QueryEngine {
                             &retry_config,
                             current_provider_kind,
                             retry_state.using_failover,
+                            &model,
+                            &self.state.config.failover_mapping,
                         ) {
                             crate::llm::retry::RetryAction::Retry { after } => {
                                 // Log the actual cause + status, not a bare
