@@ -24,3 +24,5 @@ pub mod provider;
 pub mod retry;
 pub mod stream;
 pub mod xai_auth;
+
+pub mod identity;

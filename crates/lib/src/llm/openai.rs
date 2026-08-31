@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use super::identity;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -373,6 +374,7 @@ impl OpenAiProvider {
         let body = self.build_body(request);
 
         let mut headers = self.auth_headers().await?;
+        headers.extend(identity::headers());
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
         debug!("OpenAI request to {url}");
@@ -449,6 +451,7 @@ impl OpenAiProvider {
         let body = self.build_responses_body(request);
 
         let mut headers = self.auth_headers().await?;
+        headers.extend(identity::headers());
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
 
@@ -527,7 +530,8 @@ impl Provider for OpenAiProvider {
 
     async fn fetch_models(&self) -> Result<Vec<(String, String)>, ProviderError> {
         let url = format!("{}/models", self.base_url);
-        let headers = self.auth_headers().await?;
+        let mut headers = self.auth_headers().await?;
+        headers.extend(identity::headers());
         let response = self
             .http
             .get(&url)

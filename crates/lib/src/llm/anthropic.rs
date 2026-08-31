@@ -8,6 +8,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use super::identity;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -52,6 +53,7 @@ impl Provider for AnthropicProvider {
         let url = format!("{}/messages", self.base_url);
 
         let mut headers = HeaderMap::new();
+        headers.extend(identity::headers());
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             "x-api-key",
