@@ -10,6 +10,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use super::identity;
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -216,6 +217,7 @@ impl Provider for AzureOpenAiProvider {
         let body = self.build_body(request);
 
         let mut headers = HeaderMap::new();
+        headers.extend(identity::headers());
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
         // Azure AD token takes precedence over api-key header.
@@ -471,6 +473,7 @@ impl Provider for AzureOpenAiProvider {
         let url = format!("{}/models?api-version={}", self.base_url, self.api_version);
 
         let mut headers = HeaderMap::new();
+        headers.extend(identity::headers());
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
         // Azure AD token takes precedence over api-key header.
