@@ -5,10 +5,10 @@
 //! tool definitions with input_schema, and SSE streaming with
 //! content_block_start/delta/stop events.
 
+use super::identity;
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
-use super::identity;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 

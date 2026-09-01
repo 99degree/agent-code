@@ -44,7 +44,10 @@ mod tests {
     #[test]
     fn headers_include_identity() {
         let h = headers();
-        assert_eq!(h.get("x-title").map(|v| v.to_str().unwrap()), Some(APP_NAME));
+        assert_eq!(
+            h.get("x-title").map(|v| v.to_str().unwrap()),
+            Some(APP_NAME)
+        );
         assert_eq!(
             h.get("http-referer").map(|v| v.to_str().unwrap()),
             Some(APP_REFERER)

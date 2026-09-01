@@ -7,10 +7,10 @@
 //! Auth: `api-key` header by default, or `Authorization: Bearer {ad_token}`
 //! when `AZURE_OPENAI_AD_TOKEN` is set.
 
+use super::identity;
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
-use super::identity;
 use tokio::sync::mpsc;
 use tracing::debug;
 

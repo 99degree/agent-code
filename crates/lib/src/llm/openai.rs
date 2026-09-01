@@ -4,10 +4,10 @@
 //! Together, Ollama, DeepSeek, OpenRouter, vLLM, LMStudio, etc.).
 //! The only difference between providers is the base URL and auth.
 
+use super::identity;
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
-use super::identity;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -1362,7 +1362,9 @@ fn blocks_to_openai_content(blocks: &[ContentBlock]) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::message::{AssistantMessage, SystemMessage, SystemMessageType, MessageLevel, UserMessage};
+    use crate::llm::message::{
+        AssistantMessage, MessageLevel, SystemMessage, SystemMessageType, UserMessage,
+    };
     use crate::tools::ToolSchema;
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
