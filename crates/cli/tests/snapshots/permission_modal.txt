@@ -7,13 +7,13 @@ agent-code x.y.z   test-model   NORMAL   /w
 er newline · Shift+Tab mode · Ctrl+C cancel · Esc never cancels
 
    ┌ permission · Bash ─────────────────────────────────────────────────────┐
-   │Bash: run `cargo test`                                                  │
+   │  Bash: run `cargo test`                                                │
    │                                                                        │
-   │{                                                                       │
-   │  "command": "cargo test"                                               │
-   │}                                                                       │
+   │  {                                                                     │
+   │    "command": "cargo test"                                             │
+   │  }                                                                     │
    │                                                                        │
-   │[y] once [a] session [A] always [n] deny                                │
+   │  [y] once [a] session [A] always [n] deny                              │
    └────────────────────────────────────────────────────────────────────────┘
 
 
@@ -33,13 +33,13 @@ bccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccbbbbbbbbbbbbbbbbb
 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 bbbggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggbbb
-bbbghhhhhhhhhhhhhhhhhhhhhhbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbgbbb
+bbbgbbhhhhhhhhhhhhhhhhhhhhhhbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbgbbb
 bbbgbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbgbbb
-bbbgcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbgbbb
-bbbgcccccccccccccccccccccccccbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbgbbb
-bbbgcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbgbbb
+bbbgbbcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbgbbb
+bbbgbbcccccccccccccccccccccccccbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbgbbb
+bbbgbbcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbgbbb
 bbbgbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbgbbb
-bbbgffffffffffffffffffffffffffffffffffffffffbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbgbbb
+bbbgbbffffffffffffffffffffffffffffffffffffffffbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbgbbb
 bbbggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggbbb
 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb

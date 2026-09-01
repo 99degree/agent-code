@@ -913,7 +913,7 @@ pub(crate) fn draw_modal_box(
     // that must never be the one to disappear while its key stays live.
     let footer_h: u16 = footer
         .as_ref()
-        .map(|l| wrapped_rows(&line_text(l), width.saturating_sub(2)))
+        .map(|l| wrapped_rows(&line_text(l), width.saturating_sub(4)))
         .unwrap_or(0);
     // Size the body from the rows the text will actually occupy once
     // wrapped, not from the number of `Line`s. A single long line —
@@ -923,7 +923,7 @@ pub(crate) fn draw_modal_box(
     // about.
     let body_rows: u16 = lines
         .iter()
-        .map(|l| wrapped_rows(&line_text(l), width.saturating_sub(2)))
+        .map(|l| wrapped_rows(&line_text(l), width.saturating_sub(4)))
         .fold(0u16, |a, b| a.saturating_add(b));
     // +2 border, +footer, +1 breathing room for wrap
     let wanted = body_rows
