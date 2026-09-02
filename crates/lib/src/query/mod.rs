@@ -1234,6 +1234,7 @@ impl QueryEngine {
         let mut compact_tracking = CompactTracking::default();
         let mut retry_state = crate::llm::retry::RetryState::default();
         let retry_config = crate::llm::retry::RetryConfig {
+            max_retries: self.state.config.api.max_retries,
             max_retry_after_ms: self.state.config.api.max_retry_after_secs * 1000,
             ..crate::llm::retry::RetryConfig::default()
         };
