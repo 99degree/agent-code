@@ -388,7 +388,7 @@ impl OpenAiProvider {
         if !status.is_success() {
             // Read Retry-After before text() consumes the response.
             let ra_ms = retry_after_ms(&response, 1000);
-            let body_text = response.text().await.unwrap_or_default();
+            let body_text = response.text().await.map_err(|e| ProviderError::Network(format!("error decoding response body: {e}")))?;
             warn!("OpenAI chat/completions API error {status}: {body_text}");
             return match status.as_u16() {
                 401 | 403 => Err(ProviderError::Auth(body_text)),
@@ -466,7 +466,7 @@ impl OpenAiProvider {
         if !status.is_success() {
             // Read Retry-After before text() consumes the response.
             let ra_ms = retry_after_ms(&response, 1000);
-            let body_text = response.text().await.unwrap_or_default();
+            let body_text = response.text().await.map_err(|e| ProviderError::Network(format!("error decoding response body: {e}")))?;
             warn!("OpenAI responses API error {status}: {body_text}");
             return match status.as_u16() {
                 401 | 403 => Err(ProviderError::Auth(body_text)),
@@ -538,7 +538,7 @@ impl Provider for OpenAiProvider {
 
         let status = response.status();
         if !status.is_success() {
-            let body_text = response.text().await.unwrap_or_default();
+            let body_text = response.text().await.map_err(|e| ProviderError::Network(format!("error decoding response body: {e}")))?;
             let status_code = status.as_u16();
             return Err(match status_code {
                 401 | 403 => ProviderError::Auth(body_text),
