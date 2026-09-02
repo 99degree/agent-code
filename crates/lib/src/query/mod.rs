@@ -1566,6 +1566,16 @@ impl QueryEngine {
                                 // "Retrying" — otherwise a persistent 402/429/500
                                 // is invisible even at RUST_LOG=debug.
                                 warn!("LLM call failed ({e}); retrying in {}ms", after.as_millis());
+                                // Surface retry progress to the user so they can
+                                // see the agent is working through transient
+                                // failures instead of appearing to hang.
+                                sink.on_warning(&format!(
+                                    "Retry {}/{} in {}s — {}",
+                                    retry_state.consecutive_failures,
+                                    retry_config.max_retries,
+                                    after.as_secs(),
+                                    e
+                                ));
                                 // Backoff can reach 60s — racing the cancel
                                 // token keeps Ctrl+C responsive during it
                                 // (previously the sleep ran to completion and
