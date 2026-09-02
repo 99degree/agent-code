@@ -1039,6 +1039,12 @@ fn spawn_responses_stream(
                                 let _ = tx.send(StreamEvent::TextDelta(delta.to_string())).await;
                             }
                         }
+                        Some("response.output_text.done") => {
+                            if let Some(text) = parsed.get("text").and_then(Value::as_str) {
+                                let block = ContentBlock::Text { text: text.to_string() };
+                                let _ = tx.send(StreamEvent::ContentBlockComplete(block)).await;
+                            }
+                        }
                         Some("response.output_item.done") => {
                             if let Some(item) = parsed.get("item")
                                 && let Some(block) = response_item_to_tool_use(item)
