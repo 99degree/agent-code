@@ -273,7 +273,7 @@ impl LlmClient {
 
         let status = response.status();
         if !status.is_success() {
-            let body_text = response.text().await.unwrap_or_default();
+            let body_text = response.text().await.map_err(|e| LlmError::Http(format!("error decoding response body: {e}")))?;
 
             if status.as_u16() == 429 {
                 let retry_after = parse_retry_after(&body_text);

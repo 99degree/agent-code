@@ -248,7 +248,7 @@ impl Provider for AzureOpenAiProvider {
 
         let status = response.status();
         if !status.is_success() {
-            let body_text = response.text().await.unwrap_or_default();
+            let body_text = response.text().await.map_err(|e| ProviderError::Network(format!("error decoding response body: {e}")))?;
             let status_code = status.as_u16();
             return match status_code {
                 401 | 403 => Err(ProviderError::Auth(body_text)),
@@ -501,7 +501,7 @@ impl Provider for AzureOpenAiProvider {
 
         let status = response.status();
         if !status.is_success() {
-            let body_text = response.text().await.unwrap_or_default();
+            let body_text = response.text().await.map_err(|e| ProviderError::Network(format!("error decoding response body: {e}")))?;
             let status_code = status.as_u16();
             return Err(match status_code {
                 401 | 403 => ProviderError::Auth(body_text),

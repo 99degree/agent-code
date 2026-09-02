@@ -175,7 +175,7 @@ impl Provider for AnthropicProvider {
         if !status.is_success() {
             // Read Retry-After (header) before text() consumes the response.
             let header_retry = header_retry_after_ms(&response);
-            let body_text = response.text().await.unwrap_or_default();
+            let body_text = response.text().await.map_err(|e| ProviderError::Network(format!("error decoding response body: {e}")))?;
             let status_code = status.as_u16();
             return match status_code {
                 401 | 403 => Err(ProviderError::Auth(body_text)),
