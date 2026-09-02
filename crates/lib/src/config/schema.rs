@@ -518,7 +518,11 @@ impl Default for ApiConfig {
             thinking: None,
             effort: None,
             max_cost_usd: None,
-            timeout_secs: 20,
+            // Default timeout generous enough for reasoning models that may not emit
+            // the first token for up to two minutes. Historically this value was
+            // 120 seconds; a recent refactor mistakenly set it to 20 seconds,
+            // causing premature aborts and test failures.
+            timeout_secs: 120,
             max_retries: 3,
             max_retry_after_secs: 10,
             max_turns: None,
