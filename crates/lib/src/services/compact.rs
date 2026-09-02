@@ -301,14 +301,17 @@ pub fn estimate_compactable_tokens(messages: &[Message], keep_recent: usize) -> 
         return 0;
     }
     let clear_count = compactable.len() - keep_recent;
-    let placeholder = "[Old tool result cleared]";
-    let new_tokens = tokens::estimate_tokens(placeholder);
     let mut freed = 0u64;
     for &(msg_idx, block_idx) in &compactable[..clear_count] {
         if let Message::User(u) = &messages[msg_idx]
-            && let ContentBlock::ToolResult { content, .. } = &u.content[block_idx]
+            && let ContentBlock::ToolResult {
+                content, is_error, ..
+            } = &u.content[block_idx]
         {
             let old_tokens = tokens::estimate_tokens(content);
+            let status = if *is_error { "fail" } else { "success" };
+            let placeholder = format!("[tool result: {status}]");
+            let new_tokens = tokens::estimate_tokens(&placeholder);
             freed += old_tokens.saturating_sub(new_tokens);
         }
     }
@@ -431,11 +434,14 @@ pub fn microcompact(messages: &mut [Message], keep_recent: usize) -> u64 {
     for &(msg_idx, block_idx) in to_clear {
         if let Message::User(ref mut u) = messages[msg_idx]
             && let ContentBlock::ToolResult {
-                ref mut content, ..
+                ref mut content,
+                is_error,
+                ..
             } = u.content[block_idx]
         {
             let old_tokens = tokens::estimate_tokens(content);
-            let placeholder = "[Old tool result cleared]".to_string();
+            let status = if is_error { "fail" } else { "success" };
+            let placeholder = format!("[tool result: {status}]");
             let new_tokens = tokens::estimate_tokens(&placeholder);
             *content = placeholder;
             freed_tokens += old_tokens.saturating_sub(new_tokens);
