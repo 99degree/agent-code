@@ -151,8 +151,9 @@ fn primary_candidate_names() -> Vec<&'static str> {
 }
 
 fn primary_candidates() -> &'static [(&'static str, &'static [&'static str])] {
-    // PRIMARY is an X11/Wayland concept; skip on macOS/Windows.
-    if cfg!(target_os = "macos") || cfg!(target_os = "windows") {
+    // PRIMARY is an X11/Wayland concept; only advertise on Linux platforms.
+    // macOS, Windows, Android, and other OSes do not support it.
+    if !cfg!(target_os = "linux") {
         return &[];
     }
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
