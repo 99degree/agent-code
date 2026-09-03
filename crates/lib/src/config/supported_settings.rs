@@ -88,6 +88,24 @@ pub const SUPPORTED_SETTINGS: &[SupportedSetting] = &[
         kind: SettingKind::Enum(&["emacs", "vi"]),
         scope: Scope::User,
     },
+    SupportedSetting {
+        key: "ui.reduced_motion",
+        description: "Prefer static chrome over micro-animations.",
+        kind: SettingKind::Bool,
+        scope: Scope::User,
+    },
+    SupportedSetting {
+        key: "ui.timeline_rail",
+        description: "Draw the left timeline/turn-marker rail in the modern TUI.",
+        kind: SettingKind::Bool,
+        scope: Scope::User,
+    },
+    SupportedSetting {
+        key: "ui.scrollbar",
+        description: "Draw the right-edge scrollbar in the modern TUI.",
+        kind: SettingKind::Bool,
+        scope: Scope::User,
+    },
     // ---- Features ----
     SupportedSetting {
         key: "features.auto_theme",
@@ -207,7 +225,7 @@ mod tests {
     fn allowlist_is_small_and_unique() {
         // Be conservative: better to ship a small allow-list than a
         // wide one. Keep this assertion as a tripwire.
-        assert!(SUPPORTED_SETTINGS.len() <= 12);
+        assert!(SUPPORTED_SETTINGS.len() <= 14);
 
         let mut keys: Vec<&str> = SUPPORTED_SETTINGS.iter().map(|s| s.key).collect();
         keys.sort_unstable();
@@ -222,8 +240,19 @@ mod tests {
     #[test]
     fn lookup_returns_known_keys() {
         assert!(lookup("ui.theme").is_some());
+        assert!(lookup("ui.timeline_rail").is_some());
+        assert!(lookup("ui.scrollbar").is_some());
         assert!(lookup("features.commit_attribution").is_some());
         assert!(lookup("nonexistent.key").is_none());
+    }
+
+    #[test]
+    fn lookup_flags_are_user_scoped_booleans() {
+        for key in ["ui.timeline_rail", "ui.scrollbar"] {
+            let setting = lookup(key).expect("key should exist");
+            assert_eq!(setting.kind, SettingKind::Bool, "{key} should be a boolean");
+            assert_eq!(setting.scope, Scope::User, "{key} should be user-scoped");
+        }
     }
 
     #[test]
