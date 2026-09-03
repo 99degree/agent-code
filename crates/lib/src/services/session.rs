@@ -329,11 +329,7 @@ pub fn save_session_full(
             model: model.to_string(),
             repo: repo.to_string(),
             base_url: base_url.to_string(),
-            messages: {
-                let mut msgs = messages.to_vec();
-                remove_inserted_dummy_assistants(&mut msgs);
-                msgs
-            },
+            messages: messages.to_vec(),
             turn_count,
             total_cost_usd,
             total_input_tokens,
