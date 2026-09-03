@@ -4400,6 +4400,93 @@ mod tests {
         );
     }
 
+    /// Verifies a completed turn records all expected assistant responses
+    /// in engine state and that `save_session_full` preserves them.
+    #[tokio::test]
+    async fn completed_turn_preserves_all_response_messages() {
+        let mut engine = build_engine(Arc::new(CompletingProvider));
+
+        engine
+            .run_turn_with_sink("first prompt", &NullSink)
+            .await
+            .expect("turn should complete");
+
+        let user_texts: Vec<String> = engine
+            .state()
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                crate::llm::message::Message::User(u) => Some(
+                    u.content
+                        .iter()
+                        .filter_map(|b| match b {
+                            crate::llm::message::ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
+                _ => None,
+            })
+            .collect();
+        let assistant_texts: Vec<String> = engine
+            .state()
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                crate::llm::message::Message::Assistant(a) => Some(
+                    a.content
+                        .iter()
+                        .filter_map(|b| match b {
+                            crate::llm::message::ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(user_texts, vec!["first prompt"]);
+        assert_eq!(assistant_texts, vec!["hello"]);
+
+        let saved = crate::services::session::save_session_full(
+            engine.state().session_id.as_str(),
+            &engine.state().messages,
+            &engine.state().cwd,
+            &engine.state().config.api.model,
+            engine.state().turn_count,
+            engine.state().total_cost_usd,
+            engine.state().total_usage.input_tokens,
+            engine.state().total_usage.output_tokens,
+            engine.state().plan_mode,
+            Some(
+                crate::services::session::ProviderIdentity::from_api(
+                    &engine.state().config.api.base_url,
+                    engine.state().config.api.auth_mode,
+                ),
+            ),
+            engine.state().brief_mode,
+            engine.state().response_style.name(),
+            &engine.state().config.api.base_url,
+            &crate::services::git::repo_name_sync(std::path::Path::new(&engine.state().cwd))
+                .unwrap_or_default(),
+            engine.state().config.api.effort.clone(),
+            &engine.state().additional_dirs,
+            engine.state().pre_fast_model.clone(),
+            engine.state().disk_output_style.as_ref().map(|s| s.name.clone()),
+        )
+        .unwrap();
+
+        let loaded: crate::services::session::SessionData =
+            serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert!(loaded
+            .messages
+            .iter()
+            .any(|m| matches!(m, crate::llm::message::Message::Assistant(a) if a.content.iter().any(|b| matches!(b, crate::llm::message::ContentBlock::Text { text } if text == "hello")))));
+    }
+
     /// The previous conversation's extraction task holds its own clone
     /// of the Arc and writes its cursor back after the swap. Replacing
     /// the value inside the shared Arc would let that write land on top
