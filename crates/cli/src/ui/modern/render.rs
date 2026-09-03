@@ -1608,8 +1608,8 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 
     // Timeline rail on the left: turn markers + hover preview + click jump
     // (#558 D5-19). Overlay like the right-edge scrollbar so wrap width
-    // stays stable.
-    {
+    // stays stable. Off by default; `/timeline` turns it on.
+    if app.show_timeline_rail {
         let markers = super::timeline::build_markers(&app.transcript, &app.layout, height);
         if super::timeline::should_draw(total, height, markers.len()) {
             let rail = Rect {
@@ -1625,8 +1625,11 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     // Overlay scrollbar on the right edge when content overflows (#558 D5-21).
     // Drawn before the jump pill so the pill (registered later) wins on the
     // bottom-right cell when both claim it — actually the pill sits one
-    // column left of the track when the bar is present.
-    draw_transcript_scrollbar(frame, inner, app, total, height, top);
+    // column left of the track when the bar is present. Off by default;
+    // `/scrollbar` turns it on.
+    if app.show_scrollbar {
+        draw_transcript_scrollbar(frame, inner, app, total, height, top);
+    }
 
     // Jump-to-bottom pill when reading above the live tail (plan §M2).
     let below = app.scroll.lines_below(total, height);
@@ -1800,7 +1803,7 @@ fn draw_jump_pill(frame: &mut Frame<'_>, area: Rect, n: usize, app: &mut App) {
     let w = label.chars().count() as u16;
     // Leave the rightmost column free when a scrollbar is (or would be)
     // painted so the pill never covers the track (#558 D5-21).
-    let bar_reserve: u16 = 1;
+    let bar_reserve: u16 = if app.show_scrollbar { 1 } else { 0 };
     if area.width < w + bar_reserve + 1 || area.height < 1 {
         return;
     }

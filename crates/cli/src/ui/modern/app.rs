@@ -663,6 +663,12 @@ pub struct App {
     pub tasks: Vec<TaskEntry>,
     /// Whether the tasks pane is shown (Ctrl+T); auto-hidden when no tasks.
     pub show_tasks: bool,
+    /// Whether the left timeline rail is drawn. Off by default so the
+    /// transcript keeps full width until the user opts into the nav aid.
+    pub show_timeline_rail: bool,
+    /// Whether the right-edge scrollbar is drawn. Off by default — `Free`
+    /// scroll (PgUp/PgDn, grab) still works without it, the bar is purely visual.
+    pub show_scrollbar: bool,
     /// Detected terminal capabilities, set once at loop start (plan §M7).
     pub caps: TerminalCaps,
     /// Visible hyperlinks queued this frame for OSC 8 stamping after draw
@@ -1065,6 +1071,8 @@ impl App {
             quit_armed: false,
             tasks: Vec::new(),
             show_tasks: true,
+            show_timeline_rail: false,
+            show_scrollbar: false,
             caps: TerminalCaps::default(),
             osc8_spans: Vec::new(),
             skin: Skin::Fullscreen,
@@ -2127,6 +2135,21 @@ impl App {
         }
         if text == "/tasks" {
             self.toggle_tasks();
+            self.input.clear();
+            self.cursor = 0;
+            return;
+        }
+        // Toggle chrome that has no engine side: the left timeline rail and
+        // the right scrollbar. Both are off by default; these flip the flag and
+        // report the resulting state in the status bar.
+        if text == "/timeline" {
+            self.toggle_timeline_rail();
+            self.input.clear();
+            self.cursor = 0;
+            return;
+        }
+        if text == "/scrollbar" {
+            self.toggle_scrollbar();
             self.input.clear();
             self.cursor = 0;
             return;
@@ -3388,6 +3411,30 @@ impl App {
 
     pub fn toggle_tasks(&mut self) {
         self.show_tasks = !self.show_tasks;
+        self.dirty = true;
+    }
+
+    /// Toggle the left timeline rail. Off by default so the transcript keeps
+    /// full width until the user opts in.
+    pub fn toggle_timeline_rail(&mut self) {
+        self.show_timeline_rail = !self.show_timeline_rail;
+        self.status_message = if self.show_timeline_rail {
+            "timeline rail: on".into()
+        } else {
+            "timeline rail: off".into()
+        };
+        self.dirty = true;
+    }
+
+    /// Toggle the right-edge scrollbar. Off by default; scroll still works
+    /// without it (PgUp/PgDn, grab), the bar is purely visual.
+    pub fn toggle_scrollbar(&mut self) {
+        self.show_scrollbar = !self.show_scrollbar;
+        self.status_message = if self.show_scrollbar {
+            "scrollbar: on".into()
+        } else {
+            "scrollbar: off".into()
+        };
         self.dirty = true;
     }
 
@@ -6243,6 +6290,49 @@ mod tests {
             );
             assert_eq!(app.show_tasks, before, "{cmd} must not toggle the pane");
         }
+    }
+
+    #[test]
+    fn chrome_toggles_default_off_and_toggle_correctly() {
+        let mut app = App::new("m", "/tmp", "s");
+        assert!(!app.show_timeline_rail, "timeline rail starts off");
+        assert!(!app.show_scrollbar, "scrollbar starts off");
+
+        app.input = "/timeline".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert!(app.show_timeline_rail, "toggled on");
+        assert_eq!(app.status_message, "timeline rail: on");
+        assert_eq!(app.input, "", "toggled commands clear the composer");
+
+        app.input = "/timeline".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert!(!app.show_timeline_rail, "toggled off");
+        assert_eq!(app.status_message, "timeline rail: off");
+
+        app.input = "/scrollbar".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert!(app.show_scrollbar, "toggled scrollbar on");
+        assert_eq!(app.status_message, "scrollbar: on");
+        app.input = "/scrollbar".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert!(!app.show_scrollbar);
+        assert_eq!(app.status_message, "scrollbar: off");
+    }
+
+    #[test]
+    fn toggle_commands_do_not_stage_engine_work() {
+        let mut app = App::new("m", "/tmp", "s");
+        app.input = "/timeline".into();
+        app.cursor = app.input.len();
+        app.submit();
+        assert!(
+            app.work.slash_staged().is_none(),
+            "/timeline must not hit the command bridge"
+        );
     }
 
     /// `/permissions` must reach the command bridge (which lists rules

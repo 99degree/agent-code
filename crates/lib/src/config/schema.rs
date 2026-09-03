@@ -638,6 +638,14 @@ pub struct UiConfig {
     /// Off by default; set `[ui] reduced_motion = true` for accessibility.
     #[serde(default)]
     pub reduced_motion: bool,
+    /// Whether the left timeline rail (turn markers) is drawn in the modern
+    /// TUI. Off by default; `/timeline` toggles it live.
+    #[serde(default)]
+    pub timeline_rail: bool,
+    /// Whether the right-edge scrollbar is drawn in the modern TUI. Off by
+    /// default — scrolling still works, the bar is purely visual.
+    #[serde(default)]
+    pub scrollbar: bool,
     /// Between-turn status line customization.
     pub statusline: StatusLineConfig,
 }
@@ -656,6 +664,8 @@ impl Default for UiConfig {
             edit_mode: "emacs".to_string(),
             show_thinking_blocks: true,
             reduced_motion: false,
+            timeline_rail: false,
+            scrollbar: false,
             statusline: StatusLineConfig::default(),
         }
     }

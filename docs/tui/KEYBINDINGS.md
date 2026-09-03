@@ -13,6 +13,8 @@ Interactive sessions use the fullscreen TUI.
 | `Ctrl+C` (also `Cmd+C` / Super+C) | Modal: deny/dismiss **and** cancel turn · mid-turn with draft: clear draft first · mid-turn empty: **cancel turn** · idle empty: press twice within 1.5 s to quit · **not** `Ctrl+Shift+C` (that is copy) |
 | `Ctrl+D` | Quit (empty prompt only) |
 | `Ctrl+T` | Toggle tasks/agents pane |
+| `Ctrl+R` | Toggle the timeline rail (left edge) |
+| `Ctrl+Shift+R` | Toggle the scrollbar (right edge) |
 | `↑`/`↓` | Move the tasks-pane selection (pane open, empty composer) |
 | `Enter` | Open the selected background task's output — on a folded group heading, unfold it (pane open, empty composer) |
 | `Space` | Fold / unfold the selected group in the tasks pane. A folded group stays selectable through its heading (`▸ agents (3)`) |
@@ -112,7 +114,8 @@ for the filterable command palette. Output is captured into the transcript
 
 Fast-path locals (no engine lock): `/help` `/clear` `/copy` `/cost` `/usage`
 `/version` `/status` `/plan` `/theme` `/permissions` `/queue` `/tasks` `/model`
-`/effort` `/terminal-setup` `/minimal` `/fullscreen` `/stats` `/exit`
+`/effort` `/terminal-setup` `/minimal` `/fullscreen` `/timeline` `/scrollbar`
+`/stats` `/exit`
 
 **Model:** `/model` or empty-composer `Ctrl+M` opens the in-TUI picker
 (↑/↓ · Enter · Tab for effort). `/model <id> [effort]` and `/effort <level>`

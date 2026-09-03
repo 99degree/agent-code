@@ -459,6 +459,8 @@ pub async fn run_modern_tui(
     let disable_skill_shell = engine.state().config.security.disable_skill_shell_execution;
     let show_thinking_blocks = engine.state().config.ui.show_thinking_blocks;
     let reduced_motion = engine.state().config.ui.reduced_motion;
+    let timeline_rail = engine.state().config.ui.timeline_rail;
+    let scrollbar = engine.state().config.ui.scrollbar;
     let initial_effort = engine.state().config.api.effort.clone();
     let notifier_config = engine.state().config.notifier.clone();
     let statusline_cfg = engine.state().config.ui.statusline.clone();
@@ -538,6 +540,8 @@ pub async fn run_modern_tui(
     }
     app.statusline_enabled = statusline_cfg.enabled;
     app.statusline_template = statusline_cfg.template;
+    app.show_timeline_rail = timeline_rail;
+    app.show_scrollbar = scrollbar;
     // Construction performs no I/O; the first `notify` is what spawns.
     let mut notifier = NotifierService::new(notifier_config);
 
@@ -3512,6 +3516,16 @@ fn handle_key_inner(app: &mut App, key: KeyEvent) {
         (m, KeyCode::Char('t') | KeyCode::Char('T')) if m.contains(KeyModifiers::CONTROL) => {
             app.toggle_tasks()
         }
+        // Toggle the left timeline rail (Ctrl+R).
+        (m, KeyCode::Char('r') | KeyCode::Char('R')) if m.contains(KeyModifiers::CONTROL) => {
+            app.toggle_timeline_rail();
+        }
+        // Toggle the right scrollbar (Ctrl+Shift+R).
+        (m, KeyCode::Char('r') | KeyCode::Char('R'))
+            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
+        {
+            app.toggle_scrollbar();
+        }
         // Force full redraw (Ctrl+L) — documented in docs/tui/KEYBINDINGS.md.
         (m, KeyCode::Char('l') | KeyCode::Char('L')) if m.contains(KeyModifiers::CONTROL) => {
             app.request_full_redraw();
@@ -3971,6 +3985,8 @@ fn apply_user_keybinding(app: &mut App, key: &KeyEvent) -> bool {
                 "queue" => Some("/queue"),
                 "minimal" => Some("/minimal"),
                 "fullscreen" => Some("/fullscreen"),
+                "timeline" => Some("/timeline"),
+                "scrollbar" => Some("/scrollbar"),
                 _ => None,
             };
             match cmd {
@@ -5007,6 +5023,27 @@ mod tests {
         handle_key(&mut app, ctrl('c'));
         assert!(app.cancel_requested, "Ctrl+C no longer cancels");
         assert!(!app.work.submit_staged(), "Ctrl+C submitted a prompt");
+    }
+
+    /// The new /timeline and /scrollbar toggles are reachable through a
+    /// user keybinding (via the Toggle action) and flip state without
+    /// staging engine work.
+    #[test]
+    fn a_toggle_binding_drives_the_chrome_slash_commands() {
+        use crate::ui::keybindings::{KeyAction, Keybinding, KeybindingRegistry};
+        let mut app = App::new("m", "/tmp", "s");
+        app.keybindings =
+            std::sync::Arc::new(KeybindingRegistry::from_user_bindings(vec![Keybinding {
+                key: "ctrl+g".into(),
+                action: KeyAction::Toggle {
+                    setting: "timeline".into(),
+                },
+                description: None,
+            }]));
+        let before = app.show_timeline_rail;
+        handle_key(&mut app, ctrl('g'));
+        assert_ne!(app.show_timeline_rail, before, "toggle binding did not run");
+        assert!(app.input.is_empty(), "the chord left text in the composer");
     }
 
     /// The bug this closes: `ui.edit_mode = "vi"` was read by nothing,
