@@ -2089,32 +2089,20 @@ impl QueryEngine {
             // situation as a system message rather than persisting a silent
             // Assistant entry. This aids debugging and ensures the UI always
             // shows something meaningful for every turn.
-            if content_blocks.is_empty() {
-                // The LLM produced no visible text. Emit a system message so
-                // users can see that the assistant returned an empty response.
-                // Historically the placeholder "(response interrupted)" was
-                // used for synthetic assistants; we reuse that wording here to
-                // keep UI expectations consistent.
-                let sys_msg = Message::System(SystemMessage {
-                    uuid: Uuid::new_v4(),
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    subtype: SystemMessageType::Informational,
-                    content: "(response interrupted)".to_string(),
-                    level: MessageLevel::Info,
-                });
-                self.state.push_message(sys_msg);
-            } else {
-                let assistant_msg = Message::Assistant(AssistantMessage {
-                    uuid: Uuid::new_v4(),
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    content: content_blocks.clone(),
-                    model: Some(model.clone()),
-                    usage: Some(usage.clone()),
-                    stop_reason: stop_reason.clone(),
-                    request_id: None,
-                });
-                self.state.push_message(assistant_msg);
-            }
+            // Record the assistant message regardless of whether it contains text.
+            // Empty content can be legitimate (e.g., an assistant that only issued
+            // tool calls). The normalization pipeline will later insert a synthetic
+            // placeholder if a visible response is truly missing.
+            let assistant_msg = Message::Assistant(AssistantMessage {
+                uuid: Uuid::new_v4(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                content: content_blocks.clone(),
+                model: Some(model.clone()),
+                usage: Some(usage.clone()),
+                stop_reason: stop_reason.clone(),
+                request_id: None,
+            });
+            self.state.push_message(assistant_msg);
             self.state.record_usage(&usage, &model);
             self.emit_context_usage(sink);
 

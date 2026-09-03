@@ -329,7 +329,11 @@ pub fn save_session_full(
             model: model.to_string(),
             repo: repo.to_string(),
             base_url: base_url.to_string(),
-            messages: messages.to_vec(),
+            messages: {
+                let mut msgs = messages.to_vec();
+                remove_inserted_dummy_assistants(&mut msgs);
+                msgs
+            },
             turn_count,
             total_cost_usd,
             total_input_tokens,
@@ -1000,10 +1004,52 @@ pub fn new_session_id() -> String {
         .to_string()
 }
 
+/// Remove inserted dummy assistant messages that were added to fix alternation.
+///
+/// Specifically, removes assistant messages with exactly the text "(response interrupted)"
+/// that are situated between an assistant message and a user message.
+/// Remove synthetic "(response interrupted)" assistant messages that were
+/// inserted solely to repair alternation after a tool result. These dummy
+/// assistants are only valid when they appear **between** an assistant that
+/// emitted a `tool_use` block and a subsequent user message. In all other
+/// contexts – for example, a regular assistant response that was cut off –
+/// the synthetic message represents a genuine interruption and should be
+/// preserved.
+fn remove_inserted_dummy_assistants(messages: &mut Vec<Message>) {
+    let mut i = 1;
+    while i + 1 < messages.len() {
+        if let Message::Assistant(a) = &messages[i] {
+            // Dummy assistants have exactly one text block with the specific sentinel.
+            if a.content.len() == 1 {
+                if let ContentBlock::Text { text } = &a.content[0] {
+                    if text == "(response interrupted)" {
+                        // Determine the nature of surrounding messages.
+                        let prev_is_assistant = matches!(&messages[i - 1], Message::Assistant(_));
+                        let next_is_user = matches!(&messages[i + 1], Message::User(_));
+                        // Check if the preceding assistant actually performed a tool call.
+                        let prev_has_tool_calls = if let Message::Assistant(prev_a) = &messages[i - 1] {
+                            prev_a.content.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                        } else {
+                            false
+                        };
+                        // Only drop the dummy when it was inserted to bridge a tool call to its result.
+                        if prev_is_assistant && prev_has_tool_calls && next_is_user {
+                            messages.remove(i);
+                            // Do not increment `i` because the next element shifted into this slot.
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::message::{ContentBlock, Message, UserMessage, user_message};
+    use crate::llm::message::{ContentBlock, Message, StopReason, UserMessage, user_message, AssistantMessage};
 
     fn write_session_file(dir: &std::path::Path, id: &str, updated_at: &str) {
         let json = format!(
@@ -1344,6 +1390,82 @@ mod tests {
         assert_eq!(loaded.id, data.id);
         assert_eq!(loaded.model, data.model);
         assert_eq!(loaded.turn_count, data.turn_count);
+    }
+
+    #[test]
+    fn save_session_full_preserves_entire_response_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_id = "persist-full-history";
+
+        let messages = vec![
+            user_message("step 1"),
+            Message::Assistant(AssistantMessage {
+                uuid: uuid::Uuid::new_v4(),
+                timestamp: "2026-04-15T00:00:00Z".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "keyword-alpha".into(),
+                }],
+                model: Some("test-model".into()),
+                usage: Some(crate::llm::message::Usage {
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                }),
+                stop_reason: Some(crate::llm::message::StopReason::EndTurn),
+                request_id: None,
+            }),
+            user_message("step 2"),
+            Message::Assistant(AssistantMessage {
+                uuid: uuid::Uuid::new_v4(),
+                timestamp: "2026-04-15T00:00:01Z".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "keyword-bravo".into(),
+                }],
+                model: Some("test-model".into()),
+                usage: Some(crate::llm::message::Usage {
+                    input_tokens: 30,
+                    output_tokens: 40,
+                    cache_read_input_tokens: 5,
+                    cache_creation_input_tokens: 2,
+                }),
+                stop_reason: Some(crate::llm::message::StopReason::EndTurn),
+                request_id: None,
+            }),
+        ];
+
+        let saved = save_session_full(
+            session_id,
+            &messages,
+            "/tmp",
+            "test-model",
+            2,
+            0.01,
+            40,
+            60,
+            false,
+            None,
+            false,
+            "default",
+            "https://example.com",
+            "",
+            None,
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+
+        let loaded: SessionData =
+            serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+        assert_eq!(loaded.messages.len(), 4, "expected all response messages to persist, got {}", loaded.messages.len());
+        assert!(loaded.messages.iter().any(|m| matches!(m, Message::Assistant(a) if a.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.contains("keyword-alpha"))))));
+        assert!(loaded.messages.iter().any(|m| matches!(m, Message::Assistant(a) if a.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.contains("keyword-bravo"))))));
+
+        // Reloading the same file must keep the same history.
+        let reloaded: SessionData =
+            serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+        assert_eq!(reloaded.messages.len(), 4, "reload must keep full history");
     }
 
     #[test]

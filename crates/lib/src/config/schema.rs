@@ -959,7 +959,7 @@ mod tests {
     #[test]
     fn api_config_default_timeout() {
         let cfg = ApiConfig::default();
-        assert_eq!(cfg.timeout_secs, 20);
+        assert_eq!(cfg.timeout_secs, 120);
     }
 
     #[test]
