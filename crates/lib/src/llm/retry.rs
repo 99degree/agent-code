@@ -31,9 +31,14 @@ pub struct RetryConfig {
     /// Maximum 529/503 (overloaded) retries before falling back.
     pub max_overload_retries: u32,
     /// Maximum retry-after duration we'll accept from the API (milliseconds).
-    /// If the API specifies a longer wait, we abort instead of retrying.
-    /// Set to 0 to use the API's value regardless of duration.
+    /// If the API specifies a longer wait, we cap at this value. Set to 0
+    /// to use the API's value regardless (and cap only via `long_wait_after_ms`).
     pub max_retry_after_ms: u64,
+    /// Long-wait threshold (milliseconds). A 429 whose retry-after exceeds
+    /// this is treated as a long backoff the API wants us to honor by
+    /// *stopping* — we abort rather than block for that long. Set to 0 to
+    /// disable the threshold (subject only to `max_retry_after_ms`).
+    pub long_wait_after_ms: u64,
     /// Backoff applied to transport-level network failures (DNS, TLS,
     /// connection reset, request never left the box). These have no status
     /// code to map, so unlike rate-limit/overload they can't be tuned off a
@@ -45,11 +50,6 @@ pub struct RetryConfig {
     /// instability, so they get a larger budget than `max_retries` (which
     /// also covers stream/parse errors that tend to repeat on a bad payload).
     pub max_network_retries: u32,
-    /// Long-wait threshold (milliseconds). A 429 whose retry-after meets or
-    /// exceeds this is treated as a long backoff the API wants us to honor by
-    /// *stopping* — we abort rather than block for that long. Set to 0 to
-    /// disable the threshold (subject only to `max_retry_after_ms`).
-    pub long_wait_after_ms: u64,
 }
 
 impl Default for RetryConfig {
@@ -70,9 +70,7 @@ impl Default for RetryConfig {
                 Duration::from_secs(35),
             ],
             max_retry_after_ms: 10_000, // 10 seconds
-            // An hour: long enough that a 429 requesting this much wait is a
-            // "stop and come back later" signal, not a retriable delay.
-            long_wait_after_ms: 3_600_000,
+            long_wait_after_ms: 60_000, // 60 seconds
             network_backoff: Duration::from_secs(5),
             max_network_retries: 5,
         }
@@ -122,26 +120,33 @@ impl RetryState {
                 if self.rate_limit_retries > config.max_retries {
                     return RetryAction::Abort("Rate limit retries exhausted".into());
                 }
-                // A long retry-after is a "stop and come back later" signal,
-                // not a wait worth blocking for — abort instead of stalling.
-                if config.long_wait_after_ms > 0 && *retry_after >= config.long_wait_after_ms {
+                // Determine if we should abort due to long wait.
+                let should_abort = if current_provider == ProviderKind::OpenRouter {
+                    // For OpenRouter, hard-coded 60 second threshold.
+                    *retry_after > 60_000
+                } else {
+                    // For other providers, use the configured threshold (if set).
+                    config.long_wait_after_ms > 0 && *retry_after > config.long_wait_after_ms
+                };
+                if should_abort {
+                    let threshold = if current_provider == ProviderKind::OpenRouter {
+                        60_000
+                    } else {
+                        config.long_wait_after_ms
+                    };
                     return RetryAction::Abort(format!(
-                        "Rate limit retry-after {}ms exceeds long-wait threshold {}ms \
-                         — stopping instead of blocking",
-                        retry_after, config.long_wait_after_ms
+                        "Rate limit retry-after {}ms exceeds {}ms threshold — treating as stop signal",
+                        retry_after, threshold
                     ));
                 }
-                // If API specifies a retry-after longer than our threshold, abort.
-                // 0 means no limit (use API's value regardless).
-                if config.max_retry_after_ms > 0 && *retry_after > config.max_retry_after_ms {
-                    return RetryAction::Abort(format!(
-                        "Rate limit retry-after {}ms exceeds max {}ms",
-                        retry_after, config.max_retry_after_ms
-                    ));
-                }
-                RetryAction::Retry {
-                    after: Duration::from_millis(*retry_after),
-                }
+                // Otherwise, use exponential backoff (starting at 5 seconds).
+                let backoff = calculate_backoff(
+                    self.rate_limit_retries,
+                    Duration::from_secs(5),
+                    config.max_backoff,
+                    config.multiplier,
+                );
+                RetryAction::Retry { after: backoff }
             }
             RetryableError::Overloaded => {
                 self.overload_retries += 1;
@@ -484,25 +489,44 @@ mod tests {
     }
 
     #[test]
-    fn test_rate_limit_aborts_on_long_wait() {
+    fn test_rate_limit_aborts_on_very_long_wait() {
         let mut state = RetryState::default();
-        let config = RetryConfig {
-            long_wait_after_ms: 3_600_000, // 1h
-            ..Default::default()
-        };
-        // A 429 asking us to wait an hour is a "stop" signal.
+        let config = RetryConfig::default();
+        // A retry-after longer than 60 seconds is a stop signal (OpenRouter).
         match state.next_action(
             &RetryableError::RateLimited {
                 retry_after: 3_600_000,
             },
+            &config,
+            ProviderKind::OpenRouter,
+            false,
+            "",
+            &HashMap::new(),
+        ) {
+            RetryAction::Abort(msg) => assert!(msg.contains("60000ms"), "{msg}"),
+            other => panic!("Expected Abort on very long wait, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rate_limit_retries_short_wait_using_backoff() {
+        let mut state = RetryState::default();
+        let config = RetryConfig::default();
+        // A retry-after of 60 seconds or less should use exponential backoff
+        // (starting at 5 seconds), ignoring the API's value.
+        match state.next_action(
+            &RetryableError::RateLimited { retry_after: 60_000 },
             &config,
             ProviderKind::OpenAi,
             false,
             "",
             &HashMap::new(),
         ) {
-            RetryAction::Abort(msg) => assert!(msg.contains("long-wait"), "{msg}"),
-            other => panic!("Expected Abort on long wait, got {other:?}"),
+            RetryAction::Retry { after } => {
+                assert!(after.as_millis() >= 5000);
+                assert!(after.as_millis() <= 5500);
+            }
+            other => panic!("Expected Retry on short wait (using backoff), got {other:?}"),
         }
     }
 
@@ -1087,33 +1111,44 @@ fn test_failover_mapping_skips_unknown_provider() {
 }
 
 #[test]
-fn test_failover_mapping_specific_model_key() {
-    // "provider/model" keys only match when the model fragment is present.
-    let mut mapping = HashMap::new();
-    mapping.insert(
-        "openrouter/anthropic/claude-3.5-sonnet".to_string(),
-        ("kilo".to_string(), "tencent/hy3:free".to_string()),
-    );
-    let err = RetryableError::ModelUnavailable {
-        model: "anthropic/claude-3.5-sonnet".into(),
-    };
-    let matched = failover_target_configured(
-        &err,
-        ProviderKind::OpenRouter,
-        "anthropic/claude-3.5-sonnet",
-        false,
-        &mapping,
-    );
-    assert!(matched.is_some());
-    let unmatched = failover_target_configured(
-        &err,
-        ProviderKind::OpenRouter,
-        "google/gemini-pro",
-        false,
-        &mapping,
-    );
-    assert!(unmatched.is_none());
-}
+    fn test_failover_mapping_specific_model_key() {
+        // "provider/model" keys only match when the model fragment is present.
+        let mut mapping = HashMap::new();
+        mapping.insert(
+            "openrouter/anthropic/claude-3.5-sonnet".to_string(),
+            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+        );
+        let err = RetryableError::ModelUnavailable {
+            model: "anthropic/claude-3.5-sonnet".into(),
+        };
+        // Set KILO_API_KEY so the target provider is considered configured.
+        let prior = std::env::var("KILO_API_KEY").ok();
+        unsafe {
+            std::env::set_var("KILO_API_KEY", "test-key");
+        }
+        let matched = failover_target_configured(
+            &err,
+            ProviderKind::OpenRouter,
+            "anthropic/claude-3.5-sonnet",
+            false,
+            &mapping,
+        );
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("KILO_API_KEY", v),
+                None => std::env::remove_var("KILO_API_KEY"),
+            }
+        }
+        assert!(matched.is_some());
+        let unmatched = failover_target_configured(
+            &err,
+            ProviderKind::OpenRouter,
+            "google/gemini-pro",
+            false,
+            &mapping,
+        );
+        assert!(unmatched.is_none());
+    }
 
 #[test]
 fn test_failover_mapping_only_once_per_turn() {
