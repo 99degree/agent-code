@@ -41,6 +41,14 @@ use tokio::process::Command;
 use super::{Tool, ToolContext, ToolResult};
 use crate::error::ToolError;
 
+/// Environment variables injected into every bash tool subprocess.
+/// These prevent git and other tools from opening interactive prompts
+/// (which would block the agent's stdin and freeze the UI).
+pub(crate) const BASH_TOOL_ENV_BLOCKERS: &[(&str, &str)] = &[
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_ASK_PASS", "echo"),
+];
+
 pub use bash_security::{
     DestructiveFinding, DestructivenessLevel, classify_destructive, requires_nohup_block,
 };
@@ -309,6 +317,15 @@ impl Tool for BashTool {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        // Block interactive prompts from git and other tools.
+        // Without these, `git push` / `git pull` would try to open
+        // a credential helper TTY, consuming the agent's stdin and
+        // freezing the UI until the process exits or the user feeds
+        // input — which the agent can never do, causing deadlock.
+        for (key, val) in BASH_TOOL_ENV_BLOCKERS {
+            base.env(key, val);
+        }
 
         let mut cmd = if let Some(ref sandbox) = ctx.sandbox {
             if disable_sandbox_requested && sandbox.allow_bypass() {
