@@ -257,6 +257,11 @@ impl Provider for OpenCodeProvider {
             HeaderValue::from_str(&self.session_id)
                 .map_err(|e| ProviderError::Auth(e.to_string()))?,
         );
+        headers.insert(
+            HeaderName::from_static("x-session-id"),
+            HeaderValue::from_str(&self.session_id)
+                .map_err(|e| ProviderError::Auth(e.to_string()))?,
+        );
 
         debug!("OpenCode request to {url}");
 
