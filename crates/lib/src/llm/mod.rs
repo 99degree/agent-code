@@ -21,6 +21,7 @@ pub mod novita;
 pub mod openai;
 pub mod opencode;
 pub mod provider;
+pub mod requesty;
 pub mod retry;
 pub mod stream;
 pub mod xai_auth;

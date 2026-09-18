@@ -500,6 +500,8 @@ pub enum ProviderKind {
     Novita,
     OpenCode,
     OpenCodeGo,
+    /// Requesty AI (OpenAI-compatible gateway https://router.requesty.ai/v1).
+    Requesty,
     OpenAiCompatible,
 }
 
