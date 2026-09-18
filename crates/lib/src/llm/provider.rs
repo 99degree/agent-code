@@ -330,6 +330,9 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     if url_lower.contains("kilo.ai") {
         return ProviderKind::Kilo;
     }
+    if url_lower.contains("requesty.ai") {
+        return ProviderKind::Requesty;
+    }
     if url_lower.contains("localhost") || url_lower.contains("127.0.0.1") {
         return ProviderKind::OpenAiCompatible;
     }
@@ -529,6 +532,7 @@ impl ProviderKind {
             ProviderKind::Novita,
             ProviderKind::OpenCode,
             ProviderKind::OpenCodeGo,
+            ProviderKind::Requesty,
             ProviderKind::OpenAiCompatible,
         ]
     }
@@ -567,6 +571,7 @@ impl ProviderKind {
             | Self::Novita
             | Self::OpenCode
             | Self::OpenCodeGo
+            | Self::Requesty
             | Self::OpenAiCompatible => WireFormat::OpenAiCompatible,
         }
     }
@@ -593,6 +598,7 @@ impl ProviderKind {
             Self::Nvidia => Some("https://integrate.api.nvidia.com/v1"),
             Self::Kilo => Some("https://api.kilo.ai/api/gateway"),
             Self::Novita => Some("https://api.novita.ai/openai/v1"),
+            Self::Requesty => Some("https://router.requesty.ai/v1"),
             // These require user-supplied URLs.
             Self::Bedrock | Self::Vertex | Self::AzureOpenAi | Self::OpenAiCompatible => None,
         }
@@ -619,6 +625,7 @@ impl ProviderKind {
             Self::Nvidia => "NVIDIA_API_KEY",
             Self::Kilo => "KILO_API_KEY",
             Self::Novita => "NOVITA_API_KEY",
+            Self::Requesty => "REQUESTY_API_KEY",
             Self::OpenAiCompatible => "OPENAI_API_KEY",
         }
     }
@@ -648,6 +655,7 @@ impl ProviderKind {
             Self::Novita => "novita",
             Self::OpenCode => "opencode",
             Self::OpenCodeGo => "opencode-go",
+            Self::Requesty => "requesty",
             Self::OpenAiCompatible => "openai-compatible",
         }
     }
@@ -678,6 +686,7 @@ impl ProviderKind {
             "openrouter" => ProviderKind::OpenRouter,
             "cohere" => ProviderKind::Cohere,
             "perplexity" => ProviderKind::Perplexity,
+            "requesty" => ProviderKind::Requesty,
             _ => return None,
         })
     }
