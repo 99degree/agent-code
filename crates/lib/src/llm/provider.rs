@@ -547,6 +547,11 @@ impl ProviderKind {
         if matches!(self, Self::OpenAiCompatible) {
             return false;
         }
+        // Kilo exposes anonymous free models, so it is always available
+        // even without a KILO_API_KEY.
+        if matches!(self, Self::Kilo) {
+            return true;
+        }
         self.api_key_from_env().is_some()
     }
 
