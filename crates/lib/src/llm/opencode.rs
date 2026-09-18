@@ -245,11 +245,14 @@ impl Provider for OpenCodeProvider {
         let body = self.build_body(request);
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", self.api_key))
-                .map_err(|e| ProviderError::Auth(e.to_string()))?,
-        );
+        // Skip Authorization header for anonymous/free models (empty API key or "public")
+        if !self.api_key.is_empty() && self.api_key != "public" {
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {}", self.api_key))
+                    .map_err(|e| ProviderError::Auth(e.to_string()))?,
+            );
+        }
         headers.extend(identity::headers());
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
@@ -261,6 +264,10 @@ impl Provider for OpenCodeProvider {
             HeaderName::from_static("x-session-id"),
             HeaderValue::from_str(&self.session_id)
                 .map_err(|e| ProviderError::Auth(e.to_string()))?,
+        );
+        headers.insert(
+            HeaderName::from_static("x-opencode-client"),
+            HeaderValue::from_static("agent-code"),
         );
 
         debug!("OpenCode request to {url}");
