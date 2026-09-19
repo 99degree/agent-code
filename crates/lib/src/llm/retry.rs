@@ -515,7 +515,9 @@ mod tests {
         // A retry-after of 60 seconds or less should use exponential backoff
         // (starting at 5 seconds), ignoring the API's value.
         match state.next_action(
-            &RetryableError::RateLimited { retry_after: 60_000 },
+            &RetryableError::RateLimited {
+                retry_after: 60_000,
+            },
             &config,
             ProviderKind::OpenAi,
             false,
@@ -1111,44 +1113,44 @@ fn test_failover_mapping_skips_unknown_provider() {
 }
 
 #[test]
-    fn test_failover_mapping_specific_model_key() {
-        // "provider/model" keys only match when the model fragment is present.
-        let mut mapping = HashMap::new();
-        mapping.insert(
-            "openrouter/anthropic/claude-3.5-sonnet".to_string(),
-            ("kilo".to_string(), "tencent/hy3:free".to_string()),
-        );
-        let err = RetryableError::ModelUnavailable {
-            model: "anthropic/claude-3.5-sonnet".into(),
-        };
-        // Set KILO_API_KEY so the target provider is considered configured.
-        let prior = std::env::var("KILO_API_KEY").ok();
-        unsafe {
-            std::env::set_var("KILO_API_KEY", "test-key");
-        }
-        let matched = failover_target_configured(
-            &err,
-            ProviderKind::OpenRouter,
-            "anthropic/claude-3.5-sonnet",
-            false,
-            &mapping,
-        );
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("KILO_API_KEY", v),
-                None => std::env::remove_var("KILO_API_KEY"),
-            }
-        }
-        assert!(matched.is_some());
-        let unmatched = failover_target_configured(
-            &err,
-            ProviderKind::OpenRouter,
-            "google/gemini-pro",
-            false,
-            &mapping,
-        );
-        assert!(unmatched.is_none());
+fn test_failover_mapping_specific_model_key() {
+    // "provider/model" keys only match when the model fragment is present.
+    let mut mapping = HashMap::new();
+    mapping.insert(
+        "openrouter/anthropic/claude-3.5-sonnet".to_string(),
+        ("kilo".to_string(), "tencent/hy3:free".to_string()),
+    );
+    let err = RetryableError::ModelUnavailable {
+        model: "anthropic/claude-3.5-sonnet".into(),
+    };
+    // Set KILO_API_KEY so the target provider is considered configured.
+    let prior = std::env::var("KILO_API_KEY").ok();
+    unsafe {
+        std::env::set_var("KILO_API_KEY", "test-key");
     }
+    let matched = failover_target_configured(
+        &err,
+        ProviderKind::OpenRouter,
+        "anthropic/claude-3.5-sonnet",
+        false,
+        &mapping,
+    );
+    unsafe {
+        match prior {
+            Some(v) => std::env::set_var("KILO_API_KEY", v),
+            None => std::env::remove_var("KILO_API_KEY"),
+        }
+    }
+    assert!(matched.is_some());
+    let unmatched = failover_target_configured(
+        &err,
+        ProviderKind::OpenRouter,
+        "google/gemini-pro",
+        false,
+        &mapping,
+    );
+    assert!(unmatched.is_none());
+}
 
 #[test]
 fn test_failover_mapping_only_once_per_turn() {

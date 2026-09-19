@@ -44,10 +44,8 @@ use crate::error::ToolError;
 /// Environment variables injected into every bash tool subprocess.
 /// These prevent git and other tools from opening interactive prompts
 /// (which would block the agent's stdin and freeze the UI).
-pub(crate) const BASH_TOOL_ENV_BLOCKERS: &[(&str, &str)] = &[
-    ("GIT_TERMINAL_PROMPT", "0"),
-    ("GIT_ASK_PASS", "echo"),
-];
+pub(crate) const BASH_TOOL_ENV_BLOCKERS: &[(&str, &str)] =
+    &[("GIT_TERMINAL_PROMPT", "0"), ("GIT_ASK_PASS", "echo")];
 
 pub use bash_security::{
     DestructiveFinding, DestructivenessLevel, classify_destructive, requires_nohup_block,

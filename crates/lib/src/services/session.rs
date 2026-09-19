@@ -1023,11 +1023,15 @@ fn remove_inserted_dummy_assistants(messages: &mut Vec<Message>) {
                         let prev_is_assistant = matches!(&messages[i - 1], Message::Assistant(_));
                         let next_is_user = matches!(&messages[i + 1], Message::User(_));
                         // Check if the preceding assistant actually performed a tool call.
-                        let prev_has_tool_calls = if let Message::Assistant(prev_a) = &messages[i - 1] {
-                            prev_a.content.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. }))
-                        } else {
-                            false
-                        };
+                        let prev_has_tool_calls =
+                            if let Message::Assistant(prev_a) = &messages[i - 1] {
+                                prev_a
+                                    .content
+                                    .iter()
+                                    .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                            } else {
+                                false
+                            };
                         // Only drop the dummy when it was inserted to bridge a tool call to its result.
                         if prev_is_assistant && prev_has_tool_calls && next_is_user {
                             messages.remove(i);
@@ -1045,7 +1049,9 @@ fn remove_inserted_dummy_assistants(messages: &mut Vec<Message>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::message::{ContentBlock, Message, StopReason, UserMessage, user_message, AssistantMessage};
+    use crate::llm::message::{
+        AssistantMessage, ContentBlock, Message, StopReason, UserMessage, user_message,
+    };
 
     fn write_session_file(dir: &std::path::Path, id: &str, updated_at: &str) {
         let json = format!(
@@ -1454,7 +1460,12 @@ mod tests {
 
         let loaded: SessionData =
             serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
-        assert_eq!(loaded.messages.len(), 4, "expected all response messages to persist, got {}", loaded.messages.len());
+        assert_eq!(
+            loaded.messages.len(),
+            4,
+            "expected all response messages to persist, got {}",
+            loaded.messages.len()
+        );
         assert!(loaded.messages.iter().any(|m| matches!(m, Message::Assistant(a) if a.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.contains("keyword-alpha"))))));
         assert!(loaded.messages.iter().any(|m| matches!(m, Message::Assistant(a) if a.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.contains("keyword-bravo"))))));
 
