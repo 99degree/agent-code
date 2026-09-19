@@ -4460,12 +4460,10 @@ mod tests {
             engine.state().total_usage.input_tokens,
             engine.state().total_usage.output_tokens,
             engine.state().plan_mode,
-            Some(
-                crate::services::session::ProviderIdentity::from_api(
-                    &engine.state().config.api.base_url,
-                    engine.state().config.api.auth_mode,
-                ),
-            ),
+            Some(crate::services::session::ProviderIdentity::from_api(
+                &engine.state().config.api.base_url,
+                engine.state().config.api.auth_mode,
+            )),
             engine.state().brief_mode,
             engine.state().response_style.name(),
             &engine.state().config.api.base_url,
@@ -4474,7 +4472,11 @@ mod tests {
             engine.state().config.api.effort.clone(),
             &engine.state().additional_dirs,
             engine.state().pre_fast_model.clone(),
-            engine.state().disk_output_style.as_ref().map(|s| s.name.clone()),
+            engine
+                .state()
+                .disk_output_style
+                .as_ref()
+                .map(|s| s.name.clone()),
         )
         .unwrap();
 
