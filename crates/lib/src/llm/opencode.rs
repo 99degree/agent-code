@@ -193,7 +193,6 @@ impl OpenCodeProvider {
             "model": request.model,
             "messages": final_messages,
             "stream": true,
-            "stream_options": { "include_usage": true },
         });
 
         if uses_new_token_param {
@@ -288,10 +287,9 @@ impl Provider for OpenCodeProvider {
         let status = response.status();
         if !status.is_success() {
             let ra_ms = retry_after_ms(&response, 1000);
-            let body_text = response
-                .text()
-                .await
-                .map_err(|e| ProviderError::Network(format!("error decoding response body: {e}")))?;
+            let body_text = response.text().await.map_err(|e| {
+                ProviderError::Network(format!("error decoding response body: {e}"))
+            })?;
             warn!("OpenCode chat/completions API error {status}: {body_text}");
             return match status.as_u16() {
                 401 | 403 => Err(ProviderError::Auth(body_text)),
