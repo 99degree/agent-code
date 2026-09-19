@@ -445,6 +445,10 @@ pub fn create_provider_from_config(
             base_url,
             &resolved_key,
         )),
+        ProviderKind::Requesty => std::sync::Arc::new(crate::llm::requesty::RequestyProvider::new(
+            base_url,
+            &resolved_key,
+        )),
         _ => match kind.wire_format() {
             WireFormat::Anthropic => std::sync::Arc::new(
                 crate::llm::anthropic::AnthropicProvider::new(base_url, &resolved_key),
@@ -912,6 +916,14 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_from_url_requesty() {
+        assert!(matches!(
+            detect_provider("any", "https://router.requesty.ai/v1"),
+            ProviderKind::Requesty
+        ));
+    }
+
+    #[test]
     fn test_detect_from_model_command_r() {
         assert!(matches!(
             detect_provider("command-r-plus", ""),
@@ -1091,6 +1103,7 @@ mod tests {
             ProviderKind::OpenAiCompatible.env_var_name(),
             "OPENAI_API_KEY"
         );
+        assert_eq!(ProviderKind::Requesty.env_var_name(), "REQUESTY_API_KEY");
     }
 
     #[test]
@@ -1240,6 +1253,18 @@ mod tests {
         assert_eq!(ProviderKind::OpenCode.default_model(), Some("big-pickle"));
         // Providers without a curated catalog have no default model.
         assert_eq!(ProviderKind::OpenAiCompatible.default_model(), None);
+    }
+
+    #[test]
+    fn test_requesty_provider_is_constructed_from_config() {
+        let mut config = crate::config::Config::default();
+        config.api.api_key = Some("requesty-key".to_string());
+        let provider = create_provider_from_config(
+            "openai/gpt-4o",
+            "https://router.requesty.ai/v1",
+            &config,
+        );
+        assert_eq!(provider.name(), "requesty");
     }
 
     // fetch_matching_model is a network + API-key call; the only hermetic
