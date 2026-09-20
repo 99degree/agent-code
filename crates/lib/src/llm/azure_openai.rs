@@ -167,7 +167,8 @@ impl AzureOpenAiProvider {
             "messages": final_messages,
             "stream": true,
             "stream_options": { "include_usage": true },
-            "max_tokens": request.max_tokens,
+            "chat_template_kwargs": serde_json::json!({"force_nonempty_content": true}), // optional OpenAI SDK param — Nemotron/TensorRT-LLM parsing
+                        "max_tokens": request.max_tokens,
         });
 
         if !tools.is_empty() {
