@@ -147,9 +147,16 @@ pub(crate) fn parse_provider_slash(input: &str) -> Option<PendingProviderAction>
         Some((c, a)) => (c, Some(a.trim())),
         None => (rest, None),
     };
-    if !cmd.eq_ignore_ascii_case("provider") && !cmd.eq_ignore_ascii_case("p") {
+    let alias_cmds = ["provider", "p", "nvidia", "kilo", "opencode", "openrouter"];
+    if !alias_cmds.iter().any(|a| cmd.eq_ignore_ascii_case(a)) {
         return None;
     }
+    // If invoked via alias with no arg, treat alias as provider name.
+    let args = if (args.is_none() || args == Some("")) && cmd != "provider" && cmd != "p" && agent_code_lib::llm::provider::ProviderKind::from_name(cmd).is_some() {
+        Some(cmd)
+    } else {
+        args
+    };
     match args {
         None | Some("") => Some(PendingProviderAction::Show),
         Some(name) => {

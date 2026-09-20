@@ -148,7 +148,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "provider",
-        aliases: &["p"],
+        aliases: &["p", "nvidia", "kilo", "opencode", "openrouter"],
         description: "Show or switch the default LLM provider",
         hidden: false,
     },
@@ -1231,6 +1231,8 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             CommandResult::Handled
         }
         Some("provider") => {
+            // When invoked via alias (e.g. /nvidia) with no explicit arg, use alias as provider name.
+            let args = if args.is_none() && cmd != "p" && agent_code_lib::llm::provider::ProviderKind::from_name(cmd).is_some() { Some(cmd) } else { args };
             let current_model = engine.state().config.api.model.clone();
             let base_url = engine.state().config.api.base_url.clone();
             let current = agent_code_lib::llm::provider::detect_provider(&current_model, &base_url);
