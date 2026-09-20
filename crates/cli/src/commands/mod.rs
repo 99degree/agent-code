@@ -34,9 +34,10 @@ pub enum CommandResult {
     Prompt(String),
 }
 
-/// Per-provider cache of the merged (static + live) model list fetched from
-/// the API. Populated lazily on first `/model` and reused for the session.
-type ModelCache = LazyLock<Mutex<HashMap<ProviderKind, Vec<(String, String)>>>>;
+/// Per-provider and per-base-URL cache of the merged (static + live) model list
+/// fetched from the API. Populated lazily on first `/model` and reused for the
+/// session.
+type ModelCache = LazyLock<Mutex<HashMap<(ProviderKind, String), Vec<(String, String)>>>>;
 
 static MODEL_CACHE: ModelCache = LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -58,6 +59,12 @@ pub(crate) fn merge_models(
     out
 }
 
+/// Read the model cache without mutating it.
+pub(crate) fn model_cache_read()
+-> std::sync::MutexGuard<'static, HashMap<(ProviderKind, String), Vec<(String, String)>>> {
+    MODEL_CACHE.lock().unwrap()
+}
+
 /// Whether to attempt a live fetch for this provider in the current config.
 /// API-key providers need their key present; OAuth providers (no key env var)
 /// attempt the fetch whenever auth mode isn't plain ApiKey.
@@ -65,11 +72,13 @@ fn provider_wants_live(kind: ProviderKind, cfg: &agent_code_lib::config::Config)
     kind.api_key_from_env().is_some() || cfg.api.auth_mode != ApiAuthMode::ApiKey
 }
 
-/// Merged (static + live) model list for a provider, blocking on the API call.
+/// Merged (static + live) model list for a provider+base_url, blocking on the API call.
 /// `execute()` runs inside the TUI's multi-threaded tokio runtime, so
 /// `block_in_place` + `Handle::current().block_on` is valid here.
 pub fn fetch_model_entries(engine: &QueryEngine, kind: ProviderKind) -> Vec<(String, String)> {
-    if let Some(cached) = MODEL_CACHE.lock().unwrap().get(&kind) {
+    let base_url = engine.state().config.api.base_url.clone();
+    let cache_key = (kind, base_url.clone());
+    if let Some(cached) = MODEL_CACHE.lock().unwrap().get(&cache_key) {
         return cached.clone();
     }
     let static_list: Vec<(String, String)> =
@@ -84,7 +93,10 @@ pub fn fetch_model_entries(engine: &QueryEngine, kind: ProviderKind) -> Vec<(Str
             merged = merge_models(&static_list, &live);
         }
     }
-    MODEL_CACHE.lock().unwrap().insert(kind, merged.clone());
+    MODEL_CACHE
+        .lock()
+        .unwrap()
+        .insert(cache_key, merged.clone());
     merged
 }
 

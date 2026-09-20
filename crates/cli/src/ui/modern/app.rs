@@ -17,6 +17,7 @@ use super::sink::EngineEvent;
 use super::stream_buffer::StreamBuffer;
 use super::tasks::TaskEntry;
 use super::terminal_caps::TerminalCaps;
+use crate::commands::merge_models;
 
 /// Grace after the first paint of a HITL modal before y/a/n (etc.) are accepted.
 /// Prevents in-flight typing from auto-answering a permission ask that just
@@ -165,15 +166,14 @@ fn normalize_effort(s: &str) -> String {
 
 /// Format `/model` catalog lines for the transcript (fallback when picker closed).
 pub(crate) fn format_model_catalog(current: &str, base_url: &str) -> Vec<String> {
-    let provider = agent_code_lib::llm::provider::detect_provider(current, base_url);
-    let models = agent_code_lib::llm::provider::models_for_provider(provider);
+    let entries = model_catalog_entries(current, base_url);
     let mut lines = vec![format!("Model: {current}")];
-    if models.is_empty() {
+    if entries.is_empty() {
         lines.push("Use /model <name> to change · Ctrl+M opens the picker.".into());
     } else {
         lines.push("Available models (↑/↓ · Enter · Ctrl+M picker · /model <id> [effort]):".into());
-        for (name, desc) in models {
-            let mark = if *name == current { " ✔" } else { "" };
+        for (name, desc) in entries {
+            let mark = if name == current { " ✔" } else { "" };
             lines.push(format!("  {name}{mark}  — {desc}"));
         }
     }
@@ -183,10 +183,23 @@ pub(crate) fn format_model_catalog(current: &str, base_url: &str) -> Vec<String>
 /// Provider catalog as `(id, description)` for the model picker overlay.
 pub(crate) fn model_catalog_entries(current: &str, base_url: &str) -> Vec<(String, String)> {
     let provider = agent_code_lib::llm::provider::detect_provider(current, base_url);
-    agent_code_lib::llm::provider::models_for_provider(provider)
-        .iter()
-        .map(|(n, d)| ((*n).to_string(), (*d).to_string()))
-        .collect()
+    let static_entries: Vec<(String, String)> =
+        agent_code_lib::llm::provider::models_for_provider(provider)
+            .iter()
+            .map(|(n, d)| ((*n).to_string(), (*d).to_string()))
+            .collect();
+    // Merge live models for the exact current base URL so the picker
+    // reflects the configured endpoint, not just the default URL for this
+    // provider kind (e.g. a custom opencode.ai URL).
+    let engine_api_base_url = base_url;
+    let cached_live: Vec<(String, String)> = {
+        let cache = crate::commands::model_cache_read();
+        cache
+            .get(&(provider, engine_api_base_url.to_string()))
+            .cloned()
+            .unwrap_or_default()
+    };
+    merge_models(&static_entries, &cached_live)
 }
 
 /// Fallback `/provider` catalog lines for the transcript when the picker is
