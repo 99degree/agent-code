@@ -654,6 +654,7 @@ async fn run_subagent_in_process(
             verbose: false,
             unattended: true,
             agent_kind: AgentKind::Subagent,
+            debug_enabled: false,
         },
     );
 

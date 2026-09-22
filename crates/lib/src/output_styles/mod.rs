@@ -56,6 +56,12 @@ pub enum AgentKind {
     Subagent,
 }
 
+impl Default for AgentKind {
+    fn default() -> Self {
+        Self::Main
+    }
+}
+
 impl AgentKind {
     /// Canonical string id used in `applies_to` lists.
     pub fn as_str(&self) -> &'static str {

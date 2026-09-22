@@ -152,7 +152,11 @@ pub(crate) fn parse_provider_slash(input: &str) -> Option<PendingProviderAction>
         return None;
     }
     // If invoked via alias with no arg, treat alias as provider name.
-    let args = if (args.is_none() || args == Some("")) && cmd != "provider" && cmd != "p" && agent_code_lib::llm::provider::ProviderKind::from_name(cmd).is_some() {
+    let args = if (args.is_none() || args == Some(""))
+        && cmd != "provider"
+        && cmd != "p"
+        && agent_code_lib::llm::provider::ProviderKind::from_name(cmd).is_some()
+    {
         Some(cmd)
     } else {
         args
@@ -1490,6 +1494,27 @@ impl App {
                         None,
                     );
                 }
+            }
+            EngineEvent::DebugStop { response, location } => {
+                let mut debug_lines = Vec::new();
+                debug_lines.push("[DEBUG] Agent stopped sending next request to LLM:".to_string());
+                debug_lines.push(format!("[DEBUG] Stop location: {}", location));
+                if response.is_empty() {
+                    debug_lines.push("[DEBUG] Last response: (empty)".to_string());
+                } else {
+                    let plen = 2000usize;
+                    let display = if response.len() > plen {
+                        format!("{}... [total {} chars]", &response[..plen], response.len())
+                    } else {
+                        response.clone()
+                    };
+                    debug_lines.push(format!("[DEBUG] Last response:\n{}", display));
+                }
+                debug_lines.push("[DEBUG] End debug output".to_string());
+                for line in debug_lines {
+                    self.transcript.push(TranscriptItem::System(line));
+                }
+                self.dirty = true;
             }
         }
     }

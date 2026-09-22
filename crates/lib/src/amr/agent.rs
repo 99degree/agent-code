@@ -171,6 +171,7 @@ impl AmrAgent for EngineAgent {
                 verbose: false,
                 unattended: true,
                 agent_kind: AgentKind::Subagent,
+                debug_enabled: false,
             },
         );
 

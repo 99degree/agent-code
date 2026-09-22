@@ -93,6 +93,7 @@ impl ScheduleExecutor {
                 // Scheduled jobs are top-level agent runs, not children
                 // spawned by the Agent tool, so they get the `Main` role.
                 agent_kind: AgentKind::Main,
+                debug_enabled: false,
             },
         );
 

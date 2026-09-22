@@ -1259,11 +1259,8 @@ mod tests {
     fn test_requesty_provider_is_constructed_from_config() {
         let mut config = crate::config::Config::default();
         config.api.api_key = Some("requesty-key".to_string());
-        let provider = create_provider_from_config(
-            "openai/gpt-4o",
-            "https://router.requesty.ai/v1",
-            &config,
-        );
+        let provider =
+            create_provider_from_config("openai/gpt-4o", "https://router.requesty.ai/v1", &config);
         assert_eq!(provider.name(), "requesty");
     }
 

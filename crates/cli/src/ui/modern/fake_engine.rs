@@ -331,6 +331,7 @@ pub(super) fn harness(provider: ScriptedProvider, cwd: &std::path::Path) -> Harn
             verbose: false,
             unattended: false,
             agent_kind: AgentKind::Main,
+            debug_enabled: false,
         },
     );
 

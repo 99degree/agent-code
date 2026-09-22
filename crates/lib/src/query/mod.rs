@@ -47,6 +47,20 @@ pub struct QueryEngineConfig {
     /// list excludes this role are filtered out at system-prompt
     /// build time.
     pub agent_kind: AgentKind,
+    /// Whether debug mode is enabled.
+    pub debug_enabled: bool,
+}
+
+impl Default for QueryEngineConfig {
+    fn default() -> Self {
+        Self {
+            max_turns: None,
+            verbose: false,
+            unattended: false,
+            agent_kind: AgentKind::default(),
+            debug_enabled: false,
+        }
+    }
 }
 
 /// The query engine orchestrates the agent loop.
@@ -112,6 +126,8 @@ pub struct QueryEngine {
     live_plan_mode: Arc<std::sync::atomic::AtomicBool>,
     pending_model: Arc<std::sync::Mutex<Option<String>>>,
     pending_effort: Arc<std::sync::Mutex<Option<String>>>,
+    last_llm_response: std::sync::Mutex<String>,
+    stop_location: std::sync::Mutex<String>,
 }
 
 /// Callback for streaming events to the UI.
@@ -153,6 +169,10 @@ pub trait StreamSink: Send + Sync {
         self.on_tool_result(tool_name, result);
     }
 
+    /// Debug: called when the LLM stream stops, with the accumulated response and stop location.
+    /// Default implementation does nothing.
+    fn on_debug_stop(&self, _response: &str, _location: &str) {}
+
     /// Streaming tool stdout/stderr chunk (bash-like tools). Default no-op.
     fn on_tool_output(&self, _call_id: &str, _chunk: &str) {}
 
@@ -192,6 +212,7 @@ impl StreamSink for NullSink {
     fn on_tool_start(&self, _: &str, _: &serde_json::Value) {}
     fn on_tool_result(&self, _: &str, _: &crate::tools::ToolResult) {}
     fn on_error(&self, _: &str) {}
+    fn on_debug_stop(&self, _: &str, _: &str) {}
 }
 
 /// Coalesced, always-latest status of the engine's current turn.
@@ -273,6 +294,8 @@ impl QueryEngine {
             live_plan_mode,
             pending_model,
             pending_effort,
+            last_llm_response: std::sync::Mutex::new(String::new()),
+            stop_location: std::sync::Mutex::new(String::new()),
         }
     }
 
@@ -1248,6 +1271,9 @@ impl QueryEngine {
         // the prior total so each exchange adds to it rather than overwriting.
         let base_turns = self.state.turn_count;
 
+        // Debug: capture the full response text received from the LLM.
+        let mut debug_response_text = String::new();
+
         // Agent loop: budget check → normalize → compact → call LLM → execute tools → repeat.
         'turn: for turn in 0..max_turns {
             self.state.turn_count = base_turns + turn + 1;
@@ -1781,6 +1807,13 @@ impl QueryEngine {
                                 // a UI listening on on_turn_outcome never
                                 // learns the turn died (only on_error fires,
                                 // which mid-turn recovery also uses).
+                                // Debug: print last response and stop location.
+                                if self.config.debug_enabled {
+                                    *self.last_llm_response.lock().unwrap() = debug_response_text;
+                                    *self.stop_location.lock().unwrap() =
+                                        "run_turn_inner: LLM call failed".to_string();
+                                    self.print_debug_stop(sink);
+                                }
                                 sink.on_turn_outcome(self.state.turn_count, "error");
                                 return Err(crate::error::Error::Other(e.to_string()));
                             }
@@ -1815,6 +1848,13 @@ impl QueryEngine {
                             match event {
                                 Some(StreamEvent::TextDelta(text)) => {
                                     sink.on_text(&text);
+                                    // Debug: serialize the event and append to debug_response_text
+                                    if self.config.debug_enabled || self.state.config.features.debug_mode {
+                                        if let Ok(json) = serde_json::to_string(&StreamEvent::TextDelta(text.clone())) {
+                                            debug_response_text.push_str(&json);
+                                            debug_response_text.push('\n');
+                                        }
+                                    }
                                 }
                                 Some(StreamEvent::ContentBlockComplete(block)) => {
                                     if let ContentBlock::ToolUse {
@@ -1918,8 +1958,8 @@ impl QueryEngine {
                                                                     permission_prompter: None,
                                                                     question_asker: None,
                                                                     agent_origin: None,
-                is_subagent: true,
-                block_nohup: true,
+                    is_subagent: true,
+                    block_nohup: true,
                                                                     sandbox: None,
                                                                     active_disk_output_style: None,
                                                                     agent_limiter: None,
@@ -1953,14 +1993,43 @@ impl QueryEngine {
                                     usage: u,
                                     stop_reason: sr,
                                 }) => {
-                                    usage = u;
-                                    stop_reason = sr;
+                                    usage = u.clone();
+                                    stop_reason = sr.clone();
                                     sink.on_usage(&usage);
+
+                                    // Debug: print the completed response when Done is emitted.
+                                    if self.config.debug_enabled || self.state.config.features.debug_mode {
+                                        // Serialize the event and append to debug_response_text first
+                                        // (uses clones so the originals remain available for the
+                                        // stop_location format string).
+                                        if let Ok(json) = serde_json::to_string(&StreamEvent::Done {
+                                            usage: u.clone(),
+                                            stop_reason: sr.clone(),
+                                        }) {
+                                            debug_response_text.push_str(&json);
+                                            debug_response_text.push('\n');
+                                        }
+
+                                        *self.last_llm_response.lock().unwrap() = debug_response_text.clone();
+                                        *self.stop_location.lock().unwrap() = format!(
+                                            "run_turn_inner: stream Done (stop_reason={:?})",
+                                            sr,
+                                        );
+                                        self.print_debug_stop(sink);
+                                    }
                                 }
                                 Some(StreamEvent::Error(msg)) => {
                                     got_error = true;
                                     error_text = msg.clone();
                                     sink.on_error(&msg);
+
+                                    // Debug: serialize the event and append to debug_response_text
+                                    if self.config.debug_enabled || self.state.config.features.debug_mode {
+                                        if let Ok(json) = serde_json::to_string(&StreamEvent::Error(msg.clone())) {
+                                            debug_response_text.push_str(&json);
+                                            debug_response_text.push('\n');
+                                        }
+                                    }
                                 }
                                 Some(_) => {}
                                 None => break,
@@ -2078,6 +2147,13 @@ impl QueryEngine {
             let prompt_too_long = error_text.contains("prompt is too long")
                 || error_text.contains("Prompt is too long");
             if got_error && content_blocks.is_empty() && !prompt_too_long {
+                // Debug: print last response and stop location.
+                if self.config.debug_enabled {
+*self.last_llm_response.lock().unwrap() = debug_response_text;
+                                    *self.stop_location.lock().unwrap() =
+                                        format!("run_turn_inner: stream error with empty content");
+                                    self.print_debug_stop(sink);
+                }
                 self.state.is_query_active = false;
                 let _ = self.fire_error_hooks("llm_call_failed", &error_text).await;
                 sink.on_turn_outcome(self.state.turn_count, "error");
@@ -2203,6 +2279,17 @@ impl QueryEngine {
                 sink.on_turn_complete(turn + 1);
                 sink.on_turn_outcome(self.state.turn_count, "done");
                 self.state.is_query_active = false;
+
+                // Debug: print last response and stop location.
+                if self.config.debug_enabled || self.state.config.features.debug_mode {
+                    *self.last_llm_response.lock().unwrap() = debug_response_text;
+                    *self.stop_location.lock().unwrap() = format!(
+                        "run_turn_inner: turn {} completed (no tool calls), stop_reason={:?}",
+                        turn + 1,
+                        stop_reason,
+                    );
+                    self.print_debug_stop(sink);
+                }
 
                 // PostTurn hooks fire on successful completion. Not fired
                 // on cancel / error paths — hooks shouldn't have to
@@ -2545,7 +2632,34 @@ impl QueryEngine {
         sink.on_warning(&format!("Agent stopped after {max_turns} turns"));
         sink.on_turn_outcome(self.state.turn_count, "max_turns");
         self.state.is_query_active = false;
+
+        // Debug: print last response and stop location.
+        if self.config.debug_enabled || self.state.config.features.debug_mode {
+            *self.last_llm_response.lock().unwrap() = debug_response_text;
+            *self.stop_location.lock().unwrap() = format!(
+                "run_turn_inner: max turns ({max_turns}) reached at turn {}",
+                self.state.turn_count,
+            );
+            self.print_debug_stop(sink);
+        }
         Ok(())
+    }
+
+    /// Print debug info when agent stops sending requests.
+    fn print_debug_stop(&self, sink: &dyn StreamSink) {
+        let response = self.last_llm_response.lock().unwrap();
+        let location = self.stop_location.lock().unwrap();
+        sink.on_debug_stop(&response, &location);
+    }
+
+    /// Get the last LLM response for debugging.
+    pub fn last_llm_response(&self) -> String {
+        self.last_llm_response.lock().unwrap().clone()
+    }
+
+    /// Get the stop location for debugging.
+    pub fn stop_location(&self) -> String {
+        self.stop_location.lock().unwrap().clone()
     }
 
     /// Cancel the current operation.
@@ -3950,6 +4064,7 @@ mod tests {
                 verbose: false,
                 unattended: true,
                 agent_kind: AgentKind::Main,
+                debug_enabled: false,
             },
         )
     }
