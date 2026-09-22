@@ -88,6 +88,9 @@ struct Cli {
     /// Enable verbose output.
     #[arg(short, long)]
     verbose: bool,
+    /// Enable debug mode (prints last LLM response and stop location).
+    #[arg(long)]
+    debug: bool,
 
     /// Working directory (defaults to current directory).
     #[arg(short = 'C', long)]
@@ -992,6 +995,7 @@ async fn async_main() -> anyhow::Result<()> {
             verbose: cli.verbose,
             unattended: cli.prompt.is_some(),
             agent_kind,
+            debug_enabled: cli.debug,
         },
     );
 

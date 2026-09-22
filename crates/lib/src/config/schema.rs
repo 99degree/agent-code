@@ -505,7 +505,7 @@ impl Default for ApiConfig {
 
         Self {
             base_url,
-            model: "gpt-5.4".to_string(),
+            model: "openrouter/free".to_string(),
             auth_mode: ApiAuthMode::ApiKey,
             fast_model: None,
             subagent_model: None,
@@ -817,6 +817,8 @@ pub struct FeaturesConfig {
     /// offending history can be inspected. Each failure overwrites the
     /// previous dump file (so storage stays bounded).
     pub dump_failed_requests: bool,
+    /// Print last LLM response and stop location when agent stops.
+    pub debug_mode: bool,
 }
 
 impl Default for FeaturesConfig {
@@ -836,6 +838,7 @@ impl Default for FeaturesConfig {
             reactive_compact: true,
             prompt_caching: true,
             dump_failed_requests: true,
+            debug_mode: false,
         }
     }
 }

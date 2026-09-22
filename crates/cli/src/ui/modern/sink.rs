@@ -133,6 +133,11 @@ pub enum EngineEvent {
         questions: Vec<UiQuestion>,
         respond: std::sync::mpsc::Sender<Vec<String>>,
     },
+    /// Debug: last LLM response and stop location when the agent stops sending requests.
+    DebugStop {
+        response: String,
+        location: String,
+    },
 }
 
 /// Permission prompter that surfaces engine asks inside the TUI.
@@ -421,6 +426,13 @@ impl StreamSink for ChannelSink {
         self.send(EngineEvent::PlanProposed {
             plan_md: plan_md.to_string(),
             path: path.map(str::to_string),
+        });
+    }
+
+    fn on_debug_stop(&self, response: &str, location: &str) {
+        self.send(EngineEvent::DebugStop {
+            response: response.to_string(),
+            location: location.to_string(),
         });
     }
 }

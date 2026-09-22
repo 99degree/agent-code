@@ -11,7 +11,7 @@
 //! - `message_delta` — final usage and stop_reason
 //! - `message_stop` — stream complete
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::llm::message::{ContentBlock, StopReason, Usage};
 
@@ -35,7 +35,7 @@ pub fn stream_timeout_error(timeout: Option<std::time::Duration>) -> String {
 }
 
 /// Events yielded by the stream parser.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum StreamEvent {
     /// Partial text being streamed.
     TextDelta(String),

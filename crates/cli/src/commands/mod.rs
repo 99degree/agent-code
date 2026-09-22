@@ -688,6 +688,12 @@ pub const COMMANDS: &[Command] = &[
         hidden: false,
     },
     Command {
+        name: "debug",
+        aliases: &[],
+        description: "Toggle debug mode (prints last LLM response and stop location when agent stops)",
+        hidden: false,
+    },
+    Command {
         name: "settings",
         aliases: &[],
         description: "Settings sync: /settings sync push|pull|list (opt-in remote backup)",
@@ -1232,7 +1238,14 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
         }
         Some("provider") => {
             // When invoked via alias (e.g. /nvidia) with no explicit arg, use alias as provider name.
-            let args = if args.is_none() && cmd != "p" && agent_code_lib::llm::provider::ProviderKind::from_name(cmd).is_some() { Some(cmd) } else { args };
+            let args = if args.is_none()
+                && cmd != "p"
+                && agent_code_lib::llm::provider::ProviderKind::from_name(cmd).is_some()
+            {
+                Some(cmd)
+            } else {
+                args
+            };
             let current_model = engine.state().config.api.model.clone();
             let base_url = engine.state().config.api.base_url.clone();
             let current = agent_code_lib::llm::provider::detect_provider(&current_model, &base_url);
@@ -3306,6 +3319,18 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                          try /rename again once you've sent a message."
                     );
                 }
+            }
+            CommandResult::Handled
+        }
+        Some("debug") => {
+            let current = engine.state().config.features.debug_mode;
+            engine.state_mut().config.features.debug_mode = !current;
+            let on = !current;
+            println!("Debug mode {}", if on { "ON" } else { "OFF" });
+            if on {
+                println!(
+                    "When on, the agent prints its last received LLM response and stop location whenever it stops sending requests to the LLM."
+                );
             }
             CommandResult::Handled
         }

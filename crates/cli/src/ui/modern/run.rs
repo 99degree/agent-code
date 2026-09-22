@@ -6811,6 +6811,7 @@ mod tests {
                 verbose: false,
                 unattended: true,
                 agent_kind: AgentKind::Main,
+                debug_enabled: false,
             },
         )
     }
