@@ -290,7 +290,7 @@ impl OpenAiProvider {
 
     async fn auth_headers(&self) -> Result<HeaderMap, ProviderError> {
         match &self.auth {
-            OpenAiAuth::ApiKey(api_key) => {
+            OpenAiAuth::ApiKey(api_key) if !api_key.is_empty() => {
                 let mut headers = HeaderMap::new();
                 headers.insert(
                     AUTHORIZATION,
@@ -299,6 +299,7 @@ impl OpenAiProvider {
                 );
                 Ok(headers)
             }
+            OpenAiAuth::ApiKey(_) => Ok(HeaderMap::new()),
             OpenAiAuth::CodexChatGpt(auth) => auth.auth_headers().await,
             OpenAiAuth::XaiOauth(auth) => {
                 let token = auth.access_token().await?;
