@@ -787,8 +787,7 @@ async fn handle_ws_request(
             })
         }
         "cancel" => {
-            let engine = state.engine.lock().await;
-            engine.cancel();
+            state.engine.lock().await.cancel();
             serde_json::json!({"cancelled": true})
         }
         "skills" => {

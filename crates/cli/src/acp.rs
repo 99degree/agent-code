@@ -288,8 +288,7 @@ async fn handle_cancel(
     id: Option<serde_json::Value>,
     engine: &Arc<Mutex<QueryEngine>>,
 ) -> JsonRpcResponse {
-    let engine = engine.lock().await;
-    engine.cancel();
+    engine.lock().await.cancel();
 
     JsonRpcResponse::success(id, serde_json::json!({ "cancelled": true }))
 }

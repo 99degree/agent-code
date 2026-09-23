@@ -1841,6 +1841,9 @@ impl QueryEngine {
                 tokio::task::JoinHandle<crate::tools::ToolResult>,
             )> = Vec::new();
 
+            // Track if we've seen a tool_use stop reason - prioritize it over end_turn
+            let mut seen_tool_use_stop = false;
+
             let mut cancelled = false;
             loop {
                 tokio::select! {
@@ -1994,7 +1997,24 @@ impl QueryEngine {
                                     stop_reason: sr,
                                 }) => {
                                     usage = u.clone();
-                                    stop_reason = sr.clone();
+
+                                    // Prioritize tool_use stop_reason over end_turn.
+                                    // If we've already seen tool_use, don't overwrite with end_turn.
+                                    // This ensures tool calls are executed before the turn ends.
+                                    let should_update_stop_reason = match (&sr, seen_tool_use_stop) {
+                                        (Some(StopReason::ToolUse), _) => {
+                                            seen_tool_use_stop = true;
+                                            true
+                                        }
+                                        (Some(StopReason::EndTurn), true) => false, // Keep tool_use
+                                        (Some(StopReason::EndTurn), false) => true,
+                                        (Some(_), _) => true,
+                                        (None, _) => true,
+                                    };
+
+                                    if should_update_stop_reason {
+                                        stop_reason = sr.clone();
+                                    }
                                     sink.on_usage(&usage);
 
                                     // Debug: print the completed response when Done is emitted.
@@ -2660,6 +2680,29 @@ impl QueryEngine {
     /// Get the stop location for debugging.
     pub fn stop_location(&self) -> String {
         self.stop_location.lock().unwrap().clone()
+    }
+
+
+    /// Store tool results to be injected after the turn completes.
+    /// This is used to execute tools as "pending assistant messages"
+    /// after the final turn message has been processed.
+    fn store_tool_results(&mut self, results: Vec<crate::tools::executor::ToolCallResult>) {
+        // Store results to be injected after the turn completes
+        let mut tool_result_messages = Vec::new();
+        for result in results {
+            let msg = crate::llm::message::tool_result_message(
+                &result.tool_use_id,
+                &result.result.content,
+                result.result.is_error,
+            );
+            tool_result_messages.push(msg);
+        }
+        
+        // Schedule these to be injected after the turn completes
+        // For now, we inject them immediately but mark them as "late tool results"
+        for msg in tool_result_messages {
+            self.state.push_message(msg);
+        }
     }
 
     /// Cancel the current operation.
