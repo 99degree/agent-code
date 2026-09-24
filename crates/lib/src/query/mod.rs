@@ -2075,6 +2075,23 @@ impl QueryEngine {
                     }
             }
 
+            // PURE empty-signal: any zero-use EndTurn → continue msg to LLM (no effective_done / seen_tool_use_stop needed)
+            if matches!(stop_reason, Some(StopReason::EndTurn)) && usage.total() == 0 {
+                if self.config.debug_enabled || self.state.config.features.debug_mode { sink.on_debug_stop("EMPTY SIGNAL: abnormal Done (EndTurn, 0 tokens) — sending continue msg to LLM", "run_turn_inner: empty_signal_pure"); }
+                let continue_msg = Message::Assistant(AssistantMessage {
+                    uuid: Uuid::new_v4(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    content: vec![ContentBlock::Text { text: "Continue generating your final answer based on your previous thoughts.".into() }],
+                    model: Some(model.clone()),
+                    usage: Some(usage.clone()),
+                    stop_reason: Some(StopReason::EndTurn),
+                    request_id: None,
+                });
+                self.state.push_message(continue_msg);
+                // UI display suppressed — sentence sent to LLM only, not shown to user.
+                continue 'turn;
+            }
+
             if cancelled {
                 // Record the partial assistant message so the next turn has a
                 // consistent history (assistant + tool_result pairs). Without
@@ -2597,6 +2614,7 @@ impl QueryEngine {
                 }
 
                 sink.on_tool_call_result(&result.tool_use_id, &result.tool_name, &result.result);
+                if self.config.debug_enabled || self.state.config.features.debug_mode { sink.on_debug_stop(&format!("send tool_result -> server: id={} name={} turn={}", result.tool_use_id, result.tool_name, self.state.turn_count), "run_turn_inner: tool_result_sent_to_server"); }
                 if result.tool_name == "Agent" {
                     emit_agent_result_update(
                         sink,

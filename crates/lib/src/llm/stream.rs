@@ -171,6 +171,8 @@ pub struct StreamParser {
     pub model: Option<String>,
     /// API request ID.
     pub request_id: Option<String>,
+    /// The stop_reason from the last message_delta event.
+    stop_reason: Option<StopReason>,
 }
 
 /// A content block being accumulated from deltas.
@@ -194,6 +196,7 @@ impl StreamParser {
             usage: Usage::default(),
             model: None,
             request_id: None,
+            stop_reason: None,
         }
     }
 
@@ -338,13 +341,21 @@ impl StreamParser {
                 if let Some(u) = usage {
                     self.usage.merge(&u);
                 }
-                vec![StreamEvent::Done {
-                    usage: self.usage.clone(),
-                    stop_reason: delta.stop_reason,
-                }]
+                // Store the stop_reason from message_delta, but don't emit Done yet.
+                // Anthropic may send multiple message_delta events during streaming;
+                // the final stop_reason is confirmed by message_stop.
+                self.stop_reason = delta.stop_reason;
+                vec![]
             }
 
-            RawSseEvent::MessageStop {} => vec![],
+            RawSseEvent::MessageStop {} => {
+                // Emit the final Done event with accumulated usage and the last
+                // observed stop_reason (from the final message_delta, if any).
+                vec![StreamEvent::Done {
+                    usage: self.usage.clone(),
+                    stop_reason: self.stop_reason.clone(),
+                }]
+            }
 
             RawSseEvent::Ping {} => vec![],
 
