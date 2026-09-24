@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use super::message::{ContentBlock, Message, StopReason, Usage};
+use super::nemotron::is_nemotron_model;
 use super::provider::{Provider, ProviderError, ProviderRequest};
 use super::stream::{StreamEvent, stream_timeout_error, wait_for_stream_timeout};
 
@@ -167,9 +168,14 @@ impl AzureOpenAiProvider {
             "messages": final_messages,
             "stream": true,
             "stream_options": { "include_usage": true },
-            "chat_template_kwargs": serde_json::json!({"force_nonempty_content": true}), // optional OpenAI SDK param — Nemotron/TensorRT-LLM parsing
-                        "max_tokens": request.max_tokens,
+            "max_tokens": request.max_tokens,
         });
+
+        // chat_template_kwargs is only understood by Nemotron/TensorRT-LLM
+        // endpoints; Mistral and other OpenAI-compatible providers reject it.
+        if is_nemotron_model(&request.model) {
+            body["chat_template_kwargs"] = serde_json::json!({"force_nonempty_content": true});
+        }
 
         if !tools.is_empty() {
             body["tools"] = serde_json::Value::Array(tools);

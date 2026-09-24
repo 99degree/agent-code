@@ -14,7 +14,7 @@ use tracing::{debug, warn};
 
 use super::codex_auth::CodexChatGptAuth;
 use super::message::{ContentBlock, Message, StopReason, Usage};
-use super::nemotron::NemotronStreamParser;
+use super::nemotron::{NemotronStreamParser, is_nemotron_model};
 use super::provider::{Provider, ProviderError, ProviderRequest, ToolChoice};
 use super::stream::{StreamEvent, stream_timeout_error, wait_for_stream_timeout};
 use super::xai_auth::XaiOauthAuth;
@@ -250,9 +250,14 @@ impl OpenAiProvider {
             "model": request.model,
             "messages": final_messages,
             "stream": true,
-                        "stream_options": { "include_usage": true },
-            "chat_template_kwargs": serde_json::json!({"force_nonempty_content": true}), // optional OpenAI SDK param — Nemotron/TensorRT-LLM parsing
+            "stream_options": { "include_usage": true },
         });
+
+        // chat_template_kwargs is only understood by Nemotron/TensorRT-LLM
+        // endpoints; Mistral and other OpenAI-compatible providers reject it.
+        if is_nemotron_model(&request.model) {
+            body["chat_template_kwargs"] = serde_json::json!({"force_nonempty_content": true});
+        }
 
         if uses_new_token_param {
             body["max_completion_tokens"] = serde_json::json!(request.max_tokens);
