@@ -1558,7 +1558,7 @@ min_duration_secs = 5
     #[test]
     fn config_default_composes_sub_defaults() {
         let cfg = Config::default();
-        assert_eq!(cfg.api.model, "gpt-5.4");
+        assert_eq!(cfg.api.model, "openrouter/free");
         assert_eq!(cfg.permissions.default_mode, PermissionMode::Ask);
         assert!(cfg.ui.markdown);
         assert!(cfg.features.token_budget);
@@ -1866,7 +1866,7 @@ additional_directories = ["/tmp"]
     #[test]
     fn config_toml_empty_string_uses_defaults() {
         let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(cfg.api.timeout_secs, 20);
+        assert_eq!(cfg.api.timeout_secs, 120);
         assert_eq!(cfg.permissions.default_mode, PermissionMode::Ask);
         assert!(cfg.ui.markdown);
     }
