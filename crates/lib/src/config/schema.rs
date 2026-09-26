@@ -83,6 +83,23 @@ impl Default for Config {
             "opencodego/*".to_string(),
             ("kilo".to_string(), "tencent/hy3:free".to_string()),
         );
+        // nim <-> nvidia cross-failover (shared model catalog, different endpoints)
+        failover_mapping.insert(
+            "nim".to_string(),
+            ("nvidia".to_string(), "nemotron-3-ultra".to_string()),
+        );
+        failover_mapping.insert(
+            "nim/*".to_string(),
+            ("nvidia".to_string(), "nemotron-3-ultra".to_string()),
+        );
+        failover_mapping.insert(
+            "nvidia".to_string(),
+            ("nim".to_string(), "nemotron-3-ultra".to_string()),
+        );
+        failover_mapping.insert(
+            "nvidia/*".to_string(),
+            ("nim".to_string(), "nemotron-3-ultra".to_string()),
+        );
         Self {
             api: ApiConfig::default(),
             permissions: PermissionsConfig::default(),
@@ -972,7 +989,7 @@ mod tests {
     #[test]
     fn api_config_default_model() {
         let cfg = ApiConfig::default();
-        assert_eq!(cfg.model, "gpt-5.4");
+        assert_eq!(cfg.model, "openrouter/free");
     }
 
     #[test]
