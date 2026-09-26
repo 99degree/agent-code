@@ -268,6 +268,7 @@ pub(crate) fn map_cli_provider(raw: &str) -> String {
         "ollama" | "local" => "ollama".into(),
         "codex" | "chatgpt" | "codex_subscription" => "codex_subscription".into(),
         "xai_subscription" | "grok_oauth" | "supergrok" => "xai_subscription".into(),
+        "orcarouter" => "orcarouter".into(),
         other => other.to_string(),
     }
 }
@@ -480,6 +481,12 @@ pub(crate) fn api_key_provider_defaults(
             "OPENAI_API_KEY",
             "https://api.openai.com/v1",
             "gpt-5.4",
+        ),
+        "orcarouter" => (
+            "orcarouter",
+            "ORCAROUTER_API_KEY",
+            "https://api.orcarouter.ai/v1",
+            "orcarouter/auto",
         ),
         _ => (
             "openai",
@@ -824,6 +831,7 @@ mod tests {
         assert_eq!(map_cli_provider("grok"), "xai");
         assert_eq!(map_cli_provider("codex"), "codex_subscription");
         assert_eq!(map_cli_provider("openai"), "openai");
+        assert_eq!(map_cli_provider("orcarouter"), "orcarouter");
     }
 
     #[test]
@@ -835,6 +843,11 @@ mod tests {
         assert_eq!(p, "xai");
         assert_eq!(env, "XAI_API_KEY");
         assert!(model.contains("grok"));
+        let (p, env, url, model) = api_key_provider_defaults("orcarouter");
+        assert_eq!(p, "orcarouter");
+        assert_eq!(env, "ORCAROUTER_API_KEY");
+        assert!(url.contains("orcarouter"));
+        assert!(model.contains("orcarouter"));
     }
 
     #[test]
