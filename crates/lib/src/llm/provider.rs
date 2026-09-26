@@ -247,6 +247,8 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
             ("x-preview-f-free", "x-preview-f · Free preview"),
             ("muse-spark-1.2-contributor", "Muse Spark 1.2 Contributor"),
         ],
+        ProviderKind::Requesty => &[("requesty/auto", "Requesty Auto · Rotates models")],
+        ProviderKind::OrcaRouter => &[("orcarouter/auto", "OrcaRouter Auto · Rotates models")],
         _ => &[],
     }
 }
@@ -328,6 +330,9 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     }
     if url_lower.contains("requesty.ai") {
         return ProviderKind::Requesty;
+    }
+    if url_lower.contains("orcarouter.ai") || url_lower.contains("api.orcarouter.ai") {
+        return ProviderKind::OrcaRouter;
     }
     if url_lower.contains("localhost") || url_lower.contains("127.0.0.1") {
         return ProviderKind::OpenAiCompatible;
@@ -514,6 +519,8 @@ pub enum ProviderKind {
     OpenCodeGo,
     /// Requesty AI (OpenAI-compatible gateway https://router.requesty.ai/v1).
     Requesty,
+    /// OrcaRouter (OpenAI-compatible API https://api.orcarouter.ai/v1).
+    OrcaRouter,
     OpenAiCompatible,
 }
 
@@ -543,6 +550,7 @@ impl ProviderKind {
             ProviderKind::OpenCode,
             ProviderKind::OpenCodeGo,
             ProviderKind::Requesty,
+            ProviderKind::OrcaRouter,
             ProviderKind::OpenAiCompatible,
         ]
     }
@@ -588,6 +596,7 @@ impl ProviderKind {
             | Self::OpenCode
             | Self::OpenCodeGo
             | Self::Requesty
+            | Self::OrcaRouter
             | Self::OpenAiCompatible => WireFormat::OpenAiCompatible,
         }
     }
@@ -616,6 +625,7 @@ impl ProviderKind {
             Self::Kilo => Some("https://api.kilo.ai/api/gateway"),
             Self::Novita => Some("https://api.novita.ai/openai/v1"),
             Self::Requesty => Some("https://router.requesty.ai/v1"),
+            Self::OrcaRouter => Some("https://api.orcarouter.ai/v1"),
             // These require user-supplied URLs.
             Self::Bedrock | Self::Vertex | Self::AzureOpenAi | Self::OpenAiCompatible => None,
         }
@@ -644,6 +654,7 @@ impl ProviderKind {
             Self::Kilo => "KILO_API_KEY",
             Self::Novita => "NOVITA_API_KEY",
             Self::Requesty => "REQUESTY_API_KEY",
+            Self::OrcaRouter => "ORCAROUTER_API_KEY",
             Self::OpenAiCompatible => "OPENAI_API_KEY",
         }
     }
@@ -675,6 +686,7 @@ impl ProviderKind {
             Self::OpenCode => "opencode",
             Self::OpenCodeGo => "opencode-go",
             Self::Requesty => "requesty",
+            Self::OrcaRouter => "orcarouter",
             Self::OpenAiCompatible => "openai-compatible",
         }
     }
@@ -707,6 +719,7 @@ impl ProviderKind {
             "cohere" => ProviderKind::Cohere,
             "perplexity" => ProviderKind::Perplexity,
             "requesty" => ProviderKind::Requesty,
+            "orcarouter" => ProviderKind::OrcaRouter,
             _ => return None,
         })
     }

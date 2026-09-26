@@ -362,6 +362,7 @@ pub const API_KEY_ENV_VARS: &[&str] = &[
     "PERPLEXITY_API_KEY",
     "REQUESTY_API_KEY",
     "NIM_API_KEY",
+    "ORCAROUTER_API_KEY",
 ];
 
 /// Resolve API key from environment variables.

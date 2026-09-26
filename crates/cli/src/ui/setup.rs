@@ -182,6 +182,12 @@ const ENV_KEY_CANDIDATES: &[(&str, &str, &str, &str)] = &[
         "https://integrate.api.nvidia.com/v1",
         "nemotron-3-ultra",
     ),
+    (
+        "ORCAROUTER_API_KEY",
+        "orcarouter",
+        "https://api.orcarouter.ai/v1",
+        "orcarouter/auto",
+    ),
 ];
 
 /// Prefer API keys already present in the environment (no interactive UI).
