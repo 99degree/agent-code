@@ -612,6 +612,7 @@ pub async fn compact_with_llm(
     llm: &dyn crate::llm::provider::Provider,
     model: &str,
     cancel: tokio_util::sync::CancellationToken,
+    stream_timeout: Option<std::time::Duration>,
 ) -> Option<usize> {
     if messages.len() < 4 {
         return None; // Not enough messages to compact.
@@ -646,7 +647,7 @@ pub async fn compact_with_llm(
         tool_choice: Default::default(),
         metadata: None,
         cancel,
-        stream_timeout: None,
+        stream_timeout,
     };
 
     let mut rx = match llm.stream(&request).await {
@@ -790,14 +791,93 @@ fn calculate_keep_count(messages: &[Message]) -> usize {
 mod tests {
     use super::*;
     use crate::llm::message::{AssistantMessage, tool_result_message, user_message};
+    use crate::llm::provider::{Provider, ProviderError, ProviderRequest};
+    use crate::llm::stream::StreamEvent;
+    use tokio::sync::mpsc;
 
-    fn assistant_text(text: &str) -> Message {
+    /// A provider that emits a summary and completes, used to prove that
+    /// `compact_with_llm` forwards the configured `stream_timeout` into the
+    /// request it builds (so a silent summary LLM is bounded the same way a
+    /// normal turn's request is).
+    struct SummaryProvider {
+        captured_timeout: std::sync::Arc<std::sync::Mutex<Option<std::time::Duration>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for SummaryProvider {
+        fn name(&self) -> &str {
+            "summary-mock"
+        }
+
+        async fn stream(
+            &self,
+            request: &ProviderRequest,
+        ) -> Result<mpsc::Receiver<StreamEvent>, ProviderError> {
+            *self.captured_timeout.lock().unwrap() = request.stream_timeout;
+            let (tx, rx) = mpsc::channel(4);
+            tokio::spawn(async move {
+                let _ = tx.send(StreamEvent::TextDelta("summary".into())).await;
+                let _ = tx
+                    .send(StreamEvent::ContentBlockComplete(
+                        crate::llm::message::ContentBlock::Text {
+                            text: "summary".into(),
+                        },
+                    ))
+                    .await;
+                let _ = tx
+                    .send(StreamEvent::Done {
+                        usage: crate::llm::message::Usage::default(),
+                        stop_reason: Some(crate::llm::message::StopReason::EndTurn),
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    /// `compact_with_llm` used to build its summary request with
+    /// `stream_timeout: None`, so a stalled summary model could hang the
+    /// compaction path forever (and, via the engine lock, the whole turn).
+    /// The configured per-chunk timeout must be forwarded.
+    #[tokio::test]
+    async fn compact_forwards_configured_stream_timeout() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let provider = SummaryProvider {
+            captured_timeout: captured.clone(),
+        };
+        // Each message must be long enough that `calculate_keep_count`
+        // leaves a non-zero split point (the token threshold is 10K), so
+        // the compaction path actually calls the LLM instead of returning
+        // None for "not enough to summarize".
+        let body: &str = &"word ".repeat(2500); // ~10K tokens of text
+        let mut messages: Vec<Message> = Vec::new();
+        for i in 0..12 {
+            messages.push(user_message(format!("{body} turn {i}")));
+            messages.push(assistant_text(format!("{body} reply {i}")));
+        }
+        let timeout = std::time::Duration::from_secs(30);
+        let removed = compact_with_llm(
+            &mut messages,
+            &provider,
+            "test-model",
+            tokio_util::sync::CancellationToken::new(),
+            Some(timeout),
+        )
+        .await
+        .expect("compaction should succeed");
+        assert!(removed > 0, "compaction should have removed messages");
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some(timeout),
+            "stream_timeout was not forwarded to the summary request"
+        );
+    }
+
+    fn assistant_text(text: impl Into<String>) -> Message {
         Message::Assistant(AssistantMessage {
             uuid: Uuid::new_v4(),
             timestamp: chrono::Utc::now().to_rfc3339(),
-            content: vec![ContentBlock::Text {
-                text: text.to_string(),
-            }],
+            content: vec![ContentBlock::Text { text: text.into() }],
             model: None,
             usage: None,
             stop_reason: None,
