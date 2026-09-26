@@ -45,6 +45,8 @@ impl OpenAiProvider {
     pub fn new(base_url: &str, api_key: &str) -> Self {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
             .build()
             .expect("failed to build HTTP client");
 
@@ -59,6 +61,8 @@ impl OpenAiProvider {
     pub fn new_responses_with_codex_auth(base_url: &str, auth: CodexChatGptAuth) -> Self {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
             .build()
             .expect("failed to build HTTP client");
 
@@ -74,6 +78,8 @@ impl OpenAiProvider {
     pub fn new_with_xai_oauth(base_url: &str, auth: XaiOauthAuth) -> Self {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
             .build()
             .expect("failed to build HTTP client");
 
@@ -90,6 +96,8 @@ impl OpenAiProvider {
     pub fn new_nemotron(base_url: &str, api_key: &str) -> Self {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
             .build()
             .expect("failed to build HTTP client");
 

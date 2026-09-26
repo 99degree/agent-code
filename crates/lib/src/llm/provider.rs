@@ -764,6 +764,8 @@ impl ProviderKind {
         let url = format!("{base}/models");
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
             .build()
             .ok()?;
         let resp = client.get(&url).bearer_auth(&key).send().await.ok()?;

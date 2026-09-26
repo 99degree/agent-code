@@ -103,6 +103,8 @@ impl CodexChatGptAuth {
         let state = CodexAuthState::load_from_file(&auth_file)?;
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
             .build()
             .map_err(|e| ProviderError::Network(format!("client build: {e}")))?;
 

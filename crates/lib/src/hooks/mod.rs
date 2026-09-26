@@ -221,6 +221,8 @@ async fn run_http_hook(
 ) -> HookResult {
     let client = match reqwest::Client::builder()
         .timeout(DEFAULT_HOOK_TIMEOUT)
+        .pool_idle_timeout(std::time::Duration::from_secs(30))
+        .tcp_keepalive(std::time::Duration::from_secs(60))
         .build()
     {
         Ok(c) => c,
