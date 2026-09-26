@@ -326,6 +326,11 @@ pub struct ApiConfig {
     pub base_url: String,
     /// Model identifier.
     pub model: String,
+    /// Provider identifier (e.g., "nvidia", "nim", "openai", "anthropic").
+    /// When set, this takes priority over URL-based provider detection.
+    /// Used when reading from config.toml to explicitly identify the provider.
+    #[serde(default)]
+    pub provider: Option<String>,
     /// Authentication mode:
     /// - `api_key` — env/config/CLI API key
     /// - `codex_chatgpt` — ChatGPT/Codex subscription (`~/.codex/auth.json`)
@@ -506,6 +511,7 @@ impl Default for ApiConfig {
         Self {
             base_url,
             model: "openrouter/free".to_string(),
+            provider: None,
             auth_mode: ApiAuthMode::ApiKey,
             fast_model: None,
             subagent_model: None,
