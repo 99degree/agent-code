@@ -2955,11 +2955,12 @@ impl App {
         self.dirty = true;
     }
 
-    /// Pop the newest queued prompt back into the editor for editing
+    /// Pop all queued prompts back into the editor combined as a single message
     /// (Alt+↑). No-op if the queue is empty.
     pub fn pop_newest_queued_to_editor(&mut self) {
-        if let Some(text) = self.queue.pop_back() {
-            self.input = text;
+        if !self.queue.is_empty() {
+            let combined = self.queue.drain(..).collect::<Vec<_>>().join("\n\n");
+            self.input = combined;
             self.cursor = self.input.len();
             self.status_message = format!("{} queued", self.queue.len());
             self.dirty = true;
@@ -5321,9 +5322,8 @@ mod tests {
         app.queue.push_back("one".into());
         app.queue.push_back("two".into());
         app.pop_newest_queued_to_editor();
-        assert_eq!(app.input, "two");
-        assert_eq!(app.queue.len(), 1);
-        app.delete_newest_queued();
+        // Now combines all queued messages
+        assert_eq!(app.input, "one\n\ntwo");
         assert!(app.queue.is_empty());
     }
 
