@@ -361,6 +361,7 @@ pub const API_KEY_ENV_VARS: &[&str] = &[
     "COHERE_API_KEY",
     "PERPLEXITY_API_KEY",
     "REQUESTY_API_KEY",
+    "NIM_API_KEY",
 ];
 
 /// Resolve API key from environment variables.
