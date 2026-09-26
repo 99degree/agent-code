@@ -170,6 +170,18 @@ const ENV_KEY_CANDIDATES: &[(&str, &str, &str, &str)] = &[
         "https://api.perplexity.ai",
         "sonar-pro",
     ),
+    (
+        "REQUESTY_API_KEY",
+        "requesty",
+        "https://api.requesty.ai/v1",
+        "requesty/auto",
+    ),
+    (
+        "NIM_API_KEY",
+        "nim",
+        "https://integrate.api.nvidia.com/v1",
+        "nemotron-3-ultra",
+    ),
 ];
 
 /// Prefer API keys already present in the environment (no interactive UI).
