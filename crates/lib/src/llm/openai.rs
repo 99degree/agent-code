@@ -252,6 +252,13 @@ impl OpenAiProvider {
             "stream": true,
             "stream_options": { "include_usage": true },
         });
+        // Nemotron/TensorRT-LLM requires force_nonempty_content so text-based
+        // tool calls parse correctly; other providers don't understand this
+        // kwarg and may reject the request.
+        if matches!(self.api, OpenAiApi::Nemotron) {
+            body["chat_template_kwargs"] =
+                serde_json::json!({"force_nonempty_content": true});
+        }
 
         // chat_template_kwargs is only understood by Nemotron/TensorRT-LLM
         // endpoints; Mistral and other OpenAI-compatible providers reject it.
