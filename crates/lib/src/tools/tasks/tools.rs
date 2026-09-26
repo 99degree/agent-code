@@ -209,12 +209,22 @@ impl Tool for TaskGetTool {
         if let Some(mgr) = ctx.task_manager.as_ref()
             && let Some(info) = mgr.get_status(id).await
         {
+            let duration = info.finished_at.map(|f| f.duration_since(info.started_at));
+            let duration_str = duration
+                .map(|d| format!("{:.2}s", d.as_secs_f64()))
+                .unwrap_or_else(|| "running".to_string());
+
             return Ok(ToolResult::success(format!(
-                "Task #{id} [kind: {}] status: {:?}\n  description: {}\n  output_file: {}",
+                "Task #{id} [kind: {}] status: {:?}\n  description: {}\n  output_file: {}\n  started_at: {:?}\n  finished_at: {:?}\n  duration: {}\n  notified: {}\n  pid: {:?}",
                 info.kind.as_str(),
                 info.status,
                 info.description,
                 info.output_file.display(),
+                info.started_at,
+                info.finished_at,
+                duration_str,
+                info.notified,
+                info.pid,
             )));
         }
 
@@ -311,14 +321,19 @@ impl Tool for TaskStopTool {
     async fn call(
         &self,
         input: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let id = input
             .get("id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("'id' is required".into()))?;
 
-        Ok(ToolResult::success(format!("Task #{id} stop requested.")))
+        if let Some(mgr) = ctx.task_manager.as_ref() {
+            mgr.kill(id).await.map_err(ToolError::ExecutionFailed)?;
+            Ok(ToolResult::success(format!("Task #{id} stopped.")))
+        } else {
+            Ok(ToolResult::success(format!("Task #{id} stop requested (no task manager available).")))
+        }
     }
 }
 
@@ -339,7 +354,12 @@ impl Tool for TaskOutputTool {
             "type": "object",
             "required": ["id"],
             "properties": {
-                "id": { "type": "string", "description": "Task ID to read output from" }
+                "id": { "type": "string", "description": "Task ID to read output from" },
+                "max_bytes": {
+                    "type": "integer",
+                    "description": "Maximum bytes to read from the end (tail). Omit to read full output.",
+                    "minimum": 1
+                }
             }
         })
     }
@@ -355,28 +375,41 @@ impl Tool for TaskOutputTool {
     async fn call(
         &self,
         input: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let id = input
             .get("id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("'id' is required".into()))?;
 
-        // Check the output file in the cache directory.
-        let output_path = dirs::cache_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-            .join("agent-code")
-            .join("tasks")
-            .join(format!("{id}.out"));
+        let max_bytes = input
+            .get("max_bytes")
+            .and_then(|v| v.as_u64());
 
-        if output_path.exists() {
-            let content = std::fs::read_to_string(&output_path)
-                .map_err(|e| ToolError::ExecutionFailed(format!("Read failed: {e}")))?;
-            Ok(ToolResult::success(content))
+        if let Some(mgr) = ctx.task_manager.as_ref() {
+            let output = if let Some(max) = max_bytes {
+                mgr.read_output_tail(id, max).await
+            } else {
+                mgr.read_output(id).await
+            };
+            output.map(ToolResult::success).map_err(ToolError::ExecutionFailed)
         } else {
-            Ok(ToolResult::success(format!(
-                "No output file found for task #{id}. It may still be running."
-            )))
+            // Fallback: check the output file in the cache directory directly.
+            let output_path = dirs::cache_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                .join("agent-code")
+                .join("tasks")
+                .join(format!("{id}.out"));
+
+            if output_path.exists() {
+                let content = std::fs::read_to_string(&output_path)
+                    .map_err(|e| ToolError::ExecutionFailed(format!("Read failed: {e}")))?;
+                Ok(ToolResult::success(content))
+            } else {
+                Ok(ToolResult::success(format!(
+                    "No output file found for task #{id}. It may still be running."
+                )))
+            }
         }
     }
 }
@@ -384,9 +417,9 @@ impl Tool for TaskOutputTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn empty_ctx() -> ToolContext {
-        use std::sync::Arc;
         ToolContext {
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/tmp")),
             cancel: tokio_util::sync::CancellationToken::new(),
@@ -455,5 +488,86 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    fn test_payload(cmd: &str) -> crate::services::background::TaskPayload {
+        crate::services::background::TaskPayload::LocalShell {
+            command: cmd.to_string(),
+            cwd: std::path::PathBuf::from("."),
+        }
+    }
+
+    #[tokio::test]
+    async fn task_stop_uses_task_manager() {
+        let mgr = crate::services::background::TaskManager::new();
+        let id = mgr
+            .register("test task", crate::services::background::TaskKind::LocalAgent, test_payload("sleep 10"))
+            .await;
+
+        let ctx = ToolContext {
+            task_manager: Some(std::sync::Arc::new(mgr)),
+            ..empty_ctx()
+        };
+
+        let res = TaskStopTool
+            .call(json!({ "id": id }), &ctx)
+            .await
+            .unwrap();
+        assert!(res.content.contains("stopped"));
+
+        // Verify the task was actually killed
+        let info = ctx.task_manager.as_ref().unwrap().get_status(&id).await.unwrap();
+        assert_eq!(info.status, crate::services::background::TaskStatus::Killed);
+    }
+
+    #[tokio::test]
+    async fn task_output_uses_task_manager() {
+        let mgr = crate::services::background::TaskManager::new();
+        let id = mgr
+            .register("test task", crate::services::background::TaskKind::LocalAgent, test_payload("echo hello"))
+            .await;
+        mgr.write_output(&id, "hello world").await.unwrap();
+        mgr.set_status(&id, crate::services::background::TaskStatus::Completed).await.unwrap();
+
+        let ctx = ToolContext {
+            task_manager: Some(std::sync::Arc::new(mgr)),
+            ..empty_ctx()
+        };
+
+        // Test full output
+        let res = TaskOutputTool
+            .call(json!({ "id": id }), &ctx)
+            .await
+            .unwrap();
+        assert!(res.content.contains("hello world"));
+
+        // Test tail output
+        let res = TaskOutputTool
+            .call(json!({ "id": id, "max_bytes": 5 }), &ctx)
+            .await
+            .unwrap();
+        assert!(res.content.contains("world") || res.content.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn task_get_includes_metadata() {
+        let mgr = crate::services::background::TaskManager::new();
+        let id = mgr
+            .register("test task", crate::services::background::TaskKind::LocalAgent, test_payload("sleep 1"))
+            .await;
+
+        let ctx = ToolContext {
+            task_manager: Some(std::sync::Arc::new(mgr)),
+            ..empty_ctx()
+        };
+
+        let res = TaskGetTool
+            .call(json!({ "id": id }), &ctx)
+            .await
+            .unwrap();
+        assert!(res.content.contains("started_at"));
+        assert!(res.content.contains("duration"));
+        assert!(res.content.contains("notified"));
+        assert!(res.content.contains("pid"));
     }
 }
