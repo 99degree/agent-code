@@ -162,15 +162,7 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
             ("sonar-deep-research", "Sonar Deep Research · In-depth"),
         ],
         ProviderKind::OpenRouter => &[
-            ("anthropic/claude-sonnet-5", "Claude Sonnet 5 · Balanced"),
-            (
-                "anthropic/claude-opus-4.8",
-                "Claude Opus 4.8 · Most capable",
-            ),
-            ("openai/gpt-5.5", "GPT-5.5 · Most capable"),
-            ("google/gemini-3-pro", "Gemini 3 Pro"),
-            ("x-ai/grok-4.3", "Grok 4.3"),
-            ("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro · Open"),
+            ("openrouter/free", "OpenRouter Free · Rotates free models"),
         ],
         ProviderKind::Nvidia => &[
             (
