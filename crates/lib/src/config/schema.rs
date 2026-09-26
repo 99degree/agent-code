@@ -83,6 +83,14 @@ impl Default for Config {
             "opencodego/*".to_string(),
             ("kilo".to_string(), "tencent/hy3:free".to_string()),
         );
+        failover_mapping.insert(
+            "orcarouter".to_string(),
+            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+        );
+        failover_mapping.insert(
+            "orcarouter/*".to_string(),
+            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+        );
         // nim <-> nvidia cross-failover (shared model catalog, different endpoints)
         failover_mapping.insert(
             "nim".to_string(),

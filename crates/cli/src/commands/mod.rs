@@ -148,7 +148,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "provider",
-        aliases: &["p", "nvidia", "kilo", "opencode", "openrouter", "nim"],
+        aliases: &["p", "nvidia", "kilo", "opencode", "openrouter", "nim", "orcarouter"],
         description: "Show or switch the default LLM provider",
         hidden: false,
     },
