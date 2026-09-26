@@ -314,11 +314,11 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     if url_lower.contains("opencode.ai") {
         return ProviderKind::OpenCode;
     }
-    if url_lower.contains("integrate.api.nvidia.com") {
-        return ProviderKind::Nim;
-    }
     if url_lower.contains("nvidia") || url_lower.contains("nvidianim") {
         return ProviderKind::Nvidia;
+    }
+    if url_lower.contains("integrate.api.nvidia.com") {
+        return ProviderKind::Nim;
     }
     if url_lower.contains("novita.ai") {
         return ProviderKind::Novita;
@@ -424,7 +424,7 @@ pub fn create_provider_from_config(
     base_url: &str,
     config: &crate::config::Config,
 ) -> std::sync::Arc<dyn Provider> {
-    let kind = detect_provider(model, base_url);
+    let kind = get_provider_for_model(model, base_url);
     let resolved_key = resolve_api_key(kind, config).unwrap_or_default();
     match kind {
         ProviderKind::AzureOpenAi => std::sync::Arc::new(
@@ -450,24 +450,21 @@ pub fn create_provider_from_config(
                 crate::llm::anthropic::AnthropicProvider::new(base_url, &resolved_key),
             ),
             WireFormat::OpenAiCompatible => {
-        // Nemotron models emit tool calls as custom text markup rather
-        // than structured `tool_calls` deltas; route them through the
-        // Nemotron-aware provider regardless of which OpenAI-compatible
-        // endpoint serves them.
-        // If the provider is Nim but the model indicates it's actually Nvidia/Nemotron,
-        // or vice versa, use the appropriate provider. This provides a failover
-        // mechanism for models that might be served through either endpoint.
-        if crate::llm::nemotron::is_nemotron_model(model) {
-            std::sync::Arc::new(crate::llm::openai::OpenAiProvider::new_nemotron(
-                base_url,
-                &resolved_key,
-            ))
-        } else {
-            std::sync::Arc::new(crate::llm::openai::OpenAiProvider::new(
-                base_url,
-                &resolved_key,
-            ))
-        }
+                // Nemotron models emit tool calls as custom text markup rather
+                // than structured `tool_calls` deltas; route them through the
+                // Nemotron-aware provider regardless of which OpenAI-compatible
+                // endpoint serves them.
+                if crate::llm::nemotron::is_nemotron_model(model) {
+                    std::sync::Arc::new(crate::llm::openai::OpenAiProvider::new_nemotron(
+                        base_url,
+                        &resolved_key,
+                    ))
+                } else {
+                    std::sync::Arc::new(crate::llm::openai::OpenAiProvider::new(
+                        base_url,
+                        &resolved_key,
+                    ))
+                }
             }
         },
     }
