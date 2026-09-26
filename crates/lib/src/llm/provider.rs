@@ -314,7 +314,7 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     if url_lower.contains("opencode.ai") {
         return ProviderKind::OpenCode;
     }
-    if url_lower.contains("nvidia") || url_lower.contains("nvidianim") {
+    if url_lower.contains("nvidia") {
         return ProviderKind::Nvidia;
     }
     if url_lower.contains("integrate.api.nvidia.com") {
