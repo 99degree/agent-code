@@ -110,6 +110,8 @@ impl LlmClient {
     pub fn new(base_url: &str, api_key: &str, model: &str) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(300))
+            .pool_idle_timeout(Duration::from_secs(30))
+            .tcp_keepalive(Duration::from_secs(60))
             .build()
             .expect("failed to build HTTP client");
 

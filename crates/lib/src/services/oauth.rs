@@ -469,6 +469,8 @@ impl OAuthService {
             store,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
+                .pool_idle_timeout(Duration::from_secs(30))
+                .tcp_keepalive(Duration::from_secs(60))
                 .build()
                 .unwrap_or_default(),
             service_name: "agent-code".to_string(),

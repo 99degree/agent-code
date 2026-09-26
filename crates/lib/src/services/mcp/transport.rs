@@ -81,6 +81,8 @@ impl McpTransportConnection {
     pub async fn connect_sse(base_url: &str) -> Result<Self, String> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
             .build()
             .map_err(|e| format!("HTTP client error: {e}"))?;
 

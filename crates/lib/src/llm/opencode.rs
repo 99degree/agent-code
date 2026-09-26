@@ -273,6 +273,8 @@ impl Provider for OpenCodeProvider {
 
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
             .build()
             .expect("failed to build HTTP client");
 

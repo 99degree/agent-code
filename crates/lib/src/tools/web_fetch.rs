@@ -91,6 +91,8 @@ impl Tool for WebFetchTool {
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
+            .pool_idle_timeout(Duration::from_secs(30))
+            .tcp_keepalive(Duration::from_secs(60))
             .redirect(reqwest::redirect::Policy::limited(10))
             .user_agent("agent-code/0.2")
             .build()
