@@ -734,7 +734,7 @@ command = "project-gamma"
     #[test]
     fn no_layers_yields_default_config() {
         let cfg = merge_layers("", "");
-        assert_eq!(cfg.api.model, "gpt-5.4");
+        assert_eq!(cfg.api.model, "openrouter/free");
         assert_eq!(cfg.permissions.default_mode, PermissionMode::Ask);
     }
 
@@ -873,7 +873,7 @@ model = "proj-model"
     #[test]
     fn e2e_no_config_files_yields_defaults() {
         let cfg = load_from_files(None, None);
-        assert_eq!(cfg.api.model, "gpt-5.4");
+        assert_eq!(cfg.api.model, "openrouter/free");
         assert_eq!(cfg.permissions.default_mode, PermissionMode::Ask);
         assert!(cfg.ui.markdown);
     }
