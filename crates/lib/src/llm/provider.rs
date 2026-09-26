@@ -186,21 +186,22 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
             ("deepseek-ai/deepseek-v4-pro", "DeepSeek V4 Pro"),
             ("meta/llama-3.1-8b-instruct", "Llama 3.1 8B · Fast"),
         ],
+        ProviderKind::Nim => &[
+            (
+                "nvidia/nemotron-3-ultra-550b-a55b",
+                "Nemotron 3 Ultra · Most capable",
+            ),
+            ("nvidia/nemotron-3-nano-30b-a3b", "Nemotron 3 Nano · Fast"),
+            (
+                "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+                "Nemotron 3 Nano Omni · Reasoning",
+            ),
+            ("minimaxai/minimax-m3", "MiniMax M3"),
+            ("deepseek-ai/deepseek-v4-pro", "DeepSeek V4 Pro"),
+            ("meta/llama-3.1-8b-instruct", "Llama 3.1 8B · Fast"),
+        ],
         ProviderKind::Kilo => &[
-            ("kilo-auto/frontier", "Kilo Auto Frontier · Most capable"),
-            ("kilo-auto/balanced", "Kilo Auto Balanced · Balanced"),
-            (
-                "kilo-auto/efficient",
-                "Kilo Auto Efficient · Cheapest that works",
-            ),
             ("kilo-auto/free", "Kilo Auto Free · Rotates free models"),
-            ("tencent/hy3:free", "Tencent Hy3 · Free (failover)"),
-            (
-                "stepfun/step-3.7-flash:free",
-                "StepFun Step 3.7 Flash · Free",
-            ),
-            ("poolside/laguna-s-2.1:free", "Poolside Laguna S 2.1 · Free"),
-            ("meituan/longcat-2.0-free", "Meituan LongCat 2.0 · Free"),
         ],
         ProviderKind::Novita => &[("tencent/hy3", "Tencent Hy3 · Open")],
         ProviderKind::OpenCode => &[
@@ -323,6 +324,9 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     }
     if url_lower.contains("nvidia") || url_lower.contains("nvidianim") {
         return ProviderKind::Nvidia;
+    }
+    if url_lower.contains("integrate.api.nvidia.com") {
+        return ProviderKind::Nim;
     }
     if url_lower.contains("novita.ai") {
         return ProviderKind::Novita;
@@ -502,6 +506,8 @@ pub enum ProviderKind {
     Cohere,
     Perplexity,
     Nvidia,
+    /// NVIDIA Inference Microservices (OpenAI-compatible API).
+    Nim,
     /// Kilo AI (OpenAI-compatible gateway https://api.kilo.ai/api/gateway).
     Kilo,
     Novita,
@@ -532,6 +538,7 @@ impl ProviderKind {
             ProviderKind::Cohere,
             ProviderKind::Perplexity,
             ProviderKind::Nvidia,
+            ProviderKind::Nim,
             ProviderKind::Kilo,
             ProviderKind::Novita,
             ProviderKind::OpenCode,
@@ -576,6 +583,7 @@ impl ProviderKind {
             | Self::Cohere
             | Self::Perplexity
             | Self::Nvidia
+            | Self::Nim
             | Self::Kilo
             | Self::Novita
             | Self::OpenCode
@@ -605,6 +613,7 @@ impl ProviderKind {
             Self::Cohere => Some("https://api.cohere.com/v2"),
             Self::Perplexity => Some("https://api.perplexity.ai"),
             Self::Nvidia => Some("https://integrate.api.nvidia.com/v1"),
+            Self::Nim => Some("https://integrate.api.nvidia.com/v1"),
             Self::Kilo => Some("https://api.kilo.ai/api/gateway"),
             Self::Novita => Some("https://api.novita.ai/openai/v1"),
             Self::Requesty => Some("https://router.requesty.ai/v1"),
@@ -632,6 +641,7 @@ impl ProviderKind {
             Self::Cohere => "COHERE_API_KEY",
             Self::Perplexity => "PERPLEXITY_API_KEY",
             Self::Nvidia => "NVIDIA_API_KEY",
+            Self::Nim => "NIM_API_KEY",
             Self::Kilo => "KILO_API_KEY",
             Self::Novita => "NOVITA_API_KEY",
             Self::Requesty => "REQUESTY_API_KEY",
@@ -660,6 +670,7 @@ impl ProviderKind {
             Self::Cohere => "cohere",
             Self::Perplexity => "perplexity",
             Self::Nvidia => "nvidia",
+            Self::Nim => "nim",
             Self::Kilo => "kilo",
             Self::Novita => "novita",
             Self::OpenCode => "opencode",
@@ -687,7 +698,8 @@ impl ProviderKind {
             "together" => ProviderKind::Together,
             "zhipu" | "glm" | "z.ai" => ProviderKind::Zhipu,
             "azure" | "azure-openai" => ProviderKind::AzureOpenAi,
-            "nvidia" | "nim" => ProviderKind::Nvidia,
+            "nvidia" => ProviderKind::Nvidia,
+            "nim" => ProviderKind::Nim,
             "kilo" => ProviderKind::Kilo,
             "novita" => ProviderKind::Novita,
             "opencode" | "zen" => ProviderKind::OpenCode,
@@ -1248,7 +1260,7 @@ mod tests {
     fn test_default_model_picks_first_catalog_entry() {
         assert_eq!(
             ProviderKind::Kilo.default_model(),
-            Some("kilo-auto/frontier")
+            Some("kilo-auto/free")
         );
         assert_eq!(ProviderKind::OpenCode.default_model(), Some("big-pickle"));
         // Providers without a curated catalog have no default model.
