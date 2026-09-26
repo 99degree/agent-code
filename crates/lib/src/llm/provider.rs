@@ -423,8 +423,15 @@ pub fn create_provider_from_config(
     model: &str,
     base_url: &str,
     config: &crate::config::Config,
+    explicit_provider: Option<&str>,
 ) -> std::sync::Arc<dyn Provider> {
-    let kind = get_provider_for_model(model, base_url);
+    // If an explicit provider is given (e.g., from config.toml), use it.
+    // Otherwise fall back to model/URL-based detection.
+    let kind = if let Some(provider_name) = explicit_provider {
+        ProviderKind::from_name(provider_name).unwrap_or_else(|| get_provider_for_model(model, base_url))
+    } else {
+        get_provider_for_model(model, base_url)
+    };
     let resolved_key = resolve_api_key(kind, config).unwrap_or_default();
     match kind {
         ProviderKind::AzureOpenAi => std::sync::Arc::new(
@@ -1264,7 +1271,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.api.api_key = Some("requesty-key".to_string());
         let provider =
-            create_provider_from_config("openai/gpt-4o", "https://router.requesty.ai/v1", &config);
+            create_provider_from_config("openai/gpt-4o", "https://router.requesty.ai/v1", &config, None);
         assert_eq!(provider.name(), "requesty");
     }
 

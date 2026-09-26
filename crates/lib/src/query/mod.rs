@@ -684,6 +684,7 @@ impl QueryEngine {
             &self.state.config.api.model,
             &self.state.config.api.base_url,
             &self.state.config,
+            self.state.config.api.provider.as_deref(),
         );
         self.llm = llm;
         Ok(())
@@ -1665,6 +1666,7 @@ impl QueryEngine {
                                     &resolved,
                                     &base_url,
                                     &self.state.config,
+                                    Some(target.provider.as_name()),
                                 );
                                 self.llm = llm;
                                 current_provider_kind = target.provider;

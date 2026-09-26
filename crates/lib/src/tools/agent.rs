@@ -613,7 +613,12 @@ async fn run_subagent_in_process(
         config.api.model = model.to_string();
     }
 
-    let llm = create_provider_from_config(&config.api.model, &config.api.base_url, &config);
+    let llm = create_provider_from_config(
+        &config.api.model,
+        &config.api.base_url,
+        &config,
+        config.api.provider.as_deref(),
+    );
 
     // Build tool registry with visibility filtering from the definition.
     let mut tools = ToolRegistry::default_tools();
