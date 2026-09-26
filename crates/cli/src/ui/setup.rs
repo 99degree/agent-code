@@ -486,7 +486,7 @@ pub(crate) fn api_key_provider_defaults(
             "orcarouter",
             "ORCAROUTER_API_KEY",
             "https://api.orcarouter.ai/v1",
-            "orcarouter/auto",
+            "orcarouter/free",
         ),
         _ => (
             "openai",

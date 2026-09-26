@@ -248,7 +248,7 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
             ("muse-spark-1.2-contributor", "Muse Spark 1.2 Contributor"),
         ],
         ProviderKind::Requesty => &[("requesty/auto", "Requesty Auto · Rotates models")],
-        ProviderKind::OrcaRouter => &[("orcarouter/auto", "OrcaRouter Auto · Rotates models")],
+        ProviderKind::OrcaRouter => &[("orcarouter/free", "OrcaRouter Free · Rotates free models")],
         _ => &[],
     }
 }
