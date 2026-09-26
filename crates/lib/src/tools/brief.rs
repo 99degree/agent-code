@@ -666,7 +666,7 @@ mod tests {
         // past the existence check and (b) live outside both cwd
         // (a tempdir) and `dirs::home_dir()` so it trips the boundary
         // check. POSIX honors the `HOME` env override and we use
-        // `/etc/hostname`; on Windows `dirs::home_dir()` reads
+        // `/etc/passwd`; on Windows `dirs::home_dir()` reads
         // `%USERPROFILE%` directly via `SHGetKnownFolderPath` (HOME is
         // ignored there), so a `TempDir`-based "outside" file would
         // sit under `%USERPROFILE%\AppData\Local\Temp` and pass the
@@ -679,7 +679,7 @@ mod tests {
         // against other tests in the crate that mutate HOME.
         let _g = EnvGuard::set("HOME", &cwd);
         #[cfg(unix)]
-        let outside = "/etc/hostname".to_string();
+        let outside = "/etc/passwd".to_string();
         #[cfg(windows)]
         let outside = r"C:\Windows\System32\drivers\etc\hosts".to_string();
         let err = validate_attachments(&[outside], &cwd).unwrap_err();
@@ -708,13 +708,13 @@ mod tests {
         // A symlink that lives inside cwd but resolves outside both
         // cwd and HOME must be rejected. Pre-canonicalization the
         // lexical prefix check `path.starts_with(cwd)` would let
-        // `<cwd>/link -> /etc/hostname` slip through, with `is_file()`
+        // `<cwd>/link -> /etc/passwd` slip through, with `is_file()`
         // following the symlink and reporting true.
         let dir = TempDir::new().unwrap();
         let cwd = dir.path().to_path_buf();
         let _g = EnvGuard::set("HOME", &cwd);
         let link = cwd.join("link");
-        std::os::unix::fs::symlink("/etc/hostname", &link).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", &link).unwrap();
 
         let err = validate_attachments(&[link.display().to_string()], &cwd).unwrap_err();
         match err {
