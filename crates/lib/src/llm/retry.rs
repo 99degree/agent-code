@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::config::{FailoverPriority, FailoverTargetConfig};
 use crate::llm::provider::ProviderKind;
 
 /// Retry configuration.
@@ -103,6 +104,10 @@ impl RetryState {
     /// [`RetryAction::Failover`] — but only when `using_failover` is false,
     /// so a request fails over at most once per turn (no provider
     /// ping-pong).
+    ///
+    /// For `RateLimited` (429) errors, if a high-priority failover target is
+    /// configured for the current provider/model, failover happens immediately
+    /// without backoff.
     pub fn next_action(
         &mut self,
         error: &RetryableError,
@@ -110,7 +115,7 @@ impl RetryState {
         current_provider: ProviderKind,
         using_failover: bool,
         current_model: &str,
-        failover_mapping: &HashMap<String, (String, String)>,
+        failover_mapping: &HashMap<String, FailoverTargetConfig>,
     ) -> RetryAction {
         self.consecutive_failures += 1;
 
@@ -120,6 +125,16 @@ impl RetryState {
                 if self.rate_limit_retries > config.max_retries {
                     return RetryAction::Abort("Rate limit retries exhausted".into());
                 }
+                
+                // Check for high-priority failover on 429 errors.
+                // This triggers immediate failover without backoff for providers
+                // with persistent rate limits (e.g., free-tier OpenRouter, OpenCode).
+                if !using_failover {
+                    if let Some(target) = find_high_priority_failover(current_provider, current_model, failover_mapping) {
+                        return RetryAction::Failover { target };
+                    }
+                }
+
                 // Determine if we should abort due to long wait.
                 let should_abort = if current_provider == ProviderKind::OpenRouter {
                     // For OpenRouter, hard-coded 60 second threshold.
@@ -387,35 +402,84 @@ impl RetryableError {
 }
 
 /// Resolve a cross-provider failover for this error, honoring the user's
-/// `failover_mapping` config first and falling back to the static
-/// [`FAILOVER_RULES`] table. Returns `None` if no applicable, credentialed
-/// target exists.
-///
-/// The mapping supports three key shapes:
-/// - `"provider"` — matches any model on that provider (e.g. `"openrouter"`)
-/// - `"provider/*"` — same as above, explicit wildcard
-/// - `"provider/model"` — matches a specific model fragment (e.g.
-///   `"openrouter/anthropic/claude-3.5-sonnet"`)
-///
-/// A target is only used when its provider key is actually configured
-/// (`is_configured()`), so we never rotate into a provider the user has no
-/// credentials for.
-pub fn failover_target_configured(
-    error: &RetryableError,
+    /// `failover_mapping` config first and falling back to the static
+    /// [`FAILOVER_RULES`] table. Returns `None` if no applicable, credentialed
+    /// target exists.
+    ///
+    /// The mapping supports three key shapes:
+    /// - `"provider"` — matches any model on that provider (e.g. `"openrouter"`)
+    /// - `"provider/*"` — same as above, explicit wildcard
+    /// - `"provider/model"` — matches a specific model fragment (e.g.
+    ///   `"openrouter/anthropic/claude-3.5-sonnet"`)
+    ///
+    /// A target is only used when its provider key is actually configured
+    /// (`is_configured()`), so we never rotate into a provider the user has no
+    /// credentials for.
+    pub fn failover_target_configured(
+        error: &RetryableError,
+        current_provider: ProviderKind,
+        current_model: &str,
+        using_failover: bool,
+        mapping: &HashMap<String, FailoverTargetConfig>,
+    ) -> Option<FailoverTarget> {
+        if using_failover {
+            return None;
+        }
+        let RetryableError::ModelUnavailable { .. } = error else {
+            return None;
+        };
+        let pname = current_provider.as_name();
+
+        for (key, target_config) in mapping {
+            let matches = if let Some(stripped) = key.strip_suffix("/*") {
+                stripped == pname
+            } else if let Some((kp, km)) = key.split_once('/') {
+                kp == pname && current_model.to_lowercase().contains(&km.to_lowercase())
+            } else {
+                key == pname
+            };
+            if !matches {
+                continue;
+            }
+            if let Some(to_kind) = ProviderKind::from_name(&target_config.provider)
+                && to_kind.is_configured()
+            {
+                return Some(FailoverTarget {
+                    provider: to_kind,
+                    model_hint: target_config.model.clone(),
+                });
+            }
+        }
+
+        // No configured/valid target — fall back to the built-in rules
+        // (e.g. OpenCode → Kilo mirrors), which also respect `using_failover`.
+        error.failover_target(current_provider, using_failover)
+    }
+
+/// Calculate exponential backoff with jitter.
+fn calculate_backoff(attempt: u32, initial: Duration, max: Duration, multiplier: f64) -> Duration {
+    let base = initial.as_millis() as f64 * multiplier.powi(attempt as i32 - 1);
+    let capped = base.min(max.as_millis() as f64);
+    // Add 10% jitter.
+    let jitter = capped * 0.1 * rand_f64();
+    Duration::from_millis((capped + jitter) as u64)
+}
+
+/// Find a high-priority failover target for the given provider/model.
+/// Only returns a target if its priority is `High` (for immediate failover on 429).
+fn find_high_priority_failover(
     current_provider: ProviderKind,
     current_model: &str,
-    using_failover: bool,
-    mapping: &HashMap<String, (String, String)>,
+    mapping: &HashMap<String, FailoverTargetConfig>,
 ) -> Option<FailoverTarget> {
-    if using_failover {
-        return None;
-    }
-    let RetryableError::ModelUnavailable { .. } = error else {
-        return None;
-    };
     let pname = current_provider.as_name();
 
-    for (key, (to, hint)) in mapping {
+    for (key, target_config) in mapping {
+        // Only consider high-priority targets for immediate failover
+        if target_config.priority != FailoverPriority::High {
+            continue;
+        }
+        
         let matches = if let Some(stripped) = key.strip_suffix("/*") {
             stripped == pname
         } else if let Some((kp, km)) = key.split_once('/') {
@@ -426,28 +490,16 @@ pub fn failover_target_configured(
         if !matches {
             continue;
         }
-        if let Some(to_kind) = ProviderKind::from_name(to)
+        if let Some(to_kind) = ProviderKind::from_name(&target_config.provider)
             && to_kind.is_configured()
         {
             return Some(FailoverTarget {
                 provider: to_kind,
-                model_hint: hint.clone(),
+                model_hint: target_config.model.clone(),
             });
         }
     }
-
-    // No configured/valid target — fall back to the built-in rules
-    // (e.g. OpenCode → Kilo mirrors), which also respect `using_failover`.
-    error.failover_target(current_provider, using_failover)
-}
-
-/// Calculate exponential backoff with jitter.
-fn calculate_backoff(attempt: u32, initial: Duration, max: Duration, multiplier: f64) -> Duration {
-    let base = initial.as_millis() as f64 * multiplier.powi(attempt as i32 - 1);
-    let capped = base.min(max.as_millis() as f64);
-    // Add 10% jitter.
-    let jitter = capped * 0.1 * rand_f64();
-    Duration::from_millis((capped + jitter) as u64)
+    None
 }
 
 /// Resolve a backoff duration from a fixed per-attempt schedule.
@@ -1062,7 +1114,7 @@ fn test_failover_mapping_configured_openrouter_to_kilo() {
     let mut mapping = HashMap::new();
     mapping.insert(
         "openrouter".to_string(),
-        ("kilo".to_string(), "tencent/hy3:free".to_string()),
+        FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::Low },
     );
     let err = RetryableError::ModelUnavailable {
         model: "anthropic/claude-3.5-sonnet".into(),
@@ -1096,7 +1148,7 @@ fn test_failover_mapping_skips_unknown_provider() {
     let mut mapping = HashMap::new();
     mapping.insert(
         "openrouter".to_string(),
-        ("zzz_no_such_provider".to_string(), "whatever".to_string()),
+        FailoverTargetConfig { provider: "zzz_no_such_provider".to_string(), model: "whatever".to_string(), priority: FailoverPriority::Low },
     );
     let err = RetryableError::ModelUnavailable {
         model: "anthropic/claude-3.5-sonnet".into(),
@@ -1118,7 +1170,7 @@ fn test_failover_mapping_specific_model_key() {
     let mut mapping = HashMap::new();
     mapping.insert(
         "openrouter/anthropic/claude-3.5-sonnet".to_string(),
-        ("kilo".to_string(), "tencent/hy3:free".to_string()),
+        FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::Low },
     );
     let err = RetryableError::ModelUnavailable {
         model: "anthropic/claude-3.5-sonnet".into(),
@@ -1159,7 +1211,7 @@ fn test_failover_mapping_only_once_per_turn() {
     let mut mapping = HashMap::new();
     mapping.insert(
         "openrouter".to_string(),
-        ("kilo".to_string(), "tencent/hy3:free".to_string()),
+        FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::Low },
     );
     let err = RetryableError::ModelUnavailable {
         model: "anthropic/claude-3.5-sonnet".into(),
@@ -1172,4 +1224,176 @@ fn test_failover_mapping_only_once_per_turn() {
         &mapping,
     );
     assert!(target.is_none());
+}
+
+#[test]
+fn test_high_priority_failover_on_rate_limited() {
+    // Test that 429 errors trigger immediate failover for high-priority targets.
+    let mut state = RetryState::default();
+    let config = RetryConfig::default();
+    let mut mapping = HashMap::new();
+    // High-priority failover for openrouter on 429
+    mapping.insert(
+        "openrouter".to_string(),
+        FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
+    );
+    
+    // Mock a configured Kilo provider
+    let prior = std::env::var("KILO_API_KEY").ok();
+    unsafe {
+        std::env::set_var("KILO_API_KEY", "test-key");
+    }
+    
+    let err = RetryableError::RateLimited { retry_after: 1000 };
+    match state.next_action(
+        &err,
+        &config,
+        ProviderKind::OpenRouter,
+        false,
+        "anthropic/claude-3.5-sonnet",
+        &mapping,
+    ) {
+        RetryAction::Failover { target } => {
+            assert_eq!(target.provider, ProviderKind::Kilo);
+            assert_eq!(target.model_hint, "tencent/hy3:free");
+        }
+        other => panic!("Expected Failover on high-priority 429, got {other:?}"),
+    }
+    
+    unsafe {
+        match prior {
+            Some(v) => std::env::set_var("KILO_API_KEY", v),
+            None => std::env::remove_var("KILO_API_KEY"),
+        }
+    }
+}
+
+#[test]
+fn test_low_priority_failover_not_triggered_on_rate_limited() {
+    // Test that low-priority targets do NOT trigger immediate failover on 429.
+    let mut state = RetryState::default();
+    let config = RetryConfig::default();
+    let mut mapping = HashMap::new();
+    // Low-priority failover (default)
+    mapping.insert(
+        "openrouter".to_string(),
+        FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::Low },
+    );
+    
+    let err = RetryableError::RateLimited { retry_after: 1000 };
+    match state.next_action(
+        &err,
+        &config,
+        ProviderKind::OpenRouter,
+        false,
+        "anthropic/claude-3.5-sonnet",
+        &mapping,
+    ) {
+        RetryAction::Retry { after } => {
+            // Should retry with backoff, not failover
+            assert!(after.as_millis() >= 5000);
+        }
+        other => panic!("Expected Retry on low-priority 429, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_high_priority_failover_respects_using_failover_flag() {
+    // Test that high-priority failover is not triggered if we've already failed over.
+    let mut state = RetryState::default();
+    let config = RetryConfig::default();
+    let mut mapping = HashMap::new();
+    mapping.insert(
+        "openrouter".to_string(),
+        FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
+    );
+    
+    let prior = std::env::var("KILO_API_KEY").ok();
+    unsafe {
+        std::env::set_var("KILO_API_KEY", "test-key");
+    }
+    
+    let err = RetryableError::RateLimited { retry_after: 1000 };
+    // using_failover = true should prevent failover
+    match state.next_action(
+        &err,
+        &config,
+        ProviderKind::OpenRouter,
+        true, // already failed over
+        "anthropic/claude-3.5-sonnet",
+        &mapping,
+    ) {
+        RetryAction::Retry { after } => {
+            assert!(after.as_millis() >= 5000);
+        }
+        other => panic!("Expected Retry when using_failover=true, got {other:?}"),
+    }
+    
+    unsafe {
+        match prior {
+            Some(v) => std::env::set_var("KILO_API_KEY", v),
+            None => std::env::remove_var("KILO_API_KEY"),
+        }
+    }
+}
+
+#[test]
+fn test_find_high_priority_failover_function() {
+    // Test the helper function directly.
+    let mut mapping = HashMap::new();
+    mapping.insert(
+        "openrouter".to_string(),
+        FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
+    );
+    mapping.insert(
+        "nvidia/*".to_string(),
+        FailoverTargetConfig { provider: "nim".to_string(), model: "nemotron-3-ultra".to_string(), priority: FailoverPriority::High },
+    );
+    mapping.insert(
+        "nim/*".to_string(),
+        FailoverTargetConfig { provider: "nvidia".to_string(), model: "nemotron-3-ultra".to_string(), priority: FailoverPriority::High },
+    );
+    
+    let prior = std::env::var("KILO_API_KEY").ok();
+    let prior_nim = std::env::var("NIM_API_KEY").ok();
+    let prior_nvidia = std::env::var("NVIDIA_API_KEY").ok();
+    unsafe {
+        std::env::set_var("KILO_API_KEY", "test-key");
+        std::env::set_var("NIM_API_KEY", "test-key");
+        std::env::set_var("NVIDIA_API_KEY", "test-key");
+    }
+    
+    // Should find high-priority target for openrouter
+    let target = find_high_priority_failover(ProviderKind::OpenRouter, "any-model", &mapping);
+    assert!(target.is_some());
+    assert_eq!(target.unwrap().provider, ProviderKind::Kilo);
+    
+    // Should find high-priority target for nvidia (now high priority)
+    let target = find_high_priority_failover(ProviderKind::Nvidia, "any-model", &mapping);
+    assert!(target.is_some());
+    assert_eq!(target.unwrap().provider, ProviderKind::Nim);
+    
+    // Should find high-priority target for nim
+    let target = find_high_priority_failover(ProviderKind::Nim, "any-model", &mapping);
+    assert!(target.is_some());
+    assert_eq!(target.unwrap().provider, ProviderKind::Nvidia);
+    
+    // Should NOT find target for unconfigured provider
+    let target = find_high_priority_failover(ProviderKind::OpenAi, "any-model", &mapping);
+    assert!(target.is_none());
+    
+    unsafe {
+        match prior {
+            Some(v) => std::env::set_var("KILO_API_KEY", v),
+            None => std::env::remove_var("KILO_API_KEY"),
+        }
+        match prior_nim {
+            Some(v) => std::env::set_var("NIM_API_KEY", v),
+            None => std::env::remove_var("NIM_API_KEY"),
+        }
+        match prior_nvidia {
+            Some(v) => std::env::set_var("NVIDIA_API_KEY", v),
+            None => std::env::remove_var("NVIDIA_API_KEY"),
+        }
+    }
 }

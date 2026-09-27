@@ -2,6 +2,44 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Priority level for failover targets.
+/// - `High`: Immediate failover on 429 rate limit errors.
+/// - `Low`: Normal retry with backoff (existing behavior for other errors).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FailoverPriority {
+    High,
+    Low,
+}
+
+impl Default for FailoverPriority {
+    fn default() -> Self {
+        FailoverPriority::Low
+    }
+}
+
+/// Configuration for a failover target with priority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FailoverTargetConfig {
+    /// Target provider name (e.g., "kilo", "nvidia").
+    pub provider: String,
+    /// Target model hint (e.g., "tencent/hy3:free", "nemotron-3-ultra").
+    pub model: String,
+    /// Priority of this failover target.
+    pub priority: FailoverPriority,
+}
+
+impl Default for FailoverTargetConfig {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            model: String::new(),
+            priority: FailoverPriority::Low,
+        }
+    }
+}
+
 /// Top-level configuration for the agent.
 ///
 /// Loaded from three layers (highest priority first):
@@ -32,12 +70,13 @@ pub struct Config {
     /// Session persistence settings (cleanup period, etc.).
     #[serde(default)]
     pub session: SessionConfig,
-    /// Provider rotation failover mapping: provider -> (failover_provider, failover_model).
+    /// Provider rotation failover mapping: provider -> FailoverTargetConfig.
     /// When a provider call fails with auth/rate-limit/overloaded, the agent
     /// rotates to the configured failover provider/model instead of retrying
-    /// the same endpoint.
+    /// the same endpoint. Priority controls whether failover is immediate (High)
+    /// or after normal retry backoff (Low).
     #[serde(default)]
-    pub failover_mapping: std::collections::HashMap<String, (String, String)>,
+    pub failover_mapping: std::collections::HashMap<String, FailoverTargetConfig>,
     /// Per-provider rate / token / concurrency limits. Absent or
     /// empty = no limits enforced (the policy service runs as a
     /// no-op).
@@ -55,58 +94,59 @@ impl Default for Config {
         // valid API keys configured (checked at runtime by provider::is_configured).
         let mut failover_mapping = std::collections::HashMap::new();
         // Default failover pairs: opencode -> kilo (tencent/hy3 free); nvidia -> kilo (tencent/hy3:free)
+        // High priority for free-tier providers that have persistent rate limits (429 triggers immediate failover).
         failover_mapping.insert(
             "opencode".to_string(),
-            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
         );
         failover_mapping.insert(
             "opencode/*".to_string(),
-            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
         );
         failover_mapping.insert(
             "nvidia/*".to_string(),
-            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::Low },
         );
         failover_mapping.insert(
             "openrouter".to_string(),
-            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
         );
         failover_mapping.insert(
             "openrouter/*".to_string(),
-            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
         );
         failover_mapping.insert(
             "opencodego".to_string(),
-            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
         );
         failover_mapping.insert(
             "opencodego/*".to_string(),
-            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
         );
         failover_mapping.insert(
             "orcarouter".to_string(),
-            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
         );
         failover_mapping.insert(
             "orcarouter/*".to_string(),
-            ("kilo".to_string(), "tencent/hy3:free".to_string()),
+            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
         );
-        // nim <-> nvidia cross-failover (shared model catalog, different endpoints)
+        // nim <-> nvidia cross-failover (shared model catalog, different endpoints) - high priority for 429 immediate failover
         failover_mapping.insert(
             "nim".to_string(),
-            ("nvidia".to_string(), "nemotron-3-ultra".to_string()),
+            FailoverTargetConfig { provider: "nvidia".to_string(), model: "nemotron-3-ultra".to_string(), priority: FailoverPriority::High },
         );
         failover_mapping.insert(
             "nim/*".to_string(),
-            ("nvidia".to_string(), "nemotron-3-ultra".to_string()),
+            FailoverTargetConfig { provider: "nvidia".to_string(), model: "nemotron-3-ultra".to_string(), priority: FailoverPriority::High },
         );
         failover_mapping.insert(
             "nvidia".to_string(),
-            ("nim".to_string(), "nemotron-3-ultra".to_string()),
+            FailoverTargetConfig { provider: "nim".to_string(), model: "nemotron-3-ultra".to_string(), priority: FailoverPriority::High },
         );
         failover_mapping.insert(
             "nvidia/*".to_string(),
-            ("nim".to_string(), "nemotron-3-ultra".to_string()),
+            FailoverTargetConfig { provider: "nim".to_string(), model: "nemotron-3-ultra".to_string(), priority: FailoverPriority::High },
         );
         Self {
             api: ApiConfig::default(),
