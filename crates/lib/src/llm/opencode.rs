@@ -13,7 +13,6 @@ use futures::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
-use uuid::Uuid;
 
 use super::identity;
 use super::message::{ContentBlock, Message, StopReason, Usage};
@@ -25,15 +24,31 @@ pub struct OpenCodeProvider {
     base_url: String,
     api_key: String,
     session_id: String,
+    user_id: String,
+    project_id: String,
+    client: String,
+    version: String,
 }
 
 impl OpenCodeProvider {
     /// Create a new OpenCode Zen provider from the given base URL and API key.
-    pub fn new(base_url: &str, api_key: &str) -> Self {
+    pub fn new(
+        base_url: &str,
+        api_key: &str,
+        user_id: &str,
+        project_id: &str,
+        client: &str,
+        version: &str,
+        session_id: &str,
+    ) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
-            session_id: Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            user_id: user_id.to_string(),
+            project_id: project_id.to_string(),
+            client: client.to_string(),
+            version: version.to_string(),
         }
     }
 
@@ -260,13 +275,24 @@ impl Provider for OpenCodeProvider {
                 .map_err(|e| ProviderError::Auth(e.to_string()))?,
         );
         headers.insert(
-            HeaderName::from_static("x-session-id"),
-            HeaderValue::from_str(&self.session_id)
+            HeaderName::from_static("x-opencode-request"),
+            HeaderValue::from_str(&self.user_id)
                 .map_err(|e| ProviderError::Auth(e.to_string()))?,
         );
         headers.insert(
             HeaderName::from_static("x-opencode-client"),
-            HeaderValue::from_static("agent-code"),
+            HeaderValue::from_str(&self.client)
+                .map_err(|e| ProviderError::Auth(e.to_string()))?,
+        );
+        headers.insert(
+            HeaderName::from_static("x-opencode-project"),
+            HeaderValue::from_str(&self.project_id)
+                .map_err(|e| ProviderError::Auth(e.to_string()))?,
+        );
+        headers.insert(
+            HeaderName::from_static("user-agent"),
+            HeaderValue::from_str(&format!("opencode/{}", self.version))
+                .map_err(|e| ProviderError::Auth(e.to_string()))?,
         );
 
         debug!("OpenCode request to {url}");
@@ -612,8 +638,17 @@ mod tests {
 
     #[test]
     fn test_new_with_base_url_and_api_key() {
-        let provider = OpenCodeProvider::new("https://opencode.ai/zen/v1", "test-key");
+        let provider = OpenCodeProvider::new(
+            "https://opencode.ai/zen/v1",
+            "test-key",
+            "user-id",
+            "project-id",
+            "cli",
+            "1.0.0",
+            "session-id",
+        );
         assert_eq!(provider.base_url(), "https://opencode.ai/zen/v1");
         assert_eq!(provider.api_key(), "test-key");
+        assert_eq!(provider.session_id(), "session-id");
     }
 }

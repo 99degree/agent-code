@@ -475,6 +475,18 @@ pub struct ApiConfig {
     /// Overrides the --max-turns CLI flag if set.
     #[serde(default)]
     pub max_turns: Option<usize>,
+    /// User ID for OpenCode provider header.
+    #[serde(default)]
+    pub user_id: Option<String>,
+    /// Project ID for OpenCode provider header.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// Client type for OpenCode provider header (defaults to "cli").
+    #[serde(default)]
+    pub client: Option<String>,
+    /// Installation version for OpenCode provider header (built as "opencode/<version>").
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 fn default_max_retry_after_secs() -> u64 {
@@ -597,6 +609,10 @@ impl Default for ApiConfig {
             max_retries: 3,
             max_retry_after_secs: 10,
             max_turns: None,
+            user_id: None,
+            project_id: None,
+            client: None,
+            version: None,
         }
     }
 }

@@ -8,8 +8,10 @@
 //! the provider-specific JSON format for requests and SSE streams.
 
 use async_trait::async_trait;
+use std::env;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use super::message::Message;
 use super::stream::StreamEvent;
@@ -449,10 +451,22 @@ pub fn create_provider_from_config(
         ProviderKind::Kilo => {
             std::sync::Arc::new(crate::llm::kilo::KiloProvider::new(base_url, &resolved_key))
         }
-        ProviderKind::OpenCode => std::sync::Arc::new(crate::llm::opencode::OpenCodeProvider::new(
-            base_url,
-            &resolved_key,
-        )),
+        ProviderKind::OpenCode => {
+            let user_id = config.api.user_id.clone().unwrap_or_default();
+            let project_id = config.api.project_id.clone().unwrap_or_default();
+            let client = config.api.client.clone().unwrap_or_else(|| "cli".to_string());
+            let version = config.api.version.clone().unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+            let session_id = Uuid::new_v4().to_string();
+            std::sync::Arc::new(crate::llm::opencode::OpenCodeProvider::new(
+                base_url,
+                &resolved_key,
+                &user_id,
+                &project_id,
+                &client,
+                &version,
+                &session_id,
+            ))
+        }
         ProviderKind::Requesty => std::sync::Arc::new(crate::llm::requesty::RequestyProvider::new(
             base_url,
             &resolved_key,
