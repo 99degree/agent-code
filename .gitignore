@@ -5,6 +5,7 @@
 .env
 .DS_Store
 agent
+agent1
 
 # agent telemetry logs
 .tlogs/
