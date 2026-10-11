@@ -59,6 +59,7 @@ pub mod tool_search;
 pub mod web_fetch;
 pub mod web_search;
 pub mod worktree;
+pub mod write_alias;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
