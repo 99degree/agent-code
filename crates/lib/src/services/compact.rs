@@ -653,6 +653,15 @@ pub async fn compact_with_llm(
     let summary_prompt = build_compact_summary_prompt(to_summarize);
 
     // Call the LLM to generate the summary.
+    // The summary budget scales with the model's context window
+    // (5% of it, clamped) instead of a fixed 4K: small windows
+    // get a proportionally smaller summary, large windows more
+    // room to preserve detail — but never above the model's own
+    // max output, which providers enforce on their end.
+    let summary_max_tokens = (tokens::context_window_for_model(model) / 20)
+        .clamp(1_024, 32_768)
+        .min(tokens::max_output_tokens_for_model(model)) as u32;
+
     let summary_messages = vec![crate::llm::message::user_message(&summary_prompt)];
     let request = crate::llm::provider::ProviderRequest {
         messages: summary_messages,
@@ -662,7 +671,7 @@ pub async fn compact_with_llm(
             .to_string(),
         tools: vec![],
         model: model.to_string(),
-        max_tokens: 4096,
+        max_tokens: summary_max_tokens,
         temperature: None,
         enable_caching: false,
         tool_choice: Default::default(),
@@ -864,6 +873,80 @@ mod tests {
             });
             Ok(rx)
         }
+    }
+
+    /// The summary request's `max_tokens` scales with the
+    /// model's context window instead of a fixed 4K, but is
+    /// clamped and never exceeds the model's max output.
+    #[tokio::test]
+    async fn summary_max_tokens_scale_with_context_window() {
+        struct MaxTokensProvider {
+            captured: std::sync::Arc<std::sync::Mutex<Option<u32>>>,
+        }
+        #[async_trait::async_trait]
+        impl Provider for MaxTokensProvider {
+            fn name(&self) -> &str {
+                "max-tokens-mock"
+            }
+            async fn stream(
+                &self,
+                request: &ProviderRequest,
+            ) -> Result<mpsc::Receiver<StreamEvent>, ProviderError> {
+                *self.captured.lock().unwrap() = Some(request.max_tokens);
+                let (tx, rx) = mpsc::channel(1);
+                tokio::spawn(async move {
+                    let _ = tx.send(StreamEvent::TextDelta("summary".into())).await;
+                });
+                Ok(rx)
+            }
+        }
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let provider = MaxTokensProvider {
+            captured: captured.clone(),
+        };
+        let body: &str = &"word ".repeat(2500);
+        let mut messages: Vec<Message> = Vec::new();
+        for i in 0..12 {
+            messages.push(user_message(format!("{body} turn {i}")));
+            messages.push(assistant_text(format!("{body} reply {i}")));
+        }
+        // 200K context → 5% = 10K, within the clamp bounds.
+        let _ = compact_with_llm(
+            &mut messages,
+            &provider,
+            "claude-sonnet",
+            tokio_util::sync::CancellationToken::new(),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some(10_000),
+            "summary max_tokens should be 5% of the context window"
+        );
+
+        // A tiny window still gets a workable floor of 1K.
+        let mut messages: Vec<Message> = Vec::new();
+        for i in 0..12 {
+            messages.push(user_message(format!("{body} turn {i}")));
+            messages.push(assistant_text(format!("{body} reply {i}")));
+        }
+        let _ = compact_with_llm(
+            &mut messages,
+            &provider,
+            "gpt-3.5",
+            tokio_util::sync::CancellationToken::new(),
+            None,
+            None,
+        )
+        .await;
+        // gpt-3.5: 16K context → 5% = 819, clamped up to 1K.
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some(1_024),
+            "summary max_tokens should hit the 1K floor"
+        );
     }
 
     /// `compact_with_llm` used to build its summary request with

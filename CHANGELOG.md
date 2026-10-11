@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Compaction history file** — when an LLM compaction summary is generated, it is also appended to `history.md` in the working directory (created if missing), so every compaction leaves a durable record of what was summarized away.
+- **Context-scaled compaction budget** — the LLM summary request's `max_tokens` is now 5% of the model's context window (clamped to 1K–32K and the model's max output) instead of a fixed 4096, so large-context models preserve more detail per summary.
 
 ### Changed
 
