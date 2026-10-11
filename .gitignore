@@ -4,6 +4,7 @@
 *~
 .env
 .DS_Store
+agent
 
 # agent telemetry logs
 .tlogs/
