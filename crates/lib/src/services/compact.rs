@@ -568,6 +568,26 @@ Concrete remaining work, in order.
 ## Files
 Files created or modified, with a one-line note on each.";
 
+/// Append a compaction summary to `history.md` in `working_dir`,
+/// creating the file if it does not exist yet.
+pub fn append_summary_to_history(summary: &str, working_dir: &Path) -> Result<PathBuf, String> {
+    let path = working_dir.join("history.md");
+    let entry = format!(
+        "\n## Compaction {}\n\n{}\n",
+        chrono::Utc::now().to_rfc3339(),
+        summary.trim_end(),
+    );
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("open history.md: {e}"))?;
+    file.write_all(entry.as_bytes())
+        .map_err(|e| format!("write history.md: {e}"))?;
+    Ok(path)
+}
+
 /// Build the recovery message injected when max-output-tokens is hit.
 pub fn max_output_recovery_message() -> Message {
     Message::User(UserMessage {
@@ -613,6 +633,7 @@ pub async fn compact_with_llm(
     model: &str,
     cancel: tokio_util::sync::CancellationToken,
     stream_timeout: Option<std::time::Duration>,
+    working_dir: Option<&Path>,
 ) -> Option<usize> {
     if messages.len() < 4 {
         return None; // Not enough messages to compact.
@@ -668,6 +689,16 @@ pub async fn compact_with_llm(
 
     if summary.is_empty() {
         return None;
+    }
+
+    // Persist the summary to history.md so every compaction leaves a
+    // durable, append-only record of what was summarized away. Input
+    // is secret-masked, but this is still LLM output — a write
+    // failure must not fail the compaction itself.
+    if let Some(dir) = working_dir
+        && let Err(e) = append_summary_to_history(&summary, dir)
+    {
+        tracing::warn!("Failed to append compaction summary to history.md: {e}");
     }
 
     // Replace old messages with boundary + summary + kept messages.
@@ -862,6 +893,7 @@ mod tests {
             "test-model",
             tokio_util::sync::CancellationToken::new(),
             Some(timeout),
+            None,
         )
         .await
         .expect("compaction should succeed");
@@ -870,6 +902,68 @@ mod tests {
             *captured.lock().unwrap(),
             Some(timeout),
             "stream_timeout was not forwarded to the summary request"
+        );
+    }
+
+    /// A successful LLM compaction appends the summary to
+    /// history.md in the working directory, one entry per run.
+    #[tokio::test]
+    async fn compact_appends_summary_to_history_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let provider = SummaryProvider {
+            captured_timeout: captured.clone(),
+        };
+        let body: &str = &"word ".repeat(2500);
+        let mut messages: Vec<Message> = Vec::new();
+        for i in 0..12 {
+            messages.push(user_message(format!("{body} turn {i}")));
+            messages.push(assistant_text(format!("{body} reply {i}")));
+        }
+        let removed = compact_with_llm(
+            &mut messages,
+            &provider,
+            "test-model",
+            tokio_util::sync::CancellationToken::new(),
+            None,
+            Some(tmp.path()),
+        )
+        .await
+        .expect("compaction should succeed");
+        assert!(removed > 0);
+
+        let history = std::fs::read_to_string(tmp.path().join("history.md"))
+            .expect("history.md should exist in the working directory");
+        assert!(
+            history.contains("## Compaction"),
+            "history.md should record the compaction entry: {history}"
+        );
+        assert!(
+            history.contains("summary"),
+            "summary text missing: {history}"
+        );
+
+        // A second compaction appends rather than overwrites.
+        let mut messages: Vec<Message> = Vec::new();
+        for i in 0..12 {
+            messages.push(user_message(format!("{body} turn {i}")));
+            messages.push(assistant_text(format!("{body} reply {i}")));
+        }
+        let _ = compact_with_llm(
+            &mut messages,
+            &provider,
+            "test-model",
+            tokio_util::sync::CancellationToken::new(),
+            None,
+            Some(tmp.path()),
+        )
+        .await
+        .expect("second compaction should succeed");
+        let history = std::fs::read_to_string(tmp.path().join("history.md")).unwrap();
+        assert_eq!(
+            history.matches("## Compaction").count(),
+            2,
+            "second compaction should append a second entry"
         );
     }
 

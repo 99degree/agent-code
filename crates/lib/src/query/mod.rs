@@ -1380,6 +1380,7 @@ impl QueryEngine {
                         (self.state.config.api.timeout_secs > 0).then(|| {
                             std::time::Duration::from_secs(self.state.config.api.timeout_secs)
                         }),
+                        Some(std::path::Path::new(&self.state.cwd)),
                     )
                     .await
                     {

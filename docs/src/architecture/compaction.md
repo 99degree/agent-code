@@ -39,6 +39,8 @@ Sends older messages to the LLM with a prompt asking for a concise summary. Repl
 
 The summary preserves: key decisions, file paths discussed, errors encountered, and the current task state.
 
+The summary is also appended to `history.md` in the working directory (created if missing), so each compaction leaves a durable, append-only record. A write failure is logged but never fails the compaction.
+
 **Source**: `services/compact.rs` → `build_compact_summary_prompt()`
 
 ### 3. Context Collapse

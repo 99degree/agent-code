@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Compaction history file** — when an LLM compaction summary is generated, it is also appended to `history.md` in the working directory (created if missing), so every compaction leaves a durable record of what was summarized away.
+
 ### Changed
 
 - **Accurate model context windows** — `context_window_for_model` now consults an explicit per-model table (sourced from provider catalogs such as pi.dev) before falling back to prefix heuristics, so large-context models (1M+) no longer collapse to the 128K default and trigger premature compaction. `/model` picker catalogs for NVIDIA, OpenCode, OpenCodeGo, Mistral, and Zhipu were fleshed out with real current model ids.
