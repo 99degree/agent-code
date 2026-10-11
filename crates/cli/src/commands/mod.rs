@@ -148,7 +148,15 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "provider",
-        aliases: &["p", "nvidia", "kilo", "opencode", "openrouter", "nim", "orcarouter"],
+        aliases: &[
+            "p",
+            "nvidia",
+            "kilo",
+            "opencode",
+            "openrouter",
+            "nim",
+            "orcarouter",
+        ],
         description: "Show or switch the default LLM provider",
         hidden: false,
     },
@@ -198,6 +206,18 @@ pub const COMMANDS: &[Command] = &[
         name: "subagent",
         aliases: &[],
         description: "Show or change the default sub-agent model/provider",
+        hidden: false,
+    },
+    Command {
+        name: "read",
+        aliases: &["cat"],
+        description: "Read a file (usage: /read <path> [offset] [limit])",
+        hidden: false,
+    },
+    Command {
+        name: "write",
+        aliases: &[],
+        description: "Write a file (usage: /write <path> <content>)",
         hidden: false,
     },
     Command {
@@ -1897,6 +1917,14 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
         }
         Some("tools") => {
             execute_tools(engine);
+            CommandResult::Handled
+        }
+        Some("read") => {
+            execute_read(args, engine);
+            CommandResult::Handled
+        }
+        Some("write") => {
+            execute_write(args, engine);
             CommandResult::Handled
         }
         Some("skill") => {
@@ -5769,6 +5797,110 @@ fn execute_tools(engine: &QueryEngine) {
     println!("{} tool(s) available:", sorted.len());
     for tool in sorted {
         println!("{}", render_tool_summary(tool.name(), tool.description()));
+    }
+}
+
+/// Execute `/read` — read a file and display its contents.
+///
+/// Usage: /read <path> [offset] [limit]
+fn execute_read(args: Option<&str>, engine: &QueryEngine) {
+    let Some(args) = args else {
+        println!("Usage: /read <path> [offset] [limit]");
+        return;
+    };
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        println!("Usage: /read <path> [offset] [limit]");
+        return;
+    }
+    let path = parts[0];
+    let offset = parts
+        .get(1)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1);
+    let limit = parts
+        .get(2)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(2000);
+
+    // Resolve relative paths against the working directory.
+    let cwd = &engine.state().cwd;
+    let full_path = if std::path::Path::new(path).is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        std::path::Path::new(cwd).join(path)
+    };
+
+    // Use the FileReadTool to read the file.
+    let tool = engine
+        .tools()
+        .get("FileRead")
+        .expect("FileRead tool not found");
+    let input = serde_json::json!({
+        "file_path": full_path.to_string_lossy(),
+        "offset": offset,
+        "limit": limit,
+    });
+
+    let ctx = agent_code_lib::tools::ToolContext::minimal(
+        std::path::PathBuf::from(cwd),
+        engine.cancel_token(),
+    );
+    let checker = engine.permissions_handle();
+
+    let rt = tokio::runtime::Handle::current();
+    let result = rt.block_on(async { tool.call(input, &ctx).await });
+
+    match result {
+        Ok(res) => println!("{}", res.content),
+        Err(e) => println!("Error: {e}"),
+    }
+}
+
+/// Execute `/write` — write content to a file.
+///
+/// Usage: /write <path> <content>
+fn execute_write(args: Option<&str>, engine: &QueryEngine) {
+    let Some(args) = args else {
+        println!("Usage: /write <path> <content>");
+        return;
+    };
+    // Find the first space to separate path from content.
+    let Some(space_idx) = args.find(' ') else {
+        println!("Usage: /write <path> <content>");
+        return;
+    };
+    let path = args[..space_idx].trim();
+    let content = args[space_idx + 1..].trim();
+
+    let cwd = &engine.state().cwd;
+    let full_path = if std::path::Path::new(path).is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        std::path::Path::new(cwd).join(path)
+    };
+
+    let tool = engine
+        .tools()
+        .get("FileWrite")
+        .expect("FileWrite tool not found");
+    let input = serde_json::json!({
+        "file_path": full_path.to_string_lossy(),
+        "content": content,
+    });
+
+    let ctx = agent_code_lib::tools::ToolContext::minimal(
+        std::path::PathBuf::from(cwd),
+        engine.cancel_token(),
+    );
+    let checker = engine.permissions_handle();
+
+    let rt = tokio::runtime::Handle::current();
+    let result = rt.block_on(async { tool.call(input, &ctx).await });
+
+    match result {
+        Ok(res) => println!("{}", res.content),
+        Err(e) => println!("Error: {e}"),
     }
 }
 
