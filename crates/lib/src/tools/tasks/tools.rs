@@ -79,7 +79,7 @@ impl Tool for TaskCreateTool {
     }
 
     fn is_read_only(&self) -> bool {
-        true
+        false
     }
 
     fn is_concurrency_safe(&self) -> bool {
@@ -89,7 +89,7 @@ impl Tool for TaskCreateTool {
     async fn call(
         &self,
         input: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let description = input
             .get("description")
@@ -102,7 +102,43 @@ impl Tool for TaskCreateTool {
             .unwrap_or("pending");
 
         let kind = parse_kind(&input)?;
-        let id = TASK_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+        // Use TaskManager if available for persistent tracking
+        let id = if let Some(mgr) = ctx.task_manager.as_ref() {
+            let payload = match kind {
+                TaskKind::LocalShell => crate::services::background::TaskPayload::LocalShell {
+                    command: String::new(),
+                    cwd: ctx.cwd.clone(),
+                },
+                TaskKind::LocalAgent => crate::services::background::TaskPayload::LocalAgent {
+                    subagent_kind: None,
+                    prompt: description.to_string(),
+                    parent_session: ctx.session_id.clone(),
+                    subagent_id: None,
+                },
+                TaskKind::LocalWorkflow => {
+                    crate::services::background::TaskPayload::LocalWorkflow {
+                        workflow: String::new(),
+                        args: serde_json::Value::Null,
+                    }
+                }
+                TaskKind::MonitorMcp => crate::services::background::TaskPayload::MonitorMcp {
+                    server_name: String::new(),
+                    expected_tool: None,
+                    timeout: std::time::Duration::from_secs(3600),
+                },
+                TaskKind::RemoteAgent => crate::services::background::TaskPayload::RemoteAgent {
+                    routine_id: String::new(),
+                    timeout: None,
+                },
+                TaskKind::Dream => crate::services::background::TaskPayload::Dream {
+                    note: Some(description.to_string()),
+                },
+            };
+            mgr.register(description, kind, payload).await
+        } else {
+            TASK_COUNTER.fetch_add(1, Ordering::Relaxed).to_string()
+        };
 
         Ok(ToolResult::success(format!(
             "Task #{id} created [kind: {}]: {description} [{status}]",
@@ -148,7 +184,7 @@ impl Tool for TaskUpdateTool {
     async fn call(
         &self,
         input: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let id = input
             .get("id")
@@ -160,9 +196,29 @@ impl Tool for TaskUpdateTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("'status' is required".into()))?;
 
-        Ok(ToolResult::success(format!(
-            "Task #{id} updated to [{status}]"
-        )))
+        let task_status = match status {
+            "pending" => crate::services::background::TaskStatus::Running,
+            "in_progress" => crate::services::background::TaskStatus::Running,
+            "completed" => crate::services::background::TaskStatus::Completed,
+            _ => {
+                return Err(ToolError::InvalidInput(format!(
+                    "unknown status '{status}': expected pending, in_progress, or completed"
+                )));
+            }
+        };
+
+        if let Some(mgr) = ctx.task_manager.as_ref() {
+            mgr.set_status(id, task_status)
+                .await
+                .map_err(ToolError::ExecutionFailed)?;
+            Ok(ToolResult::success(format!(
+                "Task #{id} updated to [{status}]"
+            )))
+        } else {
+            Ok(ToolResult::success(format!(
+                "Task #{id} updated to [{status}] (no task manager available)"
+            )))
+        }
     }
 }
 
@@ -332,7 +388,9 @@ impl Tool for TaskStopTool {
             mgr.kill(id).await.map_err(ToolError::ExecutionFailed)?;
             Ok(ToolResult::success(format!("Task #{id} stopped.")))
         } else {
-            Ok(ToolResult::success(format!("Task #{id} stop requested (no task manager available).")))
+            Ok(ToolResult::success(format!(
+                "Task #{id} stop requested (no task manager available)."
+            )))
         }
     }
 }
@@ -382,9 +440,7 @@ impl Tool for TaskOutputTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("'id' is required".into()))?;
 
-        let max_bytes = input
-            .get("max_bytes")
-            .and_then(|v| v.as_u64());
+        let max_bytes = input.get("max_bytes").and_then(|v| v.as_u64());
 
         if let Some(mgr) = ctx.task_manager.as_ref() {
             let output = if let Some(max) = max_bytes {
@@ -392,7 +448,9 @@ impl Tool for TaskOutputTool {
             } else {
                 mgr.read_output(id).await
             };
-            output.map(ToolResult::success).map_err(ToolError::ExecutionFailed)
+            output
+                .map(ToolResult::success)
+                .map_err(ToolError::ExecutionFailed)
         } else {
             // Fallback: check the output file in the cache directory directly.
             let output_path = dirs::cache_dir()
@@ -501,7 +559,11 @@ mod tests {
     async fn task_stop_uses_task_manager() {
         let mgr = crate::services::background::TaskManager::new();
         let id = mgr
-            .register("test task", crate::services::background::TaskKind::LocalAgent, test_payload("sleep 10"))
+            .register(
+                "test task",
+                crate::services::background::TaskKind::LocalAgent,
+                test_payload("sleep 10"),
+            )
             .await;
 
         let ctx = ToolContext {
@@ -509,14 +571,17 @@ mod tests {
             ..empty_ctx()
         };
 
-        let res = TaskStopTool
-            .call(json!({ "id": id }), &ctx)
-            .await
-            .unwrap();
+        let res = TaskStopTool.call(json!({ "id": id }), &ctx).await.unwrap();
         assert!(res.content.contains("stopped"));
 
         // Verify the task was actually killed
-        let info = ctx.task_manager.as_ref().unwrap().get_status(&id).await.unwrap();
+        let info = ctx
+            .task_manager
+            .as_ref()
+            .unwrap()
+            .get_status(&id)
+            .await
+            .unwrap();
         assert_eq!(info.status, crate::services::background::TaskStatus::Killed);
     }
 
@@ -524,10 +589,16 @@ mod tests {
     async fn task_output_uses_task_manager() {
         let mgr = crate::services::background::TaskManager::new();
         let id = mgr
-            .register("test task", crate::services::background::TaskKind::LocalAgent, test_payload("echo hello"))
+            .register(
+                "test task",
+                crate::services::background::TaskKind::LocalAgent,
+                test_payload("echo hello"),
+            )
             .await;
         mgr.write_output(&id, "hello world").await.unwrap();
-        mgr.set_status(&id, crate::services::background::TaskStatus::Completed).await.unwrap();
+        mgr.set_status(&id, crate::services::background::TaskStatus::Completed)
+            .await
+            .unwrap();
 
         let ctx = ToolContext {
             task_manager: Some(std::sync::Arc::new(mgr)),
@@ -553,7 +624,11 @@ mod tests {
     async fn task_get_includes_metadata() {
         let mgr = crate::services::background::TaskManager::new();
         let id = mgr
-            .register("test task", crate::services::background::TaskKind::LocalAgent, test_payload("sleep 1"))
+            .register(
+                "test task",
+                crate::services::background::TaskKind::LocalAgent,
+                test_payload("sleep 1"),
+            )
             .await;
 
         let ctx = ToolContext {
@@ -561,10 +636,7 @@ mod tests {
             ..empty_ctx()
         };
 
-        let res = TaskGetTool
-            .call(json!({ "id": id }), &ctx)
-            .await
-            .unwrap();
+        let res = TaskGetTool.call(json!({ "id": id }), &ctx).await.unwrap();
         assert!(res.content.contains("started_at"));
         assert!(res.content.contains("duration"));
         assert!(res.content.contains("notified"));
