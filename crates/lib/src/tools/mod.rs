@@ -47,6 +47,7 @@ pub mod plan_mode;
 pub mod plugin_exec;
 pub mod powershell;
 pub mod read_alias;
+pub mod read_capital;
 pub mod registry;
 pub mod remote_trigger;
 pub mod repl_tool;
@@ -60,6 +61,7 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod worktree;
 pub mod write_alias;
+pub mod write_capital;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

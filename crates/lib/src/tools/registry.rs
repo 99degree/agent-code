@@ -105,7 +105,9 @@ impl ToolRegistry {
         registry.register(Arc::new(super::bash::BashTool));
         registry.register(Arc::new(super::file_read::FileReadTool));
         registry.register(Arc::new(super::read_alias::ReadTool));
+        registry.register(Arc::new(super::read_capital::ReadCapitalTool));
         registry.register(Arc::new(super::write_alias::WriteTool));
+        registry.register(Arc::new(super::write_capital::WriteCapitalTool));
         registry.register(Arc::new(super::file_write::FileWriteTool));
         registry.register(Arc::new(super::file_edit::FileEditTool));
         registry.register(Arc::new(super::multi_edit::MultiEditTool));
