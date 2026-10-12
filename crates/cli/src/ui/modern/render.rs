@@ -1083,6 +1083,25 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .filter(|t| t.source == super::tasks::TaskSource::Background)
         .collect();
 
+    // Get up to 3 most recent agent tasks by task sequence (descending).
+    // Tasks without task_id are included at the end.
+    let mut agent_with_seq: Vec<(&super::tasks::TaskEntry, u64)> = agent_tasks
+        .iter()
+        .filter_map(|&t| t.task_id.as_deref().map(|id| (t, task_seq(id))))
+        .collect();
+    agent_with_seq.sort_by_key(|(_, seq)| std::cmp::Reverse(*seq)); // descending by seq
+    let recent_agent: Vec<&super::tasks::TaskEntry> = agent_with_seq
+        .into_iter()
+        .take(3)
+        .map(|(t, _)| t)
+        .collect();
+    // Also include agent tasks without task_id.
+    let agent_without_id: Vec<&super::tasks::TaskEntry> = agent_tasks
+        .iter()
+        .filter(|t| t.task_id.is_none())
+        .copied()
+        .collect();
+
     // Get up to 3 most recent background tasks by task sequence (descending).
     // Tasks without task_id (e.g., from upsert_with_source in tests) are
     // included at the end since we can't order them chronologically.
@@ -1102,6 +1121,26 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .filter(|t| t.task_id.is_none())
         .copied()
         .collect();
+
+    // Start with the selected task if it is an agent task.
+    let mut agent_to_show = Vec::new();
+    if let Some(selected) = app.tasks.get(app.tasks_selected) {
+        if selected.source == super::tasks::TaskSource::Subagent {
+            agent_to_show.push(selected);
+        }
+    }
+    // Add the recent agent tasks, avoiding duplicates (by pointer).
+    for task in &recent_agent {
+        if !agent_to_show.iter().any(|&t| std::ptr::eq(t, *task)) {
+            agent_to_show.push(task);
+        }
+    }
+    // Add agent tasks without task_id.
+    for task in &agent_without_id {
+        if !agent_to_show.iter().any(|&t| std::ptr::eq(t, *task)) {
+            agent_to_show.push(task);
+        }
+    }
 
     // Start with the selected task if it is a background task.
     let mut background_to_show = Vec::new();
@@ -1123,9 +1162,9 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
         }
     }
 
-    // Combine: all agent tasks + selected/recent background tasks.
+    // Combine: selected/recent agent tasks + selected/recent background tasks.
     let mut display_tasks = Vec::new();
-    display_tasks.extend(agent_tasks.into_iter().cloned());
+    display_tasks.extend(agent_to_show.into_iter().cloned());
     display_tasks.extend(background_to_show.into_iter().cloned());
 
     // Map the original tasks_selected index to the index in display_tasks,
