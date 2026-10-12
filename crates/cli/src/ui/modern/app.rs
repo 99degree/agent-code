@@ -6,6 +6,7 @@
 use std::time::{Duration, Instant};
 
 use agent_code_lib::services::notifier::NotificationKind;
+use agent_code_lib::services::tokens::context_window_for_model;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -2473,6 +2474,16 @@ impl App {
             PendingModelAction::Set { model, effort } => {
                 set_model(model.clone());
                 self.model = model.clone();
+                
+                // Show context window warning if < 200k
+                let ctx_window = context_window_for_model(&model);
+                if ctx_window < 200_000 {
+                    self.transcript.push(TranscriptItem::System(format!(
+                        "⚠️  Model '{}' has a small context window ({} tokens). Consider using a larger model for better context handling.",
+                        model, ctx_window
+                    )));
+                }
+                
                 if let Some(ref e) = effort {
                     set_effort(Some(e.clone()));
                     self.effort = Some(e.clone());
