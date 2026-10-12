@@ -5846,7 +5846,6 @@ fn execute_read(args: Option<&str>, engine: &QueryEngine) {
         std::path::PathBuf::from(cwd),
         engine.cancel_token(),
     );
-    let checker = engine.permissions_handle();
 
     let rt = tokio::runtime::Handle::current();
     let result = rt.block_on(async { tool.call(input, &ctx).await });
@@ -5893,7 +5892,6 @@ fn execute_write(args: Option<&str>, engine: &QueryEngine) {
         std::path::PathBuf::from(cwd),
         engine.cancel_token(),
     );
-    let checker = engine.permissions_handle();
 
     let rt = tokio::runtime::Handle::current();
     let result = rt.block_on(async { tool.call(input, &ctx).await });
