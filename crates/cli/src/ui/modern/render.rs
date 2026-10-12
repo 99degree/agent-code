@@ -1063,16 +1063,96 @@ struct RowAnchor {
 /// Tasks/agents pane: state-ordered subagent rows (plan §M8).
 fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
     use super::tasks::TaskState;
+
+    // Extract numeric sequence from task id for chronological ordering.
+    fn task_seq(id: &str) -> u64 {
+        id.trim_start_matches(|c: char| !c.is_ascii_digit())
+            .parse()
+            .unwrap_or(u64::MAX)
+    }
+
+    // Separate agent tasks (Subagent) and background tasks (Background).
+    let agent_tasks: Vec<&super::tasks::TaskEntry> = app
+        .tasks
+        .iter()
+        .filter(|t| t.source == super::tasks::TaskSource::Subagent)
+        .collect();
+    let background_tasks: Vec<&super::tasks::TaskEntry> = app
+        .tasks
+        .iter()
+        .filter(|t| t.source == super::tasks::TaskSource::Background)
+        .collect();
+
+    // Get up to 3 most recent background tasks by task sequence (descending).
+    // Tasks without task_id (e.g., from upsert_with_source in tests) are
+    // included at the end since we can't order them chronologically.
+    let mut background_with_seq: Vec<(&super::tasks::TaskEntry, u64)> = background_tasks
+        .iter()
+        .filter_map(|&t| t.task_id.as_deref().map(|id| (t, task_seq(id))))
+        .collect();
+    background_with_seq.sort_by_key(|(_, seq)| std::cmp::Reverse(*seq)); // descending by seq
+    let recent_background: Vec<&super::tasks::TaskEntry> = background_with_seq
+        .into_iter()
+        .take(3)
+        .map(|(t, _)| t)
+        .collect();
+    // Also include background tasks without task_id (they're few, from tests or inline runs).
+    let background_without_id: Vec<&super::tasks::TaskEntry> = background_tasks
+        .iter()
+        .filter(|t| t.task_id.is_none())
+        .copied()
+        .collect();
+
+    // Start with the selected task if it is a background task.
+    let mut background_to_show = Vec::new();
+    if let Some(selected) = app.tasks.get(app.tasks_selected) {
+        if selected.source == super::tasks::TaskSource::Background {
+            background_to_show.push(selected);
+        }
+    }
+    // Add the recent background tasks, avoiding duplicates (by pointer).
+    for task in &recent_background {
+        if !background_to_show.iter().any(|&t| std::ptr::eq(t, *task)) {
+            background_to_show.push(task);
+        }
+    }
+    // Add background tasks without task_id.
+    for task in &background_without_id {
+        if !background_to_show.iter().any(|&t| std::ptr::eq(t, *task)) {
+            background_to_show.push(task);
+        }
+    }
+
+    // Combine: all agent tasks + selected/recent background tasks.
+    let mut display_tasks = Vec::new();
+    display_tasks.extend(agent_tasks.into_iter().cloned());
+    display_tasks.extend(background_to_show.into_iter().cloned());
+
+    // Map the original tasks_selected index to the index in display_tasks,
+    // if the selected task is still visible in the filtered list.
+    let selected_task_key = app.tasks.get(app.tasks_selected).map(|t| {
+        (t.agent_id.clone(), t.source, t.task_id.clone())
+    });
+    let tasks_selected = selected_task_key
+        .and_then(|key| {
+            display_tasks
+                .iter()
+                .position(|t| {
+                    t.agent_id == key.0 && t.source == key.1 && t.task_id == key.2
+                })
+        })
+        .unwrap_or(0.min(display_tasks.len().saturating_sub(1)));
+
     let block = Block::default()
         .borders(Borders::LEFT)
         .border_style(Style::default().fg(palette().muted))
-        .title(format!(" agents ({}) ", app.tasks.len()));
+        .title(format!(" agents ({}) ", display_tasks.len()));
     // The title consumes the top row even without a top border, so
     // measure the real content box instead of the outer area.
     let inner = block.inner(area);
     let mut lines: Vec<Line<'static>> = Vec::new();
     // Where each pane row ends, keyed by the task index it belongs to —
-    // the selection is an index into `app.tasks`, so a folded group
+    // the selection is an index into `display_tasks`, so a folded group
     // ahead of it must not shift the lookup. Used by the overflow
     // windowing below.
     let mut anchors: Vec<RowAnchor> = Vec::new();
@@ -1087,7 +1167,7 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if !app.todos.is_empty() {
         let (done, total) = super::tasks::todo_progress(&app.todos);
         // Rows the whole plan block may occupy, chrome included.
-        let allowance = if app.tasks.is_empty() {
+        let allowance = if display_tasks.is_empty() {
             max_rows
         } else {
             max_rows / 2
@@ -1095,7 +1175,7 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
         // Chrome: the heading, plus the blank separator when tasks
         // follow. Counting the separator here is what keeps the block
         // inside its allowance on a short pane.
-        let separator = usize::from(!app.tasks.is_empty());
+        let separator = usize::from(!display_tasks.is_empty());
         let mut budget = allowance.saturating_sub(1 + separator);
         // One more row goes to the "+n more" footer when items are elided.
         if app.todos.len() > budget {
@@ -1149,10 +1229,10 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
 
     let mut last_source: Option<super::tasks::TaskSource> = None;
-    for (idx, t) in app.tasks.iter().enumerate() {
+    for (idx, t) in display_tasks.iter().enumerate() {
         let group_folded = app.collapsed_groups.contains(&t.source);
         let p = palette();
-        let selected = idx == app.tasks_selected;
+        let selected = idx == tasks_selected;
         // Group header when the source changes. Subagents and background
         // jobs arrive from different places but read as one list, so they
         // share the pane with a heading to tell them apart.
@@ -1160,7 +1240,7 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
             if last_source.is_some() {
                 lines.push(Line::from(""));
             }
-            let count = app.tasks.iter().filter(|x| x.source == t.source).count();
+            let count = display_tasks.iter().filter(|x| x.source == t.source).count();
             // A folded group shows its size, so collapsing does not hide
             // how much is behind it.
             let heading = if group_folded {
@@ -1241,12 +1321,12 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if lines.len() > max_rows && max_rows > 0 {
         let sel = anchors
             .iter()
-            .find(|a| a.task == app.tasks_selected)
+            .find(|a| a.task == tasks_selected)
             .or_else(|| {
                 // Selection inside a folded group but not on its first
                 // row: the nearest anchor at or before it is that
                 // group's heading.
-                anchors.iter().rev().find(|a| a.task <= app.tasks_selected)
+                anchors.iter().rev().find(|a| a.task <= tasks_selected)
             });
         let sel_end = sel.map(|a| a.end).unwrap_or(0);
         // The row carrying the ❯ marker: the status line for a task, the
@@ -1274,7 +1354,7 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     .filter(|a| a.end >= offset && a.end < offset + visible_h)
                     .map(|a| a.covers)
                     .sum();
-                (offset, app.tasks.len().saturating_sub(shown))
+                (offset, display_tasks.len().saturating_sub(shown))
             };
             // The footer costs a row, so it has to earn it. When every
             // task is already on screen there is nothing to announce —
