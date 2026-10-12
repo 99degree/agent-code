@@ -32,6 +32,8 @@ pub enum CommandResult {
     Passthrough(String),
     /// Command wants to inject a prompt for the agent.
     Prompt(String),
+    /// Toggle the tasks pane visibility.
+    ToggleTasksPane,
 }
 
 /// Per-provider and per-base-URL cache of the merged (static + live) model list
@@ -2457,6 +2459,9 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                             .unwrap_or(0);
                     print!("{}", render_clear_result(removed));
                 }
+                TasksAction::TogglePane => {
+                    return CommandResult::ToggleTasksPane;
+                }
                 TasksAction::Usage(msg) => {
                     println!("{msg}");
                 }
@@ -3467,6 +3472,8 @@ enum TasksAction {
     Output(String),
     /// `/tasks clear` — prune all finished tasks from the list.
     Clear,
+    /// `/tasks pane|show|hide|toggle` — toggle the tasks pane visibility.
+    TogglePane,
     /// Malformed input — the carried string is the message to print.
     Usage(String),
 }
@@ -3474,7 +3481,8 @@ enum TasksAction {
 /// Parse the argument string after `/tasks` into a [`TasksAction`].
 ///
 /// Bare `/tasks` lists. `kill`/`stop`/`cancel` and
-/// `output`/`out`/`log`/`logs` take a task id. Anything else is a
+/// `output`/`out`/`log`/`logs` take a task id. `pane`/`show`/`hide`/`toggle`
+/// control the tasks pane visibility. Anything else is a
 /// usage error rather than a silent no-op.
 fn parse_tasks_subcommand(args: Option<&str>) -> TasksAction {
     let args = args.map(str::trim).unwrap_or("");
@@ -3495,8 +3503,9 @@ fn parse_tasks_subcommand(args: Option<&str>) -> TasksAction {
             None => TasksAction::Usage("Usage: /tasks output <id>".to_string()),
         },
         "clear" | "clean" | "prune" => TasksAction::Clear,
+        "pane" | "show" | "hide" | "toggle" => TasksAction::TogglePane,
         other => TasksAction::Usage(format!(
-            "Unknown /tasks subcommand '{other}'. Try: /tasks, /tasks output <id>, /tasks kill <id>, /tasks clear"
+            "Unknown /tasks subcommand '{other}'. Try: /tasks, /tasks output <id>, /tasks kill <id>, /tasks clear, /tasks pane"
         )),
     }
 }
@@ -9320,6 +9329,7 @@ mod tests {
             TasksAction::Kill(id) => render_kill_result(&id, mgr.kill(&id).await),
             TasksAction::Output(id) => render_task_output(&id, mgr.read_output(&id).await),
             TasksAction::Clear => render_clear_result(mgr.clear_finished().await.len()),
+            TasksAction::TogglePane => "Tasks pane toggled.\n".to_string(),
             TasksAction::Usage(msg) => format!("{msg}\n"),
         }
     }

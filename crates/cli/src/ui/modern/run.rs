@@ -2966,6 +2966,9 @@ fn apply_command_result(
         crate::commands::CommandResult::Handled => {
             app.status_message = format!("ran {slash}");
         }
+        crate::commands::CommandResult::ToggleTasksPane => {
+            app.toggle_tasks();
+        }
     }
 }
 
