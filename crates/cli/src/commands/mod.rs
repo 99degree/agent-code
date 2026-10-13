@@ -39,7 +39,8 @@ pub enum CommandResult {
 /// Per-provider and per-base-URL cache of the merged (static + live) model list
 /// fetched from the API. Populated lazily on first `/model` and reused for the
 /// session.
-type ModelCache = LazyLock<Mutex<HashMap<(ProviderKind, String), Vec<(String, String, Option<u64>)>>>>;
+type ModelCache =
+    LazyLock<Mutex<HashMap<(ProviderKind, String), Vec<(String, String, Option<u64>)>>>>;
 
 static MODEL_CACHE: ModelCache = LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -68,8 +69,10 @@ pub(crate) fn merge_models(
 }
 
 /// Read the model cache without mutating it.
-pub(crate) fn model_cache_read()
--> std::sync::MutexGuard<'static, HashMap<(ProviderKind, String), Vec<(String, String, Option<u64>)>>> {
+pub(crate) fn model_cache_read() -> std::sync::MutexGuard<
+    'static,
+    HashMap<(ProviderKind, String), Vec<(String, String, Option<u64>)>>,
+> {
     MODEL_CACHE.lock().unwrap()
 }
 
@@ -83,7 +86,10 @@ fn provider_wants_live(kind: ProviderKind, cfg: &agent_code_lib::config::Config)
 /// Merged (static + live) model list for a provider+base_url, blocking on the API call.
 /// `execute()` runs inside the TUI's multi-threaded tokio runtime, so
 /// `block_in_place` + `Handle::current().block_on` is valid here.
-pub fn fetch_model_entries(engine: &QueryEngine, kind: ProviderKind) -> Vec<(String, String, Option<u64>)> {
+pub fn fetch_model_entries(
+    engine: &QueryEngine,
+    kind: ProviderKind,
+) -> Vec<(String, String, Option<u64>)> {
     let base_url = engine.state().config.api.base_url.clone();
     let cache_key = (kind, base_url.clone());
     if let Some(cached) = MODEL_CACHE.lock().unwrap().get(&cache_key) {
@@ -160,6 +166,7 @@ pub const COMMANDS: &[Command] = &[
             "p",
             "nvidia",
             "kilo",
+            "poolside",
             "opencode",
             "openrouter",
             "nim",
@@ -2707,7 +2714,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 &state.additional_dirs,
                 state.pre_fast_model.clone(),
                 state.disk_output_style.as_ref().map(|s| s.name.clone()),
-                    None, // context_window - will be derived on resume
+                None, // context_window - will be derived on resume
             ) {
                 Ok(_) => {
                     println!("Forked conversation at message {msg_count} -> session {fork_id}",);

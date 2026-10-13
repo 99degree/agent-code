@@ -164,9 +164,7 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
             ("sonar", "Sonar · Balanced, web search"),
             ("sonar-deep-research", "Sonar Deep Research · In-depth"),
         ],
-        ProviderKind::OpenRouter => &[
-            ("openrouter/free", "OpenRouter Free · Rotates free models"),
-        ],
+        ProviderKind::OpenRouter => &[("openrouter/free", "OpenRouter Free · Rotates free models")],
         ProviderKind::Nvidia => &[
             (
                 "nvidia/nemotron-3-ultra-550b-a55b",
@@ -195,9 +193,11 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
             ("deepseek-ai/deepseek-v4-pro", "DeepSeek V4 Pro"),
             ("meta/llama-3.1-8b-instruct", "Llama 3.1 8B · Fast"),
         ],
-        ProviderKind::Kilo => &[
-            ("kilo-auto/free", "Kilo Auto Free · Rotates free models"),
+        ProviderKind::Poolside => &[
+            ("poolside/laguna-s-2.1", "Laguna S 2.1 · Most capable"),
+            ("poolside/laguna-xs-2.1", "Laguna XS 2.1 · Fast"),
         ],
+        ProviderKind::Kilo => &[("kilo-auto/free", "Kilo Auto Free · Rotates free models")],
         ProviderKind::Novita => &[("tencent/hy3", "Tencent Hy3 · Open")],
         ProviderKind::OpenCode => &[
             ("big-pickle", "Big Pickle · Frontier flagship"),
@@ -337,6 +337,9 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     if url_lower.contains("orcarouter.ai") || url_lower.contains("api.orcarouter.ai") {
         return ProviderKind::OrcaRouter;
     }
+    if url_lower.contains("poolside.ai") {
+        return ProviderKind::Poolside;
+    }
     if url_lower.contains("localhost") || url_lower.contains("127.0.0.1") {
         return ProviderKind::OpenAiCompatible;
     }
@@ -381,6 +384,9 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     }
     if model_lower.contains("nemotron") || model_lower.starts_with("nvidia/") {
         return ProviderKind::Nvidia;
+    }
+    if model_lower.starts_with("poolside/") || model_lower.starts_with("ps-") {
+        return ProviderKind::Poolside;
     }
 
     ProviderKind::OpenAiCompatible
@@ -436,7 +442,8 @@ pub fn create_provider_from_config(
     // If an explicit provider is given (e.g., from config.toml), use it.
     // Otherwise fall back to model/URL-based detection.
     let kind = if let Some(provider_name) = explicit_provider {
-        ProviderKind::from_name(provider_name).unwrap_or_else(|| get_provider_for_model(model, base_url))
+        ProviderKind::from_name(provider_name)
+            .unwrap_or_else(|| get_provider_for_model(model, base_url))
     } else {
         get_provider_for_model(model, base_url)
     };
@@ -445,6 +452,10 @@ pub fn create_provider_from_config(
         ProviderKind::AzureOpenAi => std::sync::Arc::new(
             crate::llm::azure_openai::AzureOpenAiProvider::new(base_url, &resolved_key),
         ),
+        ProviderKind::Poolside => std::sync::Arc::new(crate::llm::poolside::PoolsideProvider::new(
+            base_url,
+            &resolved_key,
+        )),
         ProviderKind::Novita => std::sync::Arc::new(crate::llm::novita::NovitaProvider::new(
             base_url,
             &resolved_key,
@@ -455,8 +466,16 @@ pub fn create_provider_from_config(
         ProviderKind::OpenCode => {
             let user_id = config.api.user_id.clone().unwrap_or_default();
             let project_id = config.api.project_id.clone().unwrap_or_default();
-            let client = config.api.client.clone().unwrap_or_else(|| "cli".to_string());
-            let version = config.api.version.clone().unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+            let client = config
+                .api
+                .client
+                .clone()
+                .unwrap_or_else(|| "cli".to_string());
+            let version = config
+                .api
+                .version
+                .clone()
+                .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
             let session_id = Uuid::new_v4().to_string();
             std::sync::Arc::new(crate::llm::opencode::OpenCodeProvider::new(
                 base_url,
@@ -527,6 +546,8 @@ pub enum ProviderKind {
     Nvidia,
     /// NVIDIA Inference Microservices (OpenAI-compatible API).
     Nim,
+    /// Poolside AI (OpenAI-compatible API).
+    Poolside,
     /// Kilo AI (OpenAI-compatible gateway https://api.kilo.ai/api/gateway).
     Kilo,
     Novita,
@@ -560,6 +581,7 @@ impl ProviderKind {
             ProviderKind::Perplexity,
             ProviderKind::Nvidia,
             ProviderKind::Nim,
+            ProviderKind::Poolside,
             ProviderKind::Kilo,
             ProviderKind::Novita,
             ProviderKind::OpenCode,
@@ -606,6 +628,7 @@ impl ProviderKind {
             | Self::Perplexity
             | Self::Nvidia
             | Self::Nim
+            | Self::Poolside
             | Self::Kilo
             | Self::Novita
             | Self::OpenCode
@@ -637,6 +660,7 @@ impl ProviderKind {
             Self::Perplexity => Some("https://api.perplexity.ai"),
             Self::Nvidia => Some("https://integrate.api.nvidia.com/v1"),
             Self::Nim => Some("https://integrate.api.nvidia.com/v1"),
+            Self::Poolside => Some("https://inference.poolside.ai/v1"),
             Self::Kilo => Some("https://api.kilo.ai/api/gateway"),
             Self::Novita => Some("https://api.novita.ai/openai/v1"),
             Self::Requesty => Some("https://router.requesty.ai/v1"),
@@ -666,6 +690,7 @@ impl ProviderKind {
             Self::Perplexity => "PERPLEXITY_API_KEY",
             Self::Nvidia => "NVIDIA_API_KEY",
             Self::Nim => "NIM_API_KEY",
+            Self::Poolside => "POOLSIDE_API_KEY",
             Self::Kilo => "KILO_API_KEY",
             Self::Novita => "NOVITA_API_KEY",
             Self::Requesty => "REQUESTY_API_KEY",
@@ -696,6 +721,7 @@ impl ProviderKind {
             Self::Perplexity => "perplexity",
             Self::Nvidia => "nvidia",
             Self::Nim => "nim",
+            Self::Poolside => "poolside",
             Self::Kilo => "kilo",
             Self::Novita => "novita",
             Self::OpenCode => "opencode",
@@ -726,6 +752,7 @@ impl ProviderKind {
             "azure" | "azure-openai" => ProviderKind::AzureOpenAi,
             "nvidia" => ProviderKind::Nvidia,
             "nim" => ProviderKind::Nim,
+            "poolside" => ProviderKind::Poolside,
             "kilo" => ProviderKind::Kilo,
             "novita" => ProviderKind::Novita,
             "opencode" | "zen" => ProviderKind::OpenCode,
@@ -965,6 +992,14 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_from_url_poolside() {
+        assert!(matches!(
+            detect_provider("any", "https://inference.poolside.ai/v1"),
+            ProviderKind::Poolside
+        ));
+    }
+
+    #[test]
     fn test_detect_from_model_command_r() {
         assert!(matches!(
             detect_provider("command-r-plus", ""),
@@ -1034,6 +1069,22 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_from_model_poolside() {
+        assert!(matches!(
+            detect_provider("poolside/laguna-s-2.1", ""),
+            ProviderKind::Poolside
+        ));
+        assert!(matches!(
+            detect_provider("poolside/laguna-xs-2.1", ""),
+            ProviderKind::Poolside
+        ));
+        assert!(matches!(
+            detect_provider("ps-4", ""),
+            ProviderKind::Poolside
+        ));
+    }
+
+    #[test]
     fn test_detect_unknown_defaults_openai_compat() {
         assert!(matches!(
             detect_provider("some-random-model", "https://my-server.com"),
@@ -1071,6 +1122,7 @@ mod tests {
             ProviderKind::OpenRouter,
             ProviderKind::Cohere,
             ProviderKind::Perplexity,
+            ProviderKind::Poolside,
             ProviderKind::OpenAiCompatible,
         ];
         for p in openai_compat_providers {
@@ -1097,6 +1149,7 @@ mod tests {
             ProviderKind::OpenRouter,
             ProviderKind::Cohere,
             ProviderKind::Perplexity,
+            ProviderKind::Poolside,
         ];
         for p in providers_with_urls {
             assert!(
@@ -1140,6 +1193,7 @@ mod tests {
             ProviderKind::Perplexity.env_var_name(),
             "PERPLEXITY_API_KEY"
         );
+        assert_eq!(ProviderKind::Poolside.env_var_name(), "POOLSIDE_API_KEY");
         assert_eq!(
             ProviderKind::OpenAiCompatible.env_var_name(),
             "OPENAI_API_KEY"
@@ -1287,10 +1341,7 @@ mod tests {
 
     #[test]
     fn test_default_model_picks_first_catalog_entry() {
-        assert_eq!(
-            ProviderKind::Kilo.default_model(),
-            Some("kilo-auto/free")
-        );
+        assert_eq!(ProviderKind::Kilo.default_model(), Some("kilo-auto/free"));
         assert_eq!(ProviderKind::OpenCode.default_model(), Some("big-pickle"));
         // Providers without a curated catalog have no default model.
         assert_eq!(ProviderKind::OpenAiCompatible.default_model(), None);
@@ -1300,8 +1351,12 @@ mod tests {
     fn test_requesty_provider_is_constructed_from_config() {
         let mut config = crate::config::Config::default();
         config.api.api_key = Some("requesty-key".to_string());
-        let provider =
-            create_provider_from_config("openai/gpt-4o", "https://router.requesty.ai/v1", &config, None);
+        let provider = create_provider_from_config(
+            "openai/gpt-4o",
+            "https://router.requesty.ai/v1",
+            &config,
+            None,
+        );
         assert_eq!(provider.name(), "requesty");
     }
 
