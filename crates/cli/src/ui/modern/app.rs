@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use agent_code_lib::services::notifier::NotificationKind;
-use agent_code_lib::services::tokens::context_window_for_model;
+use agent_code_lib::services::tokens::{context_window_for_model, MODEL_CONTEXT_WINDOWS};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -2478,9 +2478,18 @@ impl App {
                 // Show context window warning if < 200k
                 let ctx_window = context_window_for_model(&model);
                 if ctx_window < 200_000 {
+                    let is_known = MODEL_CONTEXT_WINDOWS.iter().any(|(id, _)| {
+                        let bare = model.rsplit('/').next().unwrap_or(&model).to_lowercase();
+                        *id == model.to_lowercase() || *id == bare
+                    });
+                    let fallback_note = if is_known {
+                        ""
+                    } else {
+                        " (default fallback; actual limit may be larger — check provider docs)"
+                    };
                     self.transcript.push(TranscriptItem::System(format!(
-                        "⚠️  Model '{}' has a small context window ({} tokens). Consider using a larger model for better context handling.",
-                        model, ctx_window
+                        "⚠️  Model '{}' has a small context window ({} tokens).{}. Consider using a larger model for better context handling.",
+                        model, ctx_window, fallback_note
                     )));
                 }
                 

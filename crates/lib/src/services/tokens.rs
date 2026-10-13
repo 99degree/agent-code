@@ -109,7 +109,7 @@ pub fn estimate_context_tokens(messages: &[Message]) -> u64 {
 /// Large-context models (1M+) must be listed explicitly or they collapse to
 /// the 128K default and the conversation is compacted prematurely. Keyed by
 /// the bare model id (provider prefix stripped, lowercased).
-const MODEL_CONTEXT_WINDOWS: &[(&str, u64)] = &[
+pub const MODEL_CONTEXT_WINDOWS: &[(&str, u64)] = &[
     // Anthropic / Claude
     ("claude-opus-4", 200_000),
     ("claude-opus-4-1", 200_000),
@@ -166,6 +166,8 @@ const MODEL_CONTEXT_WINDOWS: &[(&str, u64)] = &[
     ("llama-3.3-nemotron-super-49b-v1", 131_072),
     ("llama-3.3-nemotron-super-49b-v1.5", 131_072),
     // DeepSeek
+    ("deepseek-v4.1-pro", 1_000_000),
+    ("deepseek-v4.1-flash", 1_000_000),
     ("deepseek-v4-pro", 1_000_000),
     ("deepseek-v4-flash", 1_000_000),
     ("deepseek-v4-flash-free", 1_000_000),
@@ -265,7 +267,7 @@ pub fn context_window_for_model(model: &str) -> u64 {
     } else if lower.contains("gpt-3.5") {
         16_384
     } else {
-        128_000
+        200_000
     }
 }
 
