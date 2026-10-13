@@ -621,7 +621,8 @@ fn draw_model_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Style::default().fg(palette().inactive)
             };
             let cur = if *id == p.current { " ✔" } else { "" };
-            let ctx_info = ctx.map(|c| format!(" ({})", format_tokens(c)))
+            let ctx_info = ctx
+                .map(|c| format!(" ({})", format_tokens(c)))
                 .unwrap_or_default();
             lines.push(Line::from(vec![
                 Span::styled(format!("{marker} {id}{cur}{ctx_info}  "), style),
@@ -1092,11 +1093,8 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .filter_map(|&t| t.task_id.as_deref().map(|id| (t, task_seq(id))))
         .collect();
     agent_with_seq.sort_by_key(|(_, seq)| std::cmp::Reverse(*seq)); // descending by seq
-    let recent_agent: Vec<&super::tasks::TaskEntry> = agent_with_seq
-        .into_iter()
-        .take(3)
-        .map(|(t, _)| t)
-        .collect();
+    let recent_agent: Vec<&super::tasks::TaskEntry> =
+        agent_with_seq.into_iter().take(3).map(|(t, _)| t).collect();
     // Also include agent tasks without task_id.
     let agent_without_id: Vec<&super::tasks::TaskEntry> = agent_tasks
         .iter()
@@ -1171,16 +1169,15 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     // Map the original tasks_selected index to the index in display_tasks,
     // if the selected task is still visible in the filtered list.
-    let selected_task_key = app.tasks.get(app.tasks_selected).map(|t| {
-        (t.agent_id.clone(), t.source, t.task_id.clone())
-    });
+    let selected_task_key = app
+        .tasks
+        .get(app.tasks_selected)
+        .map(|t| (t.agent_id.clone(), t.source, t.task_id.clone()));
     let tasks_selected = selected_task_key
         .and_then(|key| {
             display_tasks
                 .iter()
-                .position(|t| {
-                    t.agent_id == key.0 && t.source == key.1 && t.task_id == key.2
-                })
+                .position(|t| t.agent_id == key.0 && t.source == key.1 && t.task_id == key.2)
         })
         .unwrap_or(0.min(display_tasks.len().saturating_sub(1)));
 
@@ -1281,7 +1278,10 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
             if last_source.is_some() {
                 lines.push(Line::from(""));
             }
-            let count = display_tasks.iter().filter(|x| x.source == t.source).count();
+            let count = display_tasks
+                .iter()
+                .filter(|x| x.source == t.source)
+                .count();
             // A folded group shows its size, so collapsing does not hide
             // how much is behind it.
             let heading = if group_folded {

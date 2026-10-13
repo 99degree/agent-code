@@ -276,13 +276,11 @@ impl Provider for OpenCodeProvider {
         );
         headers.insert(
             HeaderName::from_static("x-opencode-request"),
-            HeaderValue::from_str(&self.user_id)
-                .map_err(|e| ProviderError::Auth(e.to_string()))?,
+            HeaderValue::from_str(&self.user_id).map_err(|e| ProviderError::Auth(e.to_string()))?,
         );
         headers.insert(
             HeaderName::from_static("x-opencode-client"),
-            HeaderValue::from_str(&self.client)
-                .map_err(|e| ProviderError::Auth(e.to_string()))?,
+            HeaderValue::from_str(&self.client).map_err(|e| ProviderError::Auth(e.to_string()))?,
         );
         headers.insert(
             HeaderName::from_static("x-opencode-project"),

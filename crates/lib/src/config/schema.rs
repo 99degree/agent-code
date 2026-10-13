@@ -97,56 +97,108 @@ impl Default for Config {
         // High priority for free-tier providers that have persistent rate limits (429 triggers immediate failover).
         failover_mapping.insert(
             "opencode".to_string(),
-            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
+            FailoverTargetConfig {
+                provider: "kilo".to_string(),
+                model: "tencent/hy3:free".to_string(),
+                priority: FailoverPriority::High,
+            },
         );
         failover_mapping.insert(
             "opencode/*".to_string(),
-            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
+            FailoverTargetConfig {
+                provider: "kilo".to_string(),
+                model: "tencent/hy3:free".to_string(),
+                priority: FailoverPriority::High,
+            },
         );
         failover_mapping.insert(
             "nvidia/*".to_string(),
-            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::Low },
+            FailoverTargetConfig {
+                provider: "kilo".to_string(),
+                model: "tencent/hy3:free".to_string(),
+                priority: FailoverPriority::Low,
+            },
         );
         failover_mapping.insert(
             "openrouter".to_string(),
-            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
+            FailoverTargetConfig {
+                provider: "kilo".to_string(),
+                model: "tencent/hy3:free".to_string(),
+                priority: FailoverPriority::High,
+            },
         );
         failover_mapping.insert(
             "openrouter/*".to_string(),
-            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
+            FailoverTargetConfig {
+                provider: "kilo".to_string(),
+                model: "tencent/hy3:free".to_string(),
+                priority: FailoverPriority::High,
+            },
         );
         failover_mapping.insert(
             "opencodego".to_string(),
-            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
+            FailoverTargetConfig {
+                provider: "kilo".to_string(),
+                model: "tencent/hy3:free".to_string(),
+                priority: FailoverPriority::High,
+            },
         );
         failover_mapping.insert(
             "opencodego/*".to_string(),
-            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
+            FailoverTargetConfig {
+                provider: "kilo".to_string(),
+                model: "tencent/hy3:free".to_string(),
+                priority: FailoverPriority::High,
+            },
         );
         failover_mapping.insert(
             "orcarouter".to_string(),
-            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
+            FailoverTargetConfig {
+                provider: "kilo".to_string(),
+                model: "tencent/hy3:free".to_string(),
+                priority: FailoverPriority::High,
+            },
         );
         failover_mapping.insert(
             "orcarouter/*".to_string(),
-            FailoverTargetConfig { provider: "kilo".to_string(), model: "tencent/hy3:free".to_string(), priority: FailoverPriority::High },
+            FailoverTargetConfig {
+                provider: "kilo".to_string(),
+                model: "tencent/hy3:free".to_string(),
+                priority: FailoverPriority::High,
+            },
         );
         // nim <-> nvidia cross-failover (shared model catalog, different endpoints) - high priority for 429 immediate failover
         failover_mapping.insert(
             "nim".to_string(),
-            FailoverTargetConfig { provider: "nvidia".to_string(), model: "nemotron-3-ultra".to_string(), priority: FailoverPriority::High },
+            FailoverTargetConfig {
+                provider: "nvidia".to_string(),
+                model: "nemotron-3-ultra".to_string(),
+                priority: FailoverPriority::High,
+            },
         );
         failover_mapping.insert(
             "nim/*".to_string(),
-            FailoverTargetConfig { provider: "nvidia".to_string(), model: "nemotron-3-ultra".to_string(), priority: FailoverPriority::High },
+            FailoverTargetConfig {
+                provider: "nvidia".to_string(),
+                model: "nemotron-3-ultra".to_string(),
+                priority: FailoverPriority::High,
+            },
         );
         failover_mapping.insert(
             "nvidia".to_string(),
-            FailoverTargetConfig { provider: "nim".to_string(), model: "nemotron-3-ultra".to_string(), priority: FailoverPriority::High },
+            FailoverTargetConfig {
+                provider: "nim".to_string(),
+                model: "nemotron-3-ultra".to_string(),
+                priority: FailoverPriority::High,
+            },
         );
         failover_mapping.insert(
             "nvidia/*".to_string(),
-            FailoverTargetConfig { provider: "nim".to_string(), model: "nemotron-3-ultra".to_string(), priority: FailoverPriority::High },
+            FailoverTargetConfig {
+                provider: "nim".to_string(),
+                model: "nemotron-3-ultra".to_string(),
+                priority: FailoverPriority::High,
+            },
         );
         Self {
             api: ApiConfig::default(),

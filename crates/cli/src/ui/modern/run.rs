@@ -1677,7 +1677,10 @@ pub(super) async fn event_loop(
                             } else {
                                 // Derive from model using the same three-tier logic
                                 // but without fetching from API (since we're offline during restore)
-                                let derived = agent_code_lib::services::tokens::context_window_for_model(&data.model);
+                                let derived =
+                                    agent_code_lib::services::tokens::context_window_for_model(
+                                        &data.model,
+                                    );
                                 st.context_window = Some(derived);
                                 // Notify user that context window was derived
                                 app.transcript.push(super::app::TranscriptItem::System(format!(

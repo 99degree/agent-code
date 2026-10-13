@@ -264,8 +264,7 @@ impl OpenAiProvider {
         // tool calls parse correctly; other providers don't understand this
         // kwarg and may reject the request.
         if matches!(self.api, OpenAiApi::Nemotron) {
-            body["chat_template_kwargs"] =
-                serde_json::json!({"force_nonempty_content": true});
+            body["chat_template_kwargs"] = serde_json::json!({"force_nonempty_content": true});
         }
 
         // chat_template_kwargs is only understood by Nemotron/TensorRT-LLM
@@ -588,7 +587,8 @@ impl Provider for OpenAiProvider {
             for model in data {
                 if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
                     // Check for context_window field in the model info
-                    let context_window = model.get("context_window")
+                    let context_window = model
+                        .get("context_window")
                         .and_then(|v| v.as_u64())
                         .or_else(|| model.get("max_context_length").and_then(|v| v.as_u64()));
                     models.push((id.to_string(), id.to_string(), context_window));

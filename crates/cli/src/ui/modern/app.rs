@@ -186,7 +186,8 @@ pub(crate) fn format_model_catalog(current: &str, base_url: &str) -> Vec<String>
         lines.push("Available models (↑/↓ · Enter · Ctrl+M picker · /model <id> [effort]):".into());
         for (name, desc, ctx_window) in entries {
             let mark = if name == current { " ✔" } else { "" };
-            let ctx_info = ctx_window.map(|c| format!(" ({} ctx)", format_tokens(c)))
+            let ctx_info = ctx_window
+                .map(|c| format!(" ({} ctx)", format_tokens(c)))
                 .unwrap_or(" (ctx unknown)".into());
             lines.push(format!("  {name}{mark}  — {desc}{ctx_info}"));
         }
@@ -205,7 +206,10 @@ pub(crate) fn format_tokens(tokens: u64) -> String {
 }
 
 /// Provider catalog as `(id, description, context_window)` for the model picker overlay.
-pub(crate) fn model_catalog_entries(current: &str, base_url: &str) -> Vec<(String, String, Option<u64>)> {
+pub(crate) fn model_catalog_entries(
+    current: &str,
+    base_url: &str,
+) -> Vec<(String, String, Option<u64>)> {
     let provider = agent_code_lib::llm::provider::detect_provider(current, base_url);
     let static_entries: Vec<(String, String, Option<u64>)> =
         agent_code_lib::llm::provider::models_for_provider(provider)
@@ -2500,19 +2504,20 @@ impl App {
             PendingModelAction::Set { model, effort } => {
                 set_model(model.clone());
                 self.model = model.clone();
-                
+
                 // Determine context window: API > baked table > default (200k)
-                let api_ctx = entries.iter()
+                let api_ctx = entries
+                    .iter()
                     .find(|(m, _, _)| m == &model)
                     .and_then(|(_, _, ctx)| *ctx);
-                
+
                 let (ctx_window, source) = if let Some(api) = api_ctx {
                     (api, "API")
                 } else {
                     let table = context_window_for_model(&model);
                     (table, "baked-in")
                 };
-                
+
                 // Always show context window info
                 let fallback_note = if source == "baked-in" {
                     " (baked-in default; actual limit may be larger — check provider docs)"
@@ -2525,14 +2530,14 @@ impl App {
                     "⚙️  Model '{}' context window: {} tokens (from {}){}.",
                     model, ctx_window, source, fallback_note
                 )));
-                
+
                 // Warn if context window < 200k
                 if ctx_window < 200_000 {
                     self.transcript.push(TranscriptItem::System(format!(
                         "⚠️  Small context window. Consider using a larger model for better context handling."
                     )));
                 }
-                
+
                 if let Some(ref e) = effort {
                     set_effort(Some(e.clone()));
                     self.effort = Some(e.clone());
@@ -2599,7 +2604,11 @@ impl App {
     }
 
     /// Open the model picker overlay (Ctrl+M / `/model`).
-    pub fn open_model_picker(&mut self, current: &str, entries: Vec<(String, String, Option<u64>)>) {
+    pub fn open_model_picker(
+        &mut self,
+        current: &str,
+        entries: Vec<(String, String, Option<u64>)>,
+    ) {
         if self.front_modal().is_some() {
             return;
         }

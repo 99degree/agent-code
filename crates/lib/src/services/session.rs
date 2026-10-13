@@ -323,17 +323,22 @@ pub fn save_session_full(
         // choices. Keep whatever the file already stored instead of
         // blanking it — a rename must not drop the saved reasoning
         // effort / `/add-dir` set / fast-model swap / disk style.
-        let (prior_context_window, prior_effort, prior_additional_dirs, prior_pre_fast, prior_disk_style) =
-            match load_session_at(path) {
-                Ok(d) => (
-                    d.context_window,
-                    d.effort,
-                    d.additional_dirs,
-                    d.pre_fast_model,
-                    d.disk_output_style,
-                ),
-                Err(_) => (None, None, Vec::new(), None, None),
-            };
+        let (
+            prior_context_window,
+            prior_effort,
+            prior_additional_dirs,
+            prior_pre_fast,
+            prior_disk_style,
+        ) = match load_session_at(path) {
+            Ok(d) => (
+                d.context_window,
+                d.effort,
+                d.additional_dirs,
+                d.pre_fast_model,
+                d.disk_output_style,
+            ),
+            Err(_) => (None, None, Vec::new(), None, None),
+        };
 
         let data = SessionData {
             id: session_id.to_string(),
