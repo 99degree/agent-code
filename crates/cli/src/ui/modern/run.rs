@@ -1936,6 +1936,7 @@ pub(super) async fn event_loop(
                         &state.additional_dirs,
                         state.pre_fast_model.clone(),
                         state.disk_output_style.as_ref().map(|s| s.name.clone()),
+                        None, // context_window - will be derived on resume
                     );
                 }
             }
@@ -2805,6 +2806,10 @@ struct SessionSnapshot {
     pre_fast_model: Option<String>,
     /// Disk-loaded output style active at save time, by id.
     disk_output_style: Option<String>,
+    /// Context window size for the model at save time. Stored so a
+    /// resumed session uses the same context window rather than
+    /// re-deriving it.
+    context_window: Option<u64>,
 }
 
 /// Copy the live conversation out of the engine, or `None` when there is
@@ -2844,6 +2849,7 @@ fn session_snapshot(eng: &agent_code_lib::query::QueryEngine) -> Option<SessionS
         additional_dirs: st.additional_dirs.clone(),
         pre_fast_model: st.pre_fast_model.clone(),
         disk_output_style: st.disk_output_style.as_ref().map(|s| s.name.clone()),
+        context_window: None, // Will be derived from tokens service when needed
     })
 }
 
@@ -2875,6 +2881,7 @@ fn write_session_snapshot(snap: &SessionSnapshot) -> Result<(), String> {
         &snap.additional_dirs,
         snap.pre_fast_model.clone(),
         snap.disk_output_style.clone(),
+        snap.context_window,
     )
     .map(|_| ())
 }

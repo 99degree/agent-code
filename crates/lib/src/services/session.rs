@@ -141,6 +141,13 @@ pub struct SessionData {
     /// "unknown" rather than assuming the current process is safe.
     #[serde(default)]
     pub provider: Option<ProviderIdentity>,
+    /// Context window size for the model at save time. Stored so a
+    /// resumed session uses the same context window rather than
+    /// re-deriving it (which could differ if the API catalog or
+    /// baked-in table has changed). `None` means the value was not
+    /// known at save time — resume will re-derive it.
+    #[serde(default)]
+    pub context_window: Option<u64>,
 }
 
 /// Sessions directory path.
@@ -265,6 +272,7 @@ pub fn save_session(
         additional_dirs,
         pre_fast_model,
         disk_output_style,
+        None, // context_window - not tracked in thin wrapper
     )
 }
 
@@ -274,6 +282,10 @@ pub fn save_session(
 /// `Some`, it is written so a later resume can refuse to bind the
 /// conversation to a different service. When `None`, any previously
 /// stored identity is preserved (metadata-only writers like `/rename`).
+///
+/// `context_window` is the model's context window size at save time.
+/// Preserved on resume so the same context window is used rather than
+/// re-deriving it.
 #[allow(clippy::too_many_arguments)]
 pub fn save_session_full(
     session_id: &str,
@@ -294,6 +306,7 @@ pub fn save_session_full(
     additional_dirs: &[String],
     pre_fast_model: Option<String>,
     disk_output_style: Option<String>,
+    context_window: Option<u64>,
 ) -> Result<PathBuf, String> {
     with_session_lock(session_id, |path| {
         // Preserve original created_at, label, tags, and (when the caller
@@ -310,15 +323,16 @@ pub fn save_session_full(
         // choices. Keep whatever the file already stored instead of
         // blanking it — a rename must not drop the saved reasoning
         // effort / `/add-dir` set / fast-model swap / disk style.
-        let (prior_effort, prior_additional_dirs, prior_pre_fast, prior_disk_style) =
+        let (prior_context_window, prior_effort, prior_additional_dirs, prior_pre_fast, prior_disk_style) =
             match load_session_at(path) {
                 Ok(d) => (
+                    d.context_window,
                     d.effort,
                     d.additional_dirs,
                     d.pre_fast_model,
                     d.disk_output_style,
                 ),
-                Err(_) => (None, Vec::new(), None, None),
+                Err(_) => (None, None, Vec::new(), None, None),
             };
 
         let data = SessionData {
@@ -345,6 +359,7 @@ pub fn save_session_full(
             effort: effort.or(prior_effort),
             pre_fast_model: pre_fast_model.or(prior_pre_fast),
             disk_output_style: disk_output_style.or(prior_disk_style),
+            context_window: context_window.or(prior_context_window),
             label,
             tags,
             provider: provider.or(prior_provider),
@@ -1278,6 +1293,7 @@ mod tests {
             additional_dirs: Vec::new(),
             pre_fast_model: None,
             disk_output_style: None,
+            context_window: None,
         }
     }
 
@@ -1346,6 +1362,7 @@ mod tests {
             additional_dirs: Vec::new(),
             pre_fast_model: None,
             disk_output_style: None,
+            context_window: None,
         };
         let json = serde_json::to_string_pretty(&data).unwrap();
         std::fs::create_dir_all(dir.path()).unwrap();
@@ -1385,6 +1402,7 @@ mod tests {
             additional_dirs: Vec::new(),
             pre_fast_model: None,
             disk_output_style: None,
+            context_window: None,
         };
 
         let json = serde_json::to_string(&data).unwrap();
@@ -1455,6 +1473,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1504,6 +1523,7 @@ mod tests {
             additional_dirs: Vec::new(),
             pre_fast_model: None,
             disk_output_style: None,
+            context_window: None,
         };
         let out = serialize_masked(&data).unwrap();
         assert!(
@@ -1542,6 +1562,7 @@ mod tests {
             additional_dirs: Vec::new(),
             pre_fast_model: None,
             disk_output_style: None,
+            context_window: None,
         };
         let out = serialize_masked(&data).unwrap();
         assert!(!out.contains("verylongprovidersecret1234567890"));
@@ -1577,6 +1598,7 @@ mod tests {
             additional_dirs: Vec::new(),
             pre_fast_model: None,
             disk_output_style: None,
+            context_window: None,
         };
         let out = serialize_masked(&data).unwrap();
         // Must still parse back as a SessionData.
@@ -1624,6 +1646,7 @@ mod tests {
                 additional_dirs: Vec::new(),
                 pre_fast_model: None,
                 disk_output_style: None,
+                context_window: None,
             };
             let out = serialize_masked(&data).unwrap();
             let parsed: Result<SessionData, _> = serde_json::from_str(&out);
@@ -1738,6 +1761,7 @@ mod tests {
             additional_dirs: Vec::new(),
             pre_fast_model: None,
             disk_output_style: None,
+            context_window: None,
         };
         let out = serialize_masked(&data).unwrap();
         assert!(!out.contains("REDACTED"));
@@ -1769,6 +1793,7 @@ mod tests {
             additional_dirs: Vec::new(),
             pre_fast_model: None,
             disk_output_style: None,
+            context_window: None,
         };
         let json = serde_json::to_string(&data).unwrap();
         let back: SessionData = serde_json::from_str(&json).unwrap();
@@ -1869,6 +1894,7 @@ mod tests {
             additional_dirs: Vec::new(),
             pre_fast_model: None,
             disk_output_style: None,
+            context_window: None,
         };
         let json = serde_json::to_string_pretty(&data).unwrap();
         std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
@@ -2287,6 +2313,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
         )
         .expect("save");
         let loaded = load_session(id).expect("load");
@@ -2322,6 +2349,7 @@ mod tests {
             &["/work/extra".to_string()],
             Some("grok-4".to_string()),
             Some("friendly".to_string()),
+            None,
         )
         .expect("save");
 
@@ -2344,6 +2372,7 @@ mod tests {
             "",
             None,
             &[],
+            None,
             None,
             None,
         )

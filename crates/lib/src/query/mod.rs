@@ -4725,6 +4725,7 @@ mod tests {
                 .disk_output_style
                 .as_ref()
                 .map(|s| s.name.clone()),
+            None, // context_window - will be derived on resume
         )
         .unwrap();
 

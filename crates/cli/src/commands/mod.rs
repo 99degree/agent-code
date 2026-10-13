@@ -44,19 +44,22 @@ type ModelCache = LazyLock<Mutex<HashMap<(ProviderKind, String), Vec<(String, St
 static MODEL_CACHE: ModelCache = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Merge static curated entries (whose descriptions win) with the live catalog.
-/// Live models that shadow a static id keep the curated description; new live
-/// ids are appended. Context window from live catalog is preserved.
+/// Live models that shadow a static id keep the curated description but use
+/// the live context window when available; new live ids are appended.
 pub(crate) fn merge_models(
-    static_list: &[(String, String)],
+    static_list: &[(String, String, Option<u64>)],
     live: &[(String, String, Option<u64>)],
 ) -> Vec<(String, String, Option<u64>)> {
-    let mut out: Vec<(String, String, Option<u64>)> = static_list
-        .iter()
-        .map(|(m, d)| (m.clone(), d.clone(), None))
-        .collect();
+    let mut out: Vec<(String, String, Option<u64>)> = static_list.to_vec();
     let known: HashSet<String> = out.iter().map(|(m, _, _)| m.clone()).collect();
     for (m, d, ctx) in live {
         if known.contains(m) {
+            // Update context window for existing models if live provides one
+            if ctx.is_some() {
+                if let Some(entry) = out.iter_mut().find(|(id, _, _)| id == m) {
+                    entry.2 = *ctx;
+                }
+            }
             continue;
         }
         out.push((m.clone(), d.clone(), *ctx));
@@ -86,10 +89,10 @@ pub fn fetch_model_entries(engine: &QueryEngine, kind: ProviderKind) -> Vec<(Str
     if let Some(cached) = MODEL_CACHE.lock().unwrap().get(&cache_key) {
         return cached.clone();
     }
-    let static_list: Vec<(String, String)> =
+    let static_list: Vec<(String, String, Option<u64>)> =
         agent_code_lib::llm::provider::models_for_provider(kind)
             .iter()
-            .map(|(m, d)| (m.to_string(), d.to_string()))
+            .map(|(m, d)| (m.to_string(), d.to_string(), None))
             .collect();
     let mut merged = merge_models(&static_list, &[]);
     if provider_wants_live(kind, &engine.state().config) {
@@ -2704,6 +2707,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 &state.additional_dirs,
                 state.pre_fast_model.clone(),
                 state.disk_output_style.as_ref().map(|s| s.name.clone()),
+                    None, // context_window - will be derived on resume
             ) {
                 Ok(_) => {
                     println!("Forked conversation at message {msg_count} -> session {fork_id}",);
@@ -7367,10 +7371,12 @@ mod tests {
             (
                 "anthropic:claude-3-5-sonnet".to_string(),
                 "Claude 3.5 Sonnet".to_string(),
+                None,
             ),
             (
                 "anthropic:claude-3-7-sonnet".to_string(),
                 "Claude 3.7 Sonnet".to_string(),
+                None,
             ),
         ];
         let live_list = vec![

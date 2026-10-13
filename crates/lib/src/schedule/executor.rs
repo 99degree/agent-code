@@ -170,6 +170,7 @@ impl ScheduleExecutor {
             &state.additional_dirs,
             state.pre_fast_model.clone(),
             state.disk_output_style.as_ref().map(|s| s.name.clone()),
+            None, // context_window - will be derived on resume
         );
 
         // Truncate summary.

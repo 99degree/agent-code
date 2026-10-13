@@ -483,6 +483,7 @@ fn import_pi_session(pi_path: &Path) -> Result<String, String> {
         additional_dirs: Vec::new(),
         pre_fast_model: None,
         disk_output_style: None,
+        context_window: None,
     };
 
     let json = serde_json::to_string_pretty(&session)

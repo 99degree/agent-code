@@ -207,10 +207,20 @@ pub(crate) fn format_tokens(tokens: u64) -> String {
 /// Provider catalog as `(id, description, context_window)` for the model picker overlay.
 pub(crate) fn model_catalog_entries(current: &str, base_url: &str) -> Vec<(String, String, Option<u64>)> {
     let provider = agent_code_lib::llm::provider::detect_provider(current, base_url);
-    let static_entries: Vec<(String, String)> =
+    let static_entries: Vec<(String, String, Option<u64>)> =
         agent_code_lib::llm::provider::models_for_provider(provider)
             .iter()
-            .map(|(n, d)| ((*n).to_string(), (*d).to_string()))
+            .map(|(n, d)| {
+                let name = (*n).to_string();
+                let desc = (*d).to_string();
+                // Use baked-in table for context window if available
+                let bare = name.rsplit('/').next().unwrap_or(&name).to_lowercase();
+                let baked_ctx = agent_code_lib::services::tokens::MODEL_CONTEXT_WINDOWS
+                    .iter()
+                    .find(|(id, _)| *id == bare)
+                    .map(|(_, w)| *w);
+                (name, desc, baked_ctx)
+            })
             .collect();
     // Merge live models for the exact current base URL so the picker
     // reflects the configured endpoint, not just the default URL for this
@@ -2499,18 +2509,23 @@ impl App {
                     (table, "baked-in")
                 };
                 
+                // Always show context window info
+                let fallback_note = if source == "baked-in" {
+                    " (baked-in default; actual limit may be larger — check provider docs)"
+                } else if source == "default" {
+                    " (default fallback; actual limit may be larger — check provider docs)"
+                } else {
+                    ""
+                };
+                self.transcript.push(TranscriptItem::System(format!(
+                    "⚙️  Model '{}' context window: {} tokens (from {}){}.",
+                    model, ctx_window, source, fallback_note
+                )));
+                
                 // Warn if context window < 200k
                 if ctx_window < 200_000 {
-                    let fallback_note = if source == "baked-in" {
-                        " (baked-in default; actual limit may be larger — check provider docs)"
-                    } else if source == "default" {
-                        " (default fallback; actual limit may be larger — check provider docs)"
-                    } else {
-                        ""
-                    };
                     self.transcript.push(TranscriptItem::System(format!(
-                        "⚠️  Model '{}' has a small context window ({} tokens, from {}).{}. Consider using a larger model for better context handling.",
-                        model, ctx_window, source, fallback_note
+                        "⚠️  Small context window. Consider using a larger model for better context handling."
                     )));
                 }
                 
