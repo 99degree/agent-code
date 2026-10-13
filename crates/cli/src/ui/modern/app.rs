@@ -148,7 +148,9 @@ pub(crate) fn parse_provider_slash(input: &str) -> Option<PendingProviderAction>
         Some((c, a)) => (c, Some(a.trim())),
         None => (rest, None),
     };
-    let alias_cmds = ["provider", "p", "nvidia", "kilo", "opencode", "openrouter"];
+    let alias_cmds = [
+        "provider", "p", "nvidia", "kilo", "poolside", "opencode", "openrouter",
+    ];
     if !alias_cmds.iter().any(|a| cmd.eq_ignore_ascii_case(a)) {
         return None;
     }
