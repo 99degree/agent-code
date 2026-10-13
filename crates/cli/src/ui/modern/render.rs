@@ -622,7 +622,7 @@ fn draw_model_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
             };
             let cur = if *id == p.current { " ✔" } else { "" };
             let ctx_info = ctx.map(|c| format!(" ({})", format_tokens(c)))
-                .unwrap_or(" (ctx ?)".into());
+                .unwrap_or_default();
             lines.push(Line::from(vec![
                 Span::styled(format!("{marker} {id}{cur}{ctx_info}  "), style),
                 Span::styled((*desc).to_string(), Style::default().fg(palette().muted)),
