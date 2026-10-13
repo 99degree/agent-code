@@ -597,6 +597,9 @@ pub struct App {
     pub command_palette: Option<super::palette::CommandPalette>,
     /// Ctrl+M / `/model` in-TUI model picker.
     pub model_picker: Option<super::model_picker::ModelPicker>,
+    /// Context window size for the current model. Used for compaction
+    /// triggers and UI display. Restored from session or derived on resume.
+    pub context_window: Option<u64>,
     /// Ctrl+/ / `/provider` in-TUI provider picker.
     pub provider_picker: Option<super::provider_picker::ProviderPicker>,
     /// `/resume` in-TUI session picker.
@@ -1090,6 +1093,7 @@ impl App {
             pending_task_output: None,
             command_palette: None,
             model_picker: None,
+            context_window: None,
             provider_picker: None,
             session_picker: None,
             resume: Default::default(),

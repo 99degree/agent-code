@@ -106,3 +106,61 @@ All tests pass (62 passed, 0 failed)
 1. `fix(ui): limit background tasks to 3 most recent in tasks pane`
 2. `feat(cli): add /tasks pane command to toggle tasks pane visibility`
 3. `feat(ui): warn when selecting model with context window < 200K`
+
+## Compaction 2026-10-13T07:24:07.214253240+00:00
+
+## Goal
+Implement robust context window handling with API priority (API > baked-in table > default 200k), add context window warnings for small models, fix task pane sizing, improve model picker functionality, and ensure session save/restore preserves context window size.
+
+## Constraints
+- Context window warning triggers when < 200k tokens
+- Default context window raised from 128k to 200k
+- API-provided context window takes highest priority
+- Task pane shows limited background tasks (3 most recent) but always shows selected task
+- Model picker displays context window with source indicator
+- Session save/restore must store and restore context window size
+- All tests must pass
+
+## Progress
+- Implemented three-tier context window detection: API > baked-in table > default (200k)
+- Raised default context window from 128k to 200k in tokens.rs
+- Added GLM 5.1/5.2/5.3 (1M) and deepseek-v4.1 models (1M) to baked-in table
+- Enhanced session save/restore to include context_window field in SessionData
+- Fixed task pane sizing to show 3 most recent background tasks + selected task
+- Updated model picker to show context window information with source
+- Modified all provider fetch_models methods to return (id, description, context_window)
+- Fixed compilation errors and test failures throughout implementation
+- All tests now pass (smoke, output_format, config_cli, security_scan, schedule)
+
+## Decisions
+- Chose three-tier priority system: API context window > baked-in MODEL_CONTEXT_WINDOWS > default 200k fallback
+- Raised default to 200k to better match modern model capabilities and reduce premature compaction
+- Added specific context window entries for known large-context models (GLM 5.x series, deepseek-v4.1)
+- Session save/restore stores context_window to preserve exact value across sessions, falling back to re-derivation if unavailable
+- Background tasks limited to 3 most recent by task sequence; agent tasks always shown; selected task always shown regardless of source
+- Model picker shows context window with clear source indicator (API/baked-in/default) and format (e.g., "1.0M")
+- Warning messages clearly indicate when context window is from API, baked-in table, or default fallback
+
+## Next steps
+- No concrete remaining work; implementation appears complete based on passing tests and implemented features
+- Verify session save/restore context window persistence through manual testing if needed
+- Monitor for any edge cases in context window detection from API responses
+
+## Files
+- crates/lib/src/services/tokens.rs: Context window detection logic, default raised to 200k, added GLM/deepseek model entries
+- crates/cli/src/ui/modern/app.rs: Enhanced apply_model_action with context window warnings and source tracking
+- crates/lib/src/services/session.rs: Added context_window field to SessionData and save/restore logic
+- crates/cli/src/commands/mod.rs: Updated model fetching, merging, and cache logic to handle context windows
+- crates/cli/src/ui/modern/model_picker.rs: Updated to show context window information in picker
+- crates/cli/src/ui/modern/render.rs: Fixed task pane sizing and updated model picker rendering
+- crates/lib/src/llm/provider.rs: Updated fetch_models signature to return (id, description, context_window)
+- crates/lib/src/llm/openai.rs: Updated fetch_models to return context window from API
+- crates/lib/src/llm/azure_openai.rs: Updated fetch_models to return context window from API
+- crates/lib/src/llm/opencode.rs: Delegated fetch_messages to OpenAI provider
+- crates/lib/src/llm/kilo.rs: Delegated fetch_messages to OpenAI provider
+- crates/lib/src/llm/novita.rs: Delegated fetch_messages to OpenAI provider
+- crates/lib/src/llm/requesty.rs: Delegated fetch_messages to OpenAI provider
+- crates/lib/src/llm/anthropic.rs: Returns empty list for fetch_models (no public endpoint)
+- crates/lib/tests/debug_response_test.rs: Updated MockProvider to match new fetch_models signature
+- crates/cli/src/ui/modern/run.rs: Added context_window to SessionSnapshot and session handling
+- crates/cli/src/commands/import_pi.rs: Updated session creation to include context_window field

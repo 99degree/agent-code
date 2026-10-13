@@ -144,6 +144,9 @@ pub struct AppState {
     /// alternative. `Some` ⇔ currently in fast mode. Restored on the
     /// next `/fast` toggle. Session-local — not persisted.
     pub pre_fast_model: Option<String>,
+    /// Context window size for the current model. Used for compaction
+    /// and UI display. Updated on model change and restored from session.
+    pub context_window: Option<u64>,
 }
 
 impl AppState {
@@ -177,6 +180,7 @@ impl AppState {
             response_style: ResponseStyle::default(),
             disk_output_style: None,
             pre_fast_model: None,
+            context_window: None,
         }
     }
 

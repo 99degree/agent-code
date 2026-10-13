@@ -1668,6 +1668,23 @@ pub(super) async fn event_loop(
                             if !data.model.is_empty() {
                                 st.config.api.model = data.model.clone();
                             }
+                            // Restore context window from session if available.
+                            // If not saved in session (older sessions), derive it from
+                            // the model using the tokens service (same logic as /model).
+                            if let Some(ctx) = data.context_window {
+                                // Use the saved context window
+                                st.context_window = Some(ctx);
+                            } else {
+                                // Derive from model using the same three-tier logic
+                                // but without fetching from API (since we're offline during restore)
+                                let derived = agent_code_lib::services::tokens::context_window_for_model(&data.model);
+                                st.context_window = Some(derived);
+                                // Notify user that context window was derived
+                                app.transcript.push(super::app::TranscriptItem::System(format!(
+                                    "ℹ️  Resumed session model '{}' context window derived ({} tokens). If incorrect, run /model to re-select.",
+                                    data.model, derived
+                                )));
+                            }
                             // Restore per-session presentation state saved
                             // with the conversation.
                             st.brief_mode = data.brief_mode;
