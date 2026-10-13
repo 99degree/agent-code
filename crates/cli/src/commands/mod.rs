@@ -39,31 +39,34 @@ pub enum CommandResult {
 /// Per-provider and per-base-URL cache of the merged (static + live) model list
 /// fetched from the API. Populated lazily on first `/model` and reused for the
 /// session.
-type ModelCache = LazyLock<Mutex<HashMap<(ProviderKind, String), Vec<(String, String)>>>>;
+type ModelCache = LazyLock<Mutex<HashMap<(ProviderKind, String), Vec<(String, String, Option<u64>)>>>>;
 
 static MODEL_CACHE: ModelCache = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Merge static curated entries (whose descriptions win) with the live catalog.
 /// Live models that shadow a static id keep the curated description; new live
-/// ids are appended.
+/// ids are appended. Context window from live catalog is preserved.
 pub(crate) fn merge_models(
     static_list: &[(String, String)],
-    live: &[(String, String)],
-) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = static_list.to_vec();
-    let known: HashSet<String> = out.iter().map(|(m, _)| m.clone()).collect();
-    for (m, d) in live {
+    live: &[(String, String, Option<u64>)],
+) -> Vec<(String, String, Option<u64>)> {
+    let mut out: Vec<(String, String, Option<u64>)> = static_list
+        .iter()
+        .map(|(m, d)| (m.clone(), d.clone(), None))
+        .collect();
+    let known: HashSet<String> = out.iter().map(|(m, _, _)| m.clone()).collect();
+    for (m, d, ctx) in live {
         if known.contains(m) {
             continue;
         }
-        out.push((m.clone(), d.clone()));
+        out.push((m.clone(), d.clone(), *ctx));
     }
     out
 }
 
 /// Read the model cache without mutating it.
 pub(crate) fn model_cache_read()
--> std::sync::MutexGuard<'static, HashMap<(ProviderKind, String), Vec<(String, String)>>> {
+-> std::sync::MutexGuard<'static, HashMap<(ProviderKind, String), Vec<(String, String, Option<u64>)>>> {
     MODEL_CACHE.lock().unwrap()
 }
 
@@ -77,7 +80,7 @@ fn provider_wants_live(kind: ProviderKind, cfg: &agent_code_lib::config::Config)
 /// Merged (static + live) model list for a provider+base_url, blocking on the API call.
 /// `execute()` runs inside the TUI's multi-threaded tokio runtime, so
 /// `block_in_place` + `Handle::current().block_on` is valid here.
-pub fn fetch_model_entries(engine: &QueryEngine, kind: ProviderKind) -> Vec<(String, String)> {
+pub fn fetch_model_entries(engine: &QueryEngine, kind: ProviderKind) -> Vec<(String, String, Option<u64>)> {
     let base_url = engine.state().config.api.base_url.clone();
     let cache_key = (kind, base_url.clone());
     if let Some(cached) = MODEL_CACHE.lock().unwrap().get(&cache_key) {
@@ -1465,7 +1468,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                     if models.is_empty() {
                         continue;
                     }
-                    for (name, desc) in models {
+                    for (name, desc, _ctx) in models {
                         all_models.push((name, desc, kind));
                     }
                 }
@@ -7374,10 +7377,12 @@ mod tests {
             (
                 "anthropic:claude-3-7-sonnet".to_string(),
                 "claude-3-7-sonnet".to_string(),
+                None,
             ),
             (
                 "anthropic:claude-3-8-sonnet".to_string(),
                 "claude-3-8-sonnet".to_string(),
+                None,
             ),
         ];
         let merged = merge_models(&static_list, &live_list);
@@ -7386,7 +7391,8 @@ mod tests {
             merged[0],
             (
                 "anthropic:claude-3-5-sonnet".to_string(),
-                "Claude 3.5 Sonnet".to_string()
+                "Claude 3.5 Sonnet".to_string(),
+                None
             )
         );
         // Static description wins when a model id overlaps the live list.
@@ -7394,7 +7400,8 @@ mod tests {
             merged[1],
             (
                 "anthropic:claude-3-7-sonnet".to_string(),
-                "Claude 3.7 Sonnet".to_string()
+                "Claude 3.7 Sonnet".to_string(),
+                None
             )
         );
         // Pure-live entries are appended.
@@ -7402,7 +7409,8 @@ mod tests {
             merged[2],
             (
                 "anthropic:claude-3-8-sonnet".to_string(),
-                "claude-3-8-sonnet".to_string()
+                "claude-3-8-sonnet".to_string(),
+                None
             )
         );
     }

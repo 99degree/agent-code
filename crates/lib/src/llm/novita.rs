@@ -51,7 +51,7 @@ impl Provider for NovitaProvider {
         openai_provider.stream(request).await
     }
 
-    async fn fetch_models(&self) -> Result<Vec<(String, String)>, ProviderError> {
+    async fn fetch_models(&self) -> Result<Vec<(String, String, Option<u64>)>, ProviderError> {
         let openai_provider = super::openai::OpenAiProvider::new(self.base_url(), self.api_key());
         openai_provider.fetch_models().await
     }

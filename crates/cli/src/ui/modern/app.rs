@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use agent_code_lib::services::notifier::NotificationKind;
-use agent_code_lib::services::tokens::{context_window_for_model, MODEL_CONTEXT_WINDOWS};
+use agent_code_lib::services::tokens::context_window_for_model;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -184,16 +184,28 @@ pub(crate) fn format_model_catalog(current: &str, base_url: &str) -> Vec<String>
         lines.push("Use /model <name> to change · Ctrl+M opens the picker.".into());
     } else {
         lines.push("Available models (↑/↓ · Enter · Ctrl+M picker · /model <id> [effort]):".into());
-        for (name, desc) in entries {
+        for (name, desc, ctx_window) in entries {
             let mark = if name == current { " ✔" } else { "" };
-            lines.push(format!("  {name}{mark}  — {desc}"));
+            let ctx_info = ctx_window.map(|c| format!(" ({} ctx)", format_tokens(c)))
+                .unwrap_or(" (ctx unknown)".into());
+            lines.push(format!("  {name}{mark}  — {desc}{ctx_info}"));
         }
     }
     lines
 }
 
-/// Provider catalog as `(id, description)` for the model picker overlay.
-pub(crate) fn model_catalog_entries(current: &str, base_url: &str) -> Vec<(String, String)> {
+pub(crate) fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}K", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// Provider catalog as `(id, description, context_window)` for the model picker overlay.
+pub(crate) fn model_catalog_entries(current: &str, base_url: &str) -> Vec<(String, String, Option<u64>)> {
     let provider = agent_code_lib::llm::provider::detect_provider(current, base_url);
     let static_entries: Vec<(String, String)> =
         agent_code_lib::llm::provider::models_for_provider(provider)
@@ -204,7 +216,7 @@ pub(crate) fn model_catalog_entries(current: &str, base_url: &str) -> Vec<(Strin
     // reflects the configured endpoint, not just the default URL for this
     // provider kind (e.g. a custom opencode.ai URL).
     let engine_api_base_url = base_url;
-    let cached_live: Vec<(String, String)> = {
+    let cached_live: Vec<(String, String, Option<u64>)> = {
         let cache = crate::commands::model_cache_read();
         cache
             .get(&(provider, engine_api_base_url.to_string()))
@@ -2457,7 +2469,7 @@ impl App {
         action: PendingModelAction,
         current_model: &str,
         base_url: &str,
-        entries: Vec<(String, String)>,
+        entries: Vec<(String, String, Option<u64>)>,
         set_model: impl FnOnce(String),
         set_effort: impl FnOnce(Option<String>),
     ) {
@@ -2475,21 +2487,30 @@ impl App {
                 set_model(model.clone());
                 self.model = model.clone();
                 
-                // Show context window warning if < 200k
-                let ctx_window = context_window_for_model(&model);
+                // Determine context window: API > baked table > default (200k)
+                let api_ctx = entries.iter()
+                    .find(|(m, _, _)| m == &model)
+                    .and_then(|(_, _, ctx)| *ctx);
+                
+                let (ctx_window, source) = if let Some(api) = api_ctx {
+                    (api, "API")
+                } else {
+                    let table = context_window_for_model(&model);
+                    (table, "baked-in")
+                };
+                
+                // Warn if context window < 200k
                 if ctx_window < 200_000 {
-                    let is_known = MODEL_CONTEXT_WINDOWS.iter().any(|(id, _)| {
-                        let bare = model.rsplit('/').next().unwrap_or(&model).to_lowercase();
-                        *id == model.to_lowercase() || *id == bare
-                    });
-                    let fallback_note = if is_known {
-                        ""
-                    } else {
+                    let fallback_note = if source == "baked-in" {
+                        " (baked-in default; actual limit may be larger — check provider docs)"
+                    } else if source == "default" {
                         " (default fallback; actual limit may be larger — check provider docs)"
+                    } else {
+                        ""
                     };
                     self.transcript.push(TranscriptItem::System(format!(
-                        "⚠️  Model '{}' has a small context window ({} tokens).{}. Consider using a larger model for better context handling.",
-                        model, ctx_window, fallback_note
+                        "⚠️  Model '{}' has a small context window ({} tokens, from {}).{}. Consider using a larger model for better context handling.",
+                        model, ctx_window, source, fallback_note
                     )));
                 }
                 
@@ -2559,7 +2580,7 @@ impl App {
     }
 
     /// Open the model picker overlay (Ctrl+M / `/model`).
-    pub fn open_model_picker(&mut self, current: &str, entries: Vec<(String, String)>) {
+    pub fn open_model_picker(&mut self, current: &str, entries: Vec<(String, String, Option<u64>)>) {
         if self.front_modal().is_some() {
             return;
         }
@@ -2568,7 +2589,7 @@ impl App {
         self.show_shortcuts = false;
         let selected = entries
             .iter()
-            .position(|(id, _)| id == current)
+            .position(|(id, _, _)| id == current)
             .unwrap_or(0);
         self.model_picker = Some(super::model_picker::ModelPicker {
             query: String::new(),

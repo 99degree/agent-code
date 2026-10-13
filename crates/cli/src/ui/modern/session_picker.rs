@@ -1945,7 +1945,7 @@ mod tests {
         assert!(app.session_picker_would_displace_an_overlay());
         app.show_shortcuts = false;
 
-        app.open_model_picker("m", vec![("m".into(), "reason".into())]);
+        app.open_model_picker("m", vec![("m".into(), "reason".into(), None)]);
         assert!(
             app.session_picker_would_displace_an_overlay(),
             "the model picker is routed after the session picker, so it \

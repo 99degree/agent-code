@@ -13,7 +13,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::anim::{blink_visible, pulse_style, spinner_glyph, toast_style};
-use super::app::{App, PendingPermission, Phase};
+use super::app::{App, PendingPermission, Phase, format_tokens};
 use super::colors::palette;
 use super::mode::SessionMode;
 use crate::ui::text_safety::escape_deceptive;
@@ -547,7 +547,7 @@ fn draw_model_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let filtered = p.filtered();
         let model = filtered
             .get(p.selected)
-            .map(|(_, id, _)| *id)
+            .map(|(_, id, _, _)| *id)
             .unwrap_or(p.current.as_str());
         lines.push(Line::from(Span::styled(
             format!("effort for {model}"),
@@ -610,7 +610,7 @@ fn draw_model_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let start = p.top.clamp(0, filtered.len().saturating_sub(1));
         let end = (start + MAX_ROWS).min(filtered.len());
         // Window starts at p.top, clamped so selection is always visible.
-        for (i, (_, id, desc)) in filtered.iter().enumerate().take(end).skip(start) {
+        for (i, (_, id, desc, ctx)) in filtered.iter().enumerate().take(end).skip(start) {
             let is_sel = i == p.selected;
             let marker = if is_sel { "❯" } else { " " };
             let style = if is_sel {
@@ -621,8 +621,10 @@ fn draw_model_picker(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Style::default().fg(palette().inactive)
             };
             let cur = if *id == p.current { " ✔" } else { "" };
+            let ctx_info = ctx.map(|c| format!(" ({})", format_tokens(c)))
+                .unwrap_or(" (ctx ?)".into());
             lines.push(Line::from(vec![
-                Span::styled(format!("{marker} {id}{cur}  "), style),
+                Span::styled(format!("{marker} {id}{cur}{ctx_info}  "), style),
                 Span::styled((*desc).to_string(), Style::default().fg(palette().muted)),
             ]));
         }

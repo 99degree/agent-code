@@ -16,8 +16,8 @@ pub struct ModelPicker {
     /// First visible row in the filtered list (scroll offset). Keeps the
     /// selection cursor visible when the list exceeds the terminal height.
     pub top: usize,
-    /// Full catalog: (id, description).
-    pub entries: Vec<(String, String)>,
+    /// Full catalog: (id, description, context_window).
+    pub entries: Vec<(String, String, Option<u64>)>,
     /// Model active when the picker opened.
     pub current: String,
     /// When true, the list shows effort levels for the highlighted model.
@@ -28,18 +28,18 @@ pub struct ModelPicker {
 
 impl ModelPicker {
     /// Filtered model rows matching `query`.
-    pub fn filtered(&self) -> Vec<(usize, &str, &str)> {
+    pub fn filtered(&self) -> Vec<(usize, &str, &str, Option<u64>)> {
         let q = self.query.to_ascii_lowercase();
         self.entries
             .iter()
             .enumerate()
-            .filter(|(_, (id, desc))| {
+            .filter(|(_, (id, desc, _))| {
                 if q.is_empty() {
                     return true;
                 }
                 id.to_ascii_lowercase().contains(&q) || desc.to_ascii_lowercase().contains(&q)
             })
-            .map(|(i, (id, desc))| (i, id.as_str(), desc.as_str()))
+            .map(|(i, (id, desc, ctx))| (i, id.as_str(), desc.as_str(), *ctx))
             .collect()
     }
 }
@@ -145,7 +145,7 @@ impl App {
             return;
         };
         let filtered = p.filtered();
-        let Some((_, id, _)) = filtered.get(p.selected).copied() else {
+        let Some((_, id, _, _)) = filtered.get(p.selected).copied() else {
             self.close_model_picker();
             return;
         };

@@ -146,8 +146,9 @@ pub const MODEL_CONTEXT_WINDOWS: &[(&str, u64)] = &[
     ("gpt-oss-120b", 131_072),
     ("gpt-oss-20b", 131_072),
     // Zhipu / GLM
-    ("glm-5.2", 1_000_000),
     ("glm-5.3", 1_000_000),
+    ("glm-5.2", 1_000_000),
+    ("glm-5.1", 1_000_000),
     ("glm-5-turbo", 200_000),
     ("glm-5.2-highspeed", 1_000_000),
     ("glm-4.7", 204_800),
@@ -259,6 +260,9 @@ pub fn context_window_for_model(model: &str) -> u64 {
     } else if lower.contains("nemotron") {
         // NVIDIA Nemotron `-free` variants expose a 1M context window;
         // treat the family as 1M to avoid premature compaction.
+        1_000_000
+    } else if lower.contains("glm-5") || lower.contains("glm-4.7") || lower.contains("glm-4.6") {
+        // Zhipu GLM 5.x and 4.6+ have large context windows (1M for 5.x, 200K+ for 4.6+)
         1_000_000
     } else if lower.contains("gpt-5") {
         400_000
@@ -491,8 +495,8 @@ mod tests {
 
     #[test]
     fn test_context_window_for_unknown_model() {
-        // Unknown models default to 128K.
-        assert_eq!(context_window_for_model("some-unknown-model"), 128_000);
+        // Unknown models default to 200K.
+        assert_eq!(context_window_for_model("some-unknown-model"), 200_000);
     }
 
     #[test]
@@ -528,9 +532,9 @@ mod tests {
         assert_eq!(context_window_for_model("grok-4.5"), 500_000);
         assert_eq!(context_window_for_model("mistral-large-latest"), 262_144);
         // Provider prefix is stripped for the lookup.
-        assert_eq!(context_window_for_model("openrouter/auto"), 128_000);
-        // Unknown models still default to 128K.
-        assert_eq!(context_window_for_model("some-unknown-model"), 128_000);
+        assert_eq!(context_window_for_model("openrouter/auto"), 200_000);
+        // Unknown models still default to 200K.
+        assert_eq!(context_window_for_model("some-unknown-model"), 200_000);
     }
 
     #[test]

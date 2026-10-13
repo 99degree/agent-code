@@ -30,7 +30,7 @@ impl Provider for MockProvider {
         Ok(rx)
     }
 
-    async fn fetch_models(&self) -> Result<Vec<(String, String)>, ProviderError> {
+    async fn fetch_models(&self) -> Result<Vec<(String, String, Option<u64>)>, ProviderError> {
         Ok(vec![])
     }
 }

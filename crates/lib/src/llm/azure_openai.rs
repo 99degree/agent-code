@@ -479,7 +479,7 @@ impl Provider for AzureOpenAiProvider {
 
     /// Fetch the list of available models from the Azure OpenAI service.
     /// Azure OpenAI provides a models endpoint similar to OpenAI: {base_url}/models?api-version={api_version}
-    async fn fetch_models(&self) -> Result<Vec<(String, String)>, ProviderError> {
+    async fn fetch_models(&self) -> Result<Vec<(String, String, Option<u64>)>, ProviderError> {
         // Construct the models endpoint URL
         let url = format!("{}/models?api-version={}", self.base_url, self.api_version);
 
@@ -535,7 +535,10 @@ impl Provider for AzureOpenAiProvider {
         if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
             for model in data {
                 if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
-                    models.push((id.to_string(), id.to_string()));
+                    let context_window = model.get("context_window")
+                        .and_then(|v| v.as_u64())
+                        .or_else(|| model.get("max_context_length").and_then(|v| v.as_u64()));
+                    models.push((id.to_string(), id.to_string(), context_window));
                 }
             }
         }

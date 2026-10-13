@@ -31,9 +31,10 @@ pub trait Provider: Send + Sync {
     ) -> Result<mpsc::Receiver<StreamEvent>, ProviderError>;
 
     /// Fetch the list of available models from the provider.
-    /// Returns a vector of (model_id, description) pairs.
+    /// Returns a vector of (model_id, description, context_window) triples.
     /// The default implementation returns an empty list.
-    async fn fetch_models(&self) -> Result<Vec<(String, String)>, ProviderError> {
+    /// context_window is None if the provider doesn't provide it.
+    async fn fetch_models(&self) -> Result<Vec<(String, String, Option<u64>)>, ProviderError> {
         Ok(vec![])
     }
 }

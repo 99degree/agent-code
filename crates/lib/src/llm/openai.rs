@@ -550,7 +550,7 @@ impl Provider for OpenAiProvider {
         }
     }
 
-    async fn fetch_models(&self) -> Result<Vec<(String, String)>, ProviderError> {
+    async fn fetch_models(&self) -> Result<Vec<(String, String, Option<u64>)>, ProviderError> {
         let url = format!("{}/models", self.base_url);
         let mut headers = self.auth_headers().await?;
         headers.extend(identity::headers());
@@ -587,7 +587,11 @@ impl Provider for OpenAiProvider {
         if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
             for model in data {
                 if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
-                    models.push((id.to_string(), id.to_string()));
+                    // Check for context_window field in the model info
+                    let context_window = model.get("context_window")
+                        .and_then(|v| v.as_u64())
+                        .or_else(|| model.get("max_context_length").and_then(|v| v.as_u64()));
+                    models.push((id.to_string(), id.to_string(), context_window));
                 }
             }
         }
