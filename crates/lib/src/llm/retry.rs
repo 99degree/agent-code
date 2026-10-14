@@ -129,14 +129,14 @@ impl RetryState {
                 // Check for high-priority failover on 429 errors.
                 // This triggers immediate failover without backoff for providers
                 // with persistent rate limits (e.g., free-tier OpenRouter, OpenCode).
-                if !using_failover {
-                    if let Some(target) = find_high_priority_failover(
+                if !using_failover
+                    && let Some(target) = find_high_priority_failover(
                         current_provider,
                         current_model,
                         failover_mapping,
-                    ) {
-                        return RetryAction::Failover { target };
-                    }
+                    )
+                {
+                    return RetryAction::Failover { target };
                 }
 
                 // Determine if we should abort due to long wait.

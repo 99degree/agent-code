@@ -5,17 +5,12 @@ use serde::{Deserialize, Serialize};
 /// Priority level for failover targets.
 /// - `High`: Immediate failover on 429 rate limit errors.
 /// - `Low`: Normal retry with backoff (existing behavior for other errors).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FailoverPriority {
     High,
+    #[default]
     Low,
-}
-
-impl Default for FailoverPriority {
-    fn default() -> Self {
-        FailoverPriority::Low
-    }
 }
 
 /// Configuration for a failover target with priority.
@@ -24,7 +19,7 @@ impl Default for FailoverPriority {
 pub struct FailoverTargetConfig {
     /// Target provider name (e.g., "kilo", "nvidia").
     pub provider: String,
-    /// Target model hint (e.g., "tencent/hy3:free", "nemotron-3-ultra").
+    /// Target model hint (e.g., "tencent/hy3:free", "glm-5").
     pub model: String,
     /// Priority of this failover target.
     pub priority: FailoverPriority,
@@ -172,7 +167,7 @@ impl Default for Config {
             "nim".to_string(),
             FailoverTargetConfig {
                 provider: "nvidia".to_string(),
-                model: "nemotron-3-ultra".to_string(),
+                model: "glm-5".to_string(),
                 priority: FailoverPriority::High,
             },
         );
@@ -180,7 +175,7 @@ impl Default for Config {
             "nim/*".to_string(),
             FailoverTargetConfig {
                 provider: "nvidia".to_string(),
-                model: "nemotron-3-ultra".to_string(),
+                model: "glm-5".to_string(),
                 priority: FailoverPriority::High,
             },
         );
@@ -188,7 +183,7 @@ impl Default for Config {
             "nvidia".to_string(),
             FailoverTargetConfig {
                 provider: "nim".to_string(),
-                model: "nemotron-3-ultra".to_string(),
+                model: "deepseek-v4".to_string(),
                 priority: FailoverPriority::High,
             },
         );
@@ -196,7 +191,7 @@ impl Default for Config {
             "nvidia/*".to_string(),
             FailoverTargetConfig {
                 provider: "nim".to_string(),
-                model: "nemotron-3-ultra".to_string(),
+                model: "deepseek-v4".to_string(),
                 priority: FailoverPriority::High,
             },
         );
