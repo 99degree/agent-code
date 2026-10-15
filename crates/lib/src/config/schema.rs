@@ -183,7 +183,7 @@ impl Default for Config {
             "nvidia".to_string(),
             FailoverTargetConfig {
                 provider: "nim".to_string(),
-                model: "deepseek-v4".to_string(),
+                model: "deepseek-v4.1-flash".to_string(),
                 priority: FailoverPriority::High,
             },
         );
@@ -191,7 +191,25 @@ impl Default for Config {
             "nvidia/*".to_string(),
             FailoverTargetConfig {
                 provider: "nim".to_string(),
-                model: "deepseek-v4".to_string(),
+                model: "deepseek-v4.1-flash".to_string(),
+                priority: FailoverPriority::High,
+            },
+        );
+        // nvidia provider, model kimi-k3 -> nim provider deepseek-ai/deepseek-v4.1-flash
+        failover_mapping.insert(
+            "nvidia/moonshotai/kimi-k3".to_string(),
+            FailoverTargetConfig {
+                provider: "nim".to_string(),
+                model: "deepseek-ai/deepseek-v4.1-flash".to_string(),
+                priority: FailoverPriority::High,
+            },
+        );
+        // nim provider, model kimi-k3 -> nvidia provider deepseek-ai/deepseek-v4.1-flash
+        failover_mapping.insert(
+            "nim/moonshotai/kimi-k3".to_string(),
+            FailoverTargetConfig {
+                provider: "nvidia".to_string(),
+                model: "deepseek-ai/deepseek-v4.1-flash".to_string(),
                 priority: FailoverPriority::High,
             },
         );

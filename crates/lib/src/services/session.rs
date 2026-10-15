@@ -1011,13 +1011,12 @@ pub fn remove_session_tag(session_id: &str, tag: &str) -> Result<bool, String> {
 }
 
 /// Generate a new session ID.
+///
+/// Returns a full UUID v4 (36 characters) for uniqueness.
+/// Previously this returned only the first 8-char segment, which
+/// had a non-trivial collision probability under heavy concurrent use.
 pub fn new_session_id() -> String {
-    Uuid::new_v4()
-        .to_string()
-        .split('-')
-        .next()
-        .unwrap_or("session")
-        .to_string()
+    Uuid::new_v4().to_string()
 }
 
 /// Remove inserted dummy assistant messages that were added to fix alternation.
@@ -1323,8 +1322,8 @@ mod tests {
     fn test_new_session_id_format() {
         let id = new_session_id();
         assert!(!id.is_empty());
-        assert!(!id.contains('-')); // Should be first segment only.
-        assert!(id.len() == 8); // UUID first segment is 8 hex chars.
+        assert!(id.contains('-')); // Should be full UUID with dashes.
+        assert!(id.len() == 36); // Full UUID v4 is 36 chars.
     }
 
     #[test]

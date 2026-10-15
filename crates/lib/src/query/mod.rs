@@ -1183,9 +1183,20 @@ impl QueryEngine {
         // would slip past exactly the audit it was configured for.
         let attachment_info = crate::llm::message::describe_attachments(&attachments);
         let user_msg = if attachments.is_empty() {
-            user_message(user_input)
+            let mut text = user_input.to_string();
+            // Prepend session ID to the very first user message of a fresh session.
+            // Only do this once per session (turn_count == 0 at session start).
+            if self.state.turn_count == 0 && self.state.messages.is_empty() {
+                text = format!("[session: {}] {}", self.state.session_id, text);
+            }
+            user_message(text)
         } else {
-            crate::llm::message::user_message_with_attachments(user_input, attachments)
+            let mut text = user_input.to_string();
+            // Prepend session ID to the very first user message of a fresh session.
+            if self.state.turn_count == 0 && self.state.messages.is_empty() {
+                text = format!("[session: {}] {}", self.state.session_id, text);
+            }
+            crate::llm::message::user_message_with_attachments(text, attachments)
         };
         self.state.push_message(user_msg);
         // Images are the one block a token threshold cannot see: each is
@@ -3987,7 +3998,11 @@ mod tests {
                     .await;
                 let _ = tx
                     .send(StreamEvent::Done {
-                        usage: Usage::default(),
+                        usage: Usage {
+                            input_tokens: 10,
+                            output_tokens: 5,
+                            ..Default::default()
+                        },
                         stop_reason: Some(StopReason::EndTurn),
                     })
                     .await;
@@ -4081,7 +4096,11 @@ mod tests {
                     .await;
                 let _ = tx
                     .send(StreamEvent::Done {
-                        usage: Usage::default(),
+                        usage: Usage {
+                            input_tokens: 10,
+                            output_tokens: 5,
+                            ..Default::default()
+                        },
                         stop_reason: Some(StopReason::EndTurn),
                     })
                     .await;
@@ -4695,7 +4714,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(user_texts, vec!["first prompt"]);
+        assert!(user_texts.iter().any(|t| t.contains("first prompt")), "user_texts: {:?}", user_texts);
         assert_eq!(assistant_texts, vec!["hello"]);
 
         let saved = crate::services::session::save_session_full(
