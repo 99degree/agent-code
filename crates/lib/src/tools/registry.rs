@@ -103,6 +103,7 @@ impl ToolRegistry {
         registry.register(Arc::new(super::agent::AgentTool));
         registry.register(Arc::new(super::apply_patch::ApplyPatchTool));
         registry.register(Arc::new(super::bash::BashTool));
+        registry.register(Arc::new(super::bash_alias::BashToolAlias));
         registry.register(Arc::new(super::file_read::FileReadTool));
         registry.register(Arc::new(super::read_alias::ReadTool));
         registry.register(Arc::new(super::read_capital::ReadCapitalTool));
@@ -110,6 +111,7 @@ impl ToolRegistry {
         registry.register(Arc::new(super::write_capital::WriteCapitalTool));
         registry.register(Arc::new(super::file_write::FileWriteTool));
         registry.register(Arc::new(super::file_edit::FileEditTool));
+        registry.register(Arc::new(super::edit_alias::EditTool));
         registry.register(Arc::new(super::multi_edit::MultiEditTool));
         registry.register(Arc::new(super::grep::GrepTool));
         registry.register(Arc::new(super::glob::GlobTool));
