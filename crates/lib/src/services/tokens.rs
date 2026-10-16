@@ -107,152 +107,171 @@ pub fn estimate_context_tokens(messages: &[Message]) -> u64 {
 /// Known model context windows, sourced from provider catalogs (e.g. pi.dev).
 ///
 /// Large-context models (1M+) must be listed explicitly or they collapse to
-/// the 128K default and the conversation is compacted prematurely. Keyed by
-/// the bare model id (provider prefix stripped, lowercased).
-pub const MODEL_CONTEXT_WINDOWS: &[(&str, u64)] = &[
+/// the 128K default and the conversation is compacted prematurely.
+///
+/// Each entry is `(provider, model, window)`:
+/// - `provider` is the provider name (e.g. "nim", "nvidia", "anthropic"),
+///   or `"*"` to match any provider.
+/// - `model` is the bare model id (provider prefix stripped, lowercased).
+///
+/// Lookup priority: exact `(provider, model)` match first, then `("*", model)`,
+/// then heuristic fallbacks.
+pub const MODEL_CONTEXT_WINDOWS: &[(&str, &str, u64)] = &[
     // Anthropic / Claude
-    ("claude-opus-4", 200_000),
-    ("claude-opus-4-1", 200_000),
-    ("claude-opus-4-5", 200_000),
-    ("claude-opus-4-6", 1_000_000),
-    ("claude-opus-4-7", 1_000_000),
-    ("claude-opus-4-8", 1_000_000),
-    ("claude-opus-5", 1_000_000),
-    ("claude-sonnet-4", 200_000),
-    ("claude-sonnet-4-5", 1_000_000),
-    ("claude-sonnet-4-6", 1_000_000),
-    ("claude-sonnet-5", 1_000_000),
-    ("claude-haiku-4-5", 200_000),
-    ("claude-fable-5", 1_000_000),
+    ("*", "claude-opus-4", 200_000),
+    ("*", "claude-opus-4-1", 200_000),
+    ("*", "claude-opus-4-5", 200_000),
+    ("*", "claude-opus-4-6", 1_000_000),
+    ("*", "claude-opus-4-7", 1_000_000),
+    ("*", "claude-opus-4-8", 1_000_000),
+    ("*", "claude-opus-5", 1_000_000),
+    ("*", "claude-sonnet-4", 200_000),
+    ("*", "claude-sonnet-4-5", 1_000_000),
+    ("*", "claude-sonnet-4-6", 1_000_000),
+    ("*", "claude-sonnet-5", 1_000_000),
+    ("*", "claude-haiku-4-5", 200_000),
+    ("*", "claude-fable-5", 1_000_000),
     // OpenAI / GPT
-    ("gpt-5", 400_000),
-    ("gpt-5.1", 400_000),
-    ("gpt-5.2", 400_000),
-    ("gpt-5.3-codex", 400_000),
-    ("gpt-5.4", 1_050_000),
-    ("gpt-5.4-mini", 400_000),
-    ("gpt-5.4-nano", 400_000),
-    ("gpt-5.4-pro", 1_050_000),
-    ("gpt-5.5", 1_050_000),
-    ("gpt-5.5-pro", 1_050_000),
-    ("gpt-5.6-luna", 1_050_000),
-    ("gpt-5.6-sol", 1_050_000),
-    ("gpt-5.6-terra", 1_050_000),
-    ("gpt-4.1", 1_047_576),
-    ("gpt-4.1-mini", 1_047_576),
-    ("gpt-4.1-nano", 1_047_576),
-    ("gpt-4o", 128_000),
-    ("gpt-4o-mini", 128_000),
-    ("gpt-oss-120b", 131_072),
-    ("gpt-oss-20b", 131_072),
+    ("*", "gpt-5", 400_000),
+    ("*", "gpt-5.1", 400_000),
+    ("*", "gpt-5.2", 400_000),
+    ("*", "gpt-5.3-codex", 400_000),
+    ("*", "gpt-5.4", 1_050_000),
+    ("*", "gpt-5.4-mini", 400_000),
+    ("*", "gpt-5.4-nano", 400_000),
+    ("*", "gpt-5.4-pro", 1_050_000),
+    ("*", "gpt-5.5", 1_050_000),
+    ("*", "gpt-5.5-pro", 1_050_000),
+    ("*", "gpt-5.6-luna", 1_050_000),
+    ("*", "gpt-5.6-sol", 1_050_000),
+    ("*", "gpt-5.6-terra", 1_050_000),
+    ("*", "gpt-4.1", 1_047_576),
+    ("*", "gpt-4.1-mini", 1_047_576),
+    ("*", "gpt-4.1-nano", 1_047_576),
+    ("*", "gpt-4o", 128_000),
+    ("*", "gpt-4o-mini", 128_000),
+    ("*", "gpt-oss-120b", 131_072),
+    ("*", "gpt-oss-20b", 131_072),
     // Zhipu / GLM
-    ("glm-5.3", 1_000_000),
-    ("glm-5.2", 1_000_000),
-    ("glm-5.1", 1_000_000),
-    ("glm-5-turbo", 200_000),
-    ("glm-5.2-highspeed", 1_000_000),
-    ("glm-4.7", 204_800),
-    ("glm-4.6", 202_752),
-    ("glm-4.5", 131_072),
+    ("*", "glm-5.3", 1_000_000),
+    ("*", "glm-5.2", 1_000_000),
+    ("*", "glm-5.1", 1_000_000),
+    ("*", "glm-5-turbo", 200_000),
+    ("*", "glm-5.2-highspeed", 1_000_000),
+    ("*", "glm-4.7", 204_800),
+    ("*", "glm-4.6", 202_752),
+    ("*", "glm-4.5", 131_072),
     // NVIDIA / Nemotron
-    ("nemotron-3-ultra-550b-a55b", 1_000_000),
-    ("nemotron-3-nano-30b-a3b", 131_072),
-    ("nemotron-3-nano-omni-30b-a3b-reasoning", 256_000),
-    ("nemotron-3-super-120b-a12b", 1_000_000),
-    ("nemotron-3.5-lightning-30b-a3b", 262_144),
-    ("nemotron-3.5-super-vl-120b-a12b", 262_144),
-    ("nemotron-nano-12b-v2-vl", 128_000),
-    ("nemotron-nano-9b-v2", 131_072),
-    ("nemotron-3-ultra-free", 1_000_000),
-    ("nemotron-3.5-lightning-free", 1_000_000),
-    ("llama-3.3-nemotron-super-49b-v1", 131_072),
-    ("llama-3.3-nemotron-super-49b-v1.5", 131_072),
-    // StepFun (via NVIDIA NIM)
-    ("step-5-preview", 1_000_000),
+    ("*", "nemotron-3-ultra-550b-a55b", 1_000_000),
+    ("*", "nemotron-3-nano-30b-a3b", 131_072),
+    ("*", "nemotron-3-nano-omni-30b-a3b-reasoning", 256_000),
+    ("*", "nemotron-3-super-120b-a12b", 1_000_000),
+    ("*", "nemotron-3.5-lightning-30b-a3b", 262_144),
+    ("*", "nemotron-3.5-super-vl-120b-a12b", 262_144),
+    ("*", "nemotron-nano-12b-v2-vl", 128_000),
+    ("*", "nemotron-nano-9b-v2", 131_072),
+    ("*", "nemotron-3-ultra-free", 1_000_000),
+    ("*", "nemotron-3.5-lightning-free", 1_000_000),
+    ("*", "llama-3.3-nemotron-super-49b-v1", 131_072),
+    ("*", "llama-3.3-nemotron-super-49b-v1.5", 131_072),
+    // StepFun (via NVIDIA NIM) — 1M context
+    ("nim", "step-5-preview", 1_000_000),
+    ("*", "step-5-preview", 1_000_000),
     // DeepSeek
-    ("deepseek-v4.1-pro", 1_000_000),
-    ("deepseek-v4.1-flash", 1_000_000),
-    ("deepseek-v4-pro", 1_000_000),
-    ("deepseek-v4-flash", 1_000_000),
-    ("deepseek-v4-flash-free", 1_000_000),
-    ("deepseek-chat", 128_000),
-    ("deepseek-r1", 64_000),
+    ("*", "deepseek-v4.1-pro", 1_000_000),
+    ("*", "deepseek-v4.1-flash", 1_000_000),
+    ("*", "deepseek-v4-pro", 1_000_000),
+    ("*", "deepseek-v4-flash", 1_000_000),
+    ("*", "deepseek-v4-flash-free", 1_000_000),
+    ("*", "deepseek-chat", 128_000),
+    ("*", "deepseek-r1", 64_000),
     // Google / Gemini
-    ("gemini-3-pro", 1_048_576),
-    ("gemini-3.1-pro-preview", 1_048_576),
-    ("gemini-3.5-flash", 1_048_576),
-    ("gemini-3.7-flash", 1_048_576),
-    ("gemini-2.5-pro", 1_048_576),
-    ("gemini-2.5-flash", 1_048_576),
+    ("*", "gemini-3-pro", 1_048_576),
+    ("*", "gemini-3.1-pro-preview", 1_048_576),
+    ("*", "gemini-3.5-flash", 1_048_576),
+    ("*", "gemini-3.7-flash", 1_048_576),
+    ("*", "gemini-2.5-pro", 1_048_576),
+    ("*", "gemini-2.5-flash", 1_048_576),
     // xAI / Grok
-    ("grok-4.5", 500_000),
-    ("grok-4.6", 500_000),
-    ("grok-4.3", 1_000_000),
-    ("grok-4.20", 2_000_000),
-    ("grok-build-0.1", 256_000),
+    ("*", "grok-4.5", 500_000),
+    ("*", "grok-4.6", 500_000),
+    ("*", "grok-4.3", 1_000_000),
+    ("*", "grok-4.20", 2_000_000),
+    ("*", "grok-build-0.1", 256_000),
     // Mistral
-    ("codestral-latest", 256_000),
-    ("devstral-latest", 262_144),
-    ("mistral-large-latest", 262_144),
-    ("mistral-medium-latest", 262_144),
-    ("mistral-small-latest", 256_000),
-    ("ministral-8b-latest", 128_000),
-    ("pixtral-large-latest", 128_000),
-    ("voxtral-small-latest", 32_000),
-    ("magistral-medium-latest", 128_000),
+    ("*", "codestral-latest", 256_000),
+    ("*", "devstral-latest", 262_144),
+    ("*", "mistral-large-latest", 262_144),
+    ("*", "mistral-medium-latest", 262_144),
+    ("*", "mistral-small-latest", 256_000),
+    ("*", "ministral-8b-latest", 128_000),
+    ("*", "pixtral-large-latest", 128_000),
+    ("*", "voxtral-small-latest", 32_000),
+    ("*", "magistral-medium-latest", 128_000),
     // MiniMax
-    ("minimax-m3", 524_288),
+    ("*", "minimax-m3", 524_288),
     // Qwen
-    ("qwen3.6-plus", 1_000_000),
-    ("qwen3.7-max", 1_000_000),
-    ("qwen3.7-plus", 1_000_000),
-    ("qwen3.8-max", 1_000_000),
-    ("qwen3-max", 262_144),
-    ("qwen-plus", 1_000_000),
+    ("*", "qwen3.6-plus", 1_000_000),
+    ("*", "qwen3.7-max", 1_000_000),
+    ("*", "qwen3.7-plus", 1_000_000),
+    ("*", "qwen3.8-max", 1_000_000),
+    ("*", "qwen3-max", 262_144),
+    ("*", "qwen-plus", 1_000_000),
     // Kimi
-    ("kimi-k2.6", 262_144),
-    ("kimi-k3", 1_048_576),
-    ("kimi-k2.7-code", 262_144),
+    ("*", "kimi-k2.6", 262_144),
+    ("*", "kimi-k3", 1_048_576),
+    ("*", "kimi-k2.7-code", 262_144),
     // MiMo
-    ("mimo-v2.5", 1_000_000),
-    ("mimo-v2.5-pro", 1_048_576),
+    ("*", "mimo-v2.5", 1_000_000),
+    ("*", "mimo-v2.5-pro", 1_048_576),
     // Llama
-    ("llama-4-maverick", 1_048_576),
-    ("llama-4-scout", 327_680),
+    ("*", "llama-4-maverick", 1_048_576),
+    ("*", "llama-4-scout", 327_680),
     // Muse
-    ("muse-spark-1.2", 1_048_576),
-    ("muse-glimmer-30b", 131_072),
+    ("*", "muse-spark-1.2", 1_048_576),
+    ("*", "muse-glimmer-30b", 131_072),
     // Tencent
-    ("hy3", 256_000),
-    ("hy3-free", 262_144),
+    ("*", "hy3", 256_000),
+    ("*", "hy3-free", 262_144),
     // MiMo (free)
-    ("mimo-v2.5-free", 1_000_000),
+    ("*", "mimo-v2.5-free", 1_000_000),
     // Poolside (free)
-    ("laguna-s-2.1-free", 262_144),
+    ("*", "laguna-s-2.1-free", 262_144),
     // Muse (free)
-    ("muse-spark-1.2-contributor-free", 1_000_000),
+    ("*", "muse-spark-1.2-contributor-free", 1_000_000),
     // Kilo auto-routing tiers (aggregate many models)
-    ("kilo-auto/frontier", 1_000_000),
-    ("kilo-auto/balanced", 1_000_000),
-    ("kilo-auto/efficient", 1_000_000),
-    ("kilo-auto/free", 256_000),
+    ("*", "kilo-auto/frontier", 1_000_000),
+    ("*", "kilo-auto/balanced", 1_000_000),
+    ("*", "kilo-auto/efficient", 1_000_000),
+    ("*", "kilo-auto/free", 256_000),
     // Misc
-    ("big-pickle", 200_000),
+    ("*", "big-pickle", 200_000),
 ];
 
 /// Get the context window size for a model.
-pub fn context_window_for_model(model: &str) -> u64 {
+///
+/// Dual-key lookup: exact `(provider, model)` match wins over `("*", model)`.
+/// `provider` may be empty — in that case only wildcard entries match.
+pub fn context_window_for_model(provider: &str, model: &str) -> u64 {
     let lower = model.to_lowercase();
+    let provider = provider.to_ascii_lowercase();
 
     // Check for extended context variants first.
     if lower.contains("1m") || lower.contains("1000k") {
         return 1_000_000;
     }
 
-    // Exact (or provider-prefix-stripped) lookup against the known table.
+    // Exact (provider, model) match first, then wildcard ("*", model).
     let bare = lower.rsplit('/').next().unwrap_or(lower.as_str());
-    for (id, window) in MODEL_CONTEXT_WINDOWS {
-        if *id == lower || *id == bare {
+    // Pass 1: exact provider match.
+    for (p, id, window) in MODEL_CONTEXT_WINDOWS {
+        if *id == bare && *p == provider {
+            return *window;
+        }
+    }
+    // Pass 2: wildcard provider match.
+    for (p, id, window) in MODEL_CONTEXT_WINDOWS {
+        if *id == bare && *p == "*" {
             return *window;
         }
     }
@@ -372,10 +391,10 @@ mod tests {
 
     #[test]
     fn test_context_window_for_model() {
-        assert_eq!(context_window_for_model("claude-opus-4"), 200_000);
-        assert_eq!(context_window_for_model("claude-sonnet-4"), 200_000);
-        assert_eq!(context_window_for_model("gpt-4"), 128_000);
-        assert_eq!(context_window_for_model("claude-sonnet-1m"), 1_000_000);
+        assert_eq!(context_window_for_model("*", "claude-opus-4"), 200_000);
+        assert_eq!(context_window_for_model("*", "claude-sonnet-4"), 200_000);
+        assert_eq!(context_window_for_model("*", "gpt-4"), 128_000);
+        assert_eq!(context_window_for_model("*", "claude-sonnet-1m"), 1_000_000);
     }
 
     #[test]
@@ -493,51 +512,51 @@ mod tests {
 
     #[test]
     fn test_context_window_for_gpt35() {
-        assert_eq!(context_window_for_model("gpt-3.5-turbo"), 16_384);
+        assert_eq!(context_window_for_model("*", "gpt-3.5-turbo"), 16_384);
     }
 
     #[test]
     fn test_context_window_for_unknown_model() {
         // Unknown models default to 200K.
-        assert_eq!(context_window_for_model("some-unknown-model"), 200_000);
+        assert_eq!(context_window_for_model("*", "some-unknown-model"), 200_000);
     }
 
     #[test]
     fn test_context_window_for_nemotron_models() {
         // The Nemotron `-free` variants expose a 1M context window.
-        assert_eq!(context_window_for_model("nemotron-3-ultra-free"), 1_000_000);
+        assert_eq!(context_window_for_model("*", "nemotron-3-ultra-free"), 1_000_000);
         assert_eq!(
-            context_window_for_model("nemotron-3.5-lightning-free"),
+            context_window_for_model("*", "nemotron-3.5-lightning-free"),
             1_000_000
         );
         // The catalog value for the 30B variant is respected (131072),
         // not the blanket 1M family heuristic.
         assert_eq!(
-            context_window_for_model("nvidia/nemotron-3-nano-30b-a3b"),
+            context_window_for_model("*", "nvidia/nemotron-3-nano-30b-a3b"),
             131_072
         );
     }
 
     #[test]
     fn test_context_window_for_1000k_variant() {
-        assert_eq!(context_window_for_model("claude-sonnet-1000k"), 1_000_000);
+        assert_eq!(context_window_for_model("*", "claude-sonnet-1000k"), 1_000_000);
     }
 
     #[test]
     fn test_context_window_for_explicit_table_models() {
         // Explicit table entries override the family heuristic.
         assert_eq!(
-            context_window_for_model("nvidia/nemotron-3-nano-30b-a3b"),
+            context_window_for_model("*", "nvidia/nemotron-3-nano-30b-a3b"),
             131_072
         );
-        assert_eq!(context_window_for_model("gpt-4.1"), 1_047_576);
-        assert_eq!(context_window_for_model("glm-5.2"), 1_000_000);
-        assert_eq!(context_window_for_model("grok-4.5"), 500_000);
-        assert_eq!(context_window_for_model("mistral-large-latest"), 262_144);
+        assert_eq!(context_window_for_model("*", "gpt-4.1"), 1_047_576);
+        assert_eq!(context_window_for_model("*", "glm-5.2"), 1_000_000);
+        assert_eq!(context_window_for_model("*", "grok-4.5"), 500_000);
+        assert_eq!(context_window_for_model("*", "mistral-large-latest"), 262_144);
         // Provider prefix is stripped for the lookup.
-        assert_eq!(context_window_for_model("openrouter/auto"), 200_000);
+        assert_eq!(context_window_for_model("*", "openrouter/auto"), 200_000);
         // Unknown models still default to 200K.
-        assert_eq!(context_window_for_model("some-unknown-model"), 200_000);
+        assert_eq!(context_window_for_model("*", "some-unknown-model"), 200_000);
     }
 
     #[test]

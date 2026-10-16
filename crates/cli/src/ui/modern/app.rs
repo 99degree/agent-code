@@ -223,8 +223,8 @@ pub(crate) fn model_catalog_entries(
                 let bare = name.rsplit('/').next().unwrap_or(&name).to_lowercase();
                 let baked_ctx = agent_code_lib::services::tokens::MODEL_CONTEXT_WINDOWS
                     .iter()
-                    .find(|(id, _)| *id == bare)
-                    .map(|(_, w)| *w);
+                    .find(|(_, id, _)| *id == bare)
+                    .map(|(_, _, w)| *w);
                 (name, desc, baked_ctx)
             })
             .collect();
@@ -2516,7 +2516,10 @@ impl App {
                 let (ctx_window, source) = if let Some(api) = api_ctx {
                     (api, "API")
                 } else {
-                    let table = context_window_for_model(&model);
+                    let provider_name =
+                        agent_code_lib::llm::provider::detect_provider(&model, base_url)
+                            .as_name();
+                    let table = context_window_for_model(provider_name, &model);
                     (table, "baked-in")
                 };
 

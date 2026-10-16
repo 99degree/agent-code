@@ -1679,6 +1679,11 @@ pub(super) async fn event_loop(
                                 // but without fetching from API (since we're offline during restore)
                                 let derived =
                                     agent_code_lib::services::tokens::context_window_for_model(
+                                        &agent_code_lib::llm::provider::detect_provider(
+                                            &data.model,
+                                            &data.base_url,
+                                        )
+                                        .as_name(),
                                         &data.model,
                                     );
                                 st.context_window = Some(derived);

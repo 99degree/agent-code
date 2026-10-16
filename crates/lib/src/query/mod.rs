@@ -483,7 +483,15 @@ impl QueryEngine {
         let used = crate::services::tokens::estimate_context_tokens(&self.state.messages);
         // Use the real per-model context window so the status-bar ratio
         // matches the warning state (which already consults the model table).
-        let max = crate::services::tokens::context_window_for_model(&self.state.config.api.model);
+        let provider_name = crate::llm::provider::detect_provider(
+            &self.state.config.api.model,
+            &self.state.config.api.base_url,
+        )
+        .as_name();
+        let max = crate::services::tokens::context_window_for_model(
+            provider_name,
+            &self.state.config.api.model,
+        );
         sink.on_context_usage(used, max);
     }
 
@@ -1359,9 +1367,10 @@ impl QueryEngine {
             let mut model = self.state.config.api.model.clone();
 
             // Step 1: Auto-compact if context is too large.
-            if compact::should_auto_compact(self.state.history(), &model, &compact_tracking) {
+            let provider_name = current_provider_kind.as_name();
+            if compact::should_auto_compact(self.state.history(), provider_name, &model, &compact_tracking) {
                 let token_count = tokens::estimate_context_tokens(self.state.history());
-                let threshold = compact::auto_compact_threshold(&model);
+                let threshold = compact::auto_compact_threshold(provider_name, &model);
                 info!("Auto-compact triggered: {token_count} tokens >= {threshold} threshold");
 
                 // Snapshot for PostCompact: message count + token estimate
@@ -1386,6 +1395,7 @@ impl QueryEngine {
                     match compact::compact_with_llm(
                         &mut self.state.messages,
                         &*self.llm,
+                        provider_name,
                         &model,
                         self.cancel.clone(),
                         (self.state.config.api.timeout_secs > 0).then(|| {
@@ -1407,7 +1417,8 @@ impl QueryEngine {
                                 compact_tracking.consecutive_failures
                             );
                             // Fallback: context collapse (snip middle messages).
-                            let effective = compact::effective_context_window(&model);
+                            let effective =
+                                compact::effective_context_window(provider_name, &model);
                             if let Some(collapse) =
                                 crate::services::context_collapse::collapse_to_budget(
                                     self.state.history(),
@@ -1458,7 +1469,7 @@ impl QueryEngine {
             }
 
             // Step 2: Check token warning state.
-            let warning = compact::token_warning_state(self.state.history(), &model);
+            let warning = compact::token_warning_state(self.state.history(), provider_name, &model);
             if warning.is_blocking {
                 let msg = "Context window nearly full. Consider starting a new session.";
                 sink.on_warning(msg);
@@ -1756,7 +1767,8 @@ impl QueryEngine {
                                     let gap = compact::parse_prompt_too_long_gap(body);
 
                                     // Stage 1: Context collapse (snip middle messages).
-                                    let effective = compact::effective_context_window(&model);
+                                    let effective =
+                                        compact::effective_context_window(provider_name, &model);
                                     if let Some(collapse) =
                                         crate::services::context_collapse::collapse_to_budget(
                                             self.state.history(),

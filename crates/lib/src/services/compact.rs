@@ -223,8 +223,8 @@ pub struct CompactTracking {
 }
 
 /// Calculate the effective context window (total minus output reservation).
-pub fn effective_context_window(model: &str) -> u64 {
-    let context = tokens::context_window_for_model(model);
+pub fn effective_context_window(provider: &str, model: &str) -> u64 {
+    let context = tokens::context_window_for_model(provider, model);
     let reserved = tokens::max_output_tokens_for_model(model).min(MAX_OUTPUT_TOKENS_FOR_SUMMARY);
     context.saturating_sub(reserved)
 }
@@ -239,16 +239,16 @@ const AUTO_COMPACT_FILL_RATIO: f64 = 0.95;
 /// Calculate the auto-compact threshold as a fill ratio of the effective
 /// context window (total minus the output reservation), so the model's
 /// full context budget is used instead of leaving a fixed slack.
-pub fn auto_compact_threshold(model: &str) -> u64 {
-    let effective = effective_context_window(model) as f64;
+pub fn auto_compact_threshold(provider: &str, model: &str) -> u64 {
+    let effective = effective_context_window(provider, model) as f64;
     (effective * AUTO_COMPACT_FILL_RATIO).round() as u64
 }
 
 /// Calculate token warning state for the current conversation.
-pub fn token_warning_state(messages: &[Message], model: &str) -> TokenWarningState {
+pub fn token_warning_state(messages: &[Message], provider: &str, model: &str) -> TokenWarningState {
     let token_count = tokens::estimate_context_tokens(messages);
-    let threshold = auto_compact_threshold(model);
-    let effective = effective_context_window(model);
+    let threshold = auto_compact_threshold(provider, model);
+    let effective = effective_context_window(provider, model);
 
     let percent_left = if effective > 0 {
         ((effective.saturating_sub(token_count)) as f64 / effective as f64 * 100.0)
@@ -270,13 +270,18 @@ pub fn token_warning_state(messages: &[Message], model: &str) -> TokenWarningSta
 }
 
 /// Check whether auto-compact should fire for this conversation.
-pub fn should_auto_compact(messages: &[Message], model: &str, tracking: &CompactTracking) -> bool {
+pub fn should_auto_compact(
+    messages: &[Message],
+    provider: &str,
+    model: &str,
+    tracking: &CompactTracking,
+) -> bool {
     // Circuit breaker.
     if tracking.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
         return false;
     }
 
-    let state = token_warning_state(messages, model);
+    let state = token_warning_state(messages, provider, model);
     state.should_compact
 }
 
@@ -630,6 +635,7 @@ pub fn parse_prompt_too_long_gap(error_text: &str) -> Option<u64> {
 pub async fn compact_with_llm(
     messages: &mut Vec<Message>,
     llm: &dyn crate::llm::provider::Provider,
+    provider: &str,
     model: &str,
     cancel: tokio_util::sync::CancellationToken,
     stream_timeout: Option<std::time::Duration>,
@@ -658,7 +664,7 @@ pub async fn compact_with_llm(
     // get a proportionally smaller summary, large windows more
     // room to preserve detail — but never above the model's own
     // max output, which providers enforce on their end.
-    let summary_max_tokens = (tokens::context_window_for_model(model) / 20)
+    let summary_max_tokens = (tokens::context_window_for_model(provider, model) / 20)
         .clamp(1_024, 32_768)
         .min(tokens::max_output_tokens_for_model(model)) as u32;
 
@@ -914,6 +920,7 @@ mod tests {
         let _ = compact_with_llm(
             &mut messages,
             &provider,
+            "*",
             "claude-sonnet",
             tokio_util::sync::CancellationToken::new(),
             None,
@@ -935,6 +942,7 @@ mod tests {
         let _ = compact_with_llm(
             &mut messages,
             &provider,
+            "*",
             "gpt-3.5",
             tokio_util::sync::CancellationToken::new(),
             None,
@@ -973,6 +981,7 @@ mod tests {
         let removed = compact_with_llm(
             &mut messages,
             &provider,
+            "*",
             "test-model",
             tokio_util::sync::CancellationToken::new(),
             Some(timeout),
@@ -1006,6 +1015,7 @@ mod tests {
         let removed = compact_with_llm(
             &mut messages,
             &provider,
+            "*",
             "test-model",
             tokio_util::sync::CancellationToken::new(),
             None,
@@ -1035,6 +1045,7 @@ mod tests {
         let _ = compact_with_llm(
             &mut messages,
             &provider,
+            "*",
             "test-model",
             tokio_util::sync::CancellationToken::new(),
             None,
@@ -1424,7 +1435,7 @@ mod tests {
 
     #[test]
     fn test_auto_compact_threshold() {
-        let threshold = auto_compact_threshold("claude-sonnet");
+        let threshold = auto_compact_threshold("*", "claude-sonnet");
         // Fills 95% of the effective window (200K context - 16K output = 184K).
         let effective = 200_000 - 16_384;
         assert_eq!(threshold, (effective as f64 * 0.95).round() as u64);
@@ -1444,14 +1455,14 @@ mod tests {
     #[test]
     fn test_effective_context_window() {
         // Sonnet: 200K context - 16K output = 184K (capped at 20K → 180K)
-        let eff = effective_context_window("claude-sonnet");
+        let eff = effective_context_window("*", "claude-sonnet");
         assert!(eff > 100_000);
         assert!(eff < 200_000);
     }
 
     #[test]
     fn test_token_warning_state_empty() {
-        let state = token_warning_state(&[], "claude-sonnet");
+        let state = token_warning_state(&[], "*", "claude-sonnet");
         assert_eq!(state.percent_left, 100);
         assert!(!state.is_above_warning);
         assert!(!state.is_blocking);
@@ -1460,7 +1471,7 @@ mod tests {
     #[test]
     fn test_should_auto_compact_empty() {
         let tracking = CompactTracking::default();
-        assert!(!should_auto_compact(&[], "claude-sonnet", &tracking));
+        assert!(!should_auto_compact(&[], "*", "claude-sonnet", &tracking));
     }
 
     #[test]
@@ -1470,7 +1481,7 @@ mod tests {
             was_compacted: false,
         };
         // Even with huge message list, circuit breaker should prevent compaction.
-        assert!(!should_auto_compact(&[], "claude-sonnet", &tracking));
+        assert!(!should_auto_compact(&[], "*", "claude-sonnet", &tracking));
     }
 
     #[test]
@@ -1641,7 +1652,7 @@ mod tests {
 
     #[test]
     fn test_effective_context_window_gpt_model() {
-        let eff = effective_context_window("gpt-4o");
+        let eff = effective_context_window("*", "gpt-4o");
         // gpt-4: 128K context, 16K max output (capped at 20K → 16K), effective = 128K - 16K = 112K
         assert_eq!(eff, 128_000 - 16_384);
     }
@@ -1649,7 +1660,7 @@ mod tests {
     #[test]
     fn test_auto_compact_threshold_gpt_model() {
         // Fills 95% of the effective window (128K context - 16K output = 112K).
-        let threshold = auto_compact_threshold("gpt-4o");
+        let threshold = auto_compact_threshold("*", "gpt-4o");
         let effective = 128_000 - 16_384;
         assert_eq!(threshold, (effective as f64 * 0.95).round() as u64);
     }
@@ -1674,7 +1685,7 @@ mod tests {
         // Create a huge message that will exceed the threshold.
         let big_text = "a".repeat(800_000); // ~200K tokens
         let messages = vec![user_message(&big_text)];
-        let state = token_warning_state(&messages, "claude-sonnet");
+        let state = token_warning_state(&messages, "*", "claude-sonnet");
         assert!(state.should_compact);
     }
 
@@ -1682,7 +1693,7 @@ mod tests {
     fn test_should_auto_compact_empty_tracking_small_conversation() {
         let tracking = CompactTracking::default();
         let messages = vec![crate::llm::message::user_message("tiny")];
-        assert!(!should_auto_compact(&messages, "claude-sonnet", &tracking));
+        assert!(!should_auto_compact(&messages, "*", "claude-sonnet", &tracking));
     }
 
     #[test]

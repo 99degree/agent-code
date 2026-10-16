@@ -2364,8 +2364,17 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             let tokens =
                 agent_code_lib::services::tokens::estimate_context_tokens(&engine.state().messages);
             let model = &engine.state().config.api.model;
-            let window = agent_code_lib::services::tokens::context_window_for_model(model);
-            let threshold = agent_code_lib::services::compact::auto_compact_threshold(model);
+            let provider_name = agent_code_lib::llm::provider::detect_provider(
+                model,
+                &engine.state().config.api.base_url,
+            )
+            .as_name();
+            let window = agent_code_lib::services::tokens::context_window_for_model(
+                provider_name, model,
+            );
+            let threshold = agent_code_lib::services::compact::auto_compact_threshold(
+                provider_name, model,
+            );
             let pct = if window > 0 {
                 (tokens as f64 / window as f64 * 100.0).round() as u64
             } else {
@@ -5297,8 +5306,15 @@ fn compute_context_breakdown(
         + tool_schemas;
 
     let model = &state.config.api.model;
-    let window = tokens::context_window_for_model(model);
-    let compact_threshold = agent_code_lib::services::compact::auto_compact_threshold(model);
+    let provider_name = agent_code_lib::llm::provider::detect_provider(
+        model,
+        &state.config.api.base_url,
+    )
+    .as_name();
+    let window = tokens::context_window_for_model(provider_name, model);
+    let compact_threshold = agent_code_lib::services::compact::auto_compact_threshold(
+        provider_name, model,
+    );
 
     ContextBreakdown {
         system_prompt: system_prompt_tokens,
