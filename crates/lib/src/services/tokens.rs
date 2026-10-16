@@ -158,14 +158,17 @@ pub const MODEL_CONTEXT_WINDOWS: &[(&str, u64)] = &[
     ("nemotron-3-ultra-550b-a55b", 1_000_000),
     ("nemotron-3-nano-30b-a3b", 131_072),
     ("nemotron-3-nano-omni-30b-a3b-reasoning", 256_000),
-    ("nemotron-3-super-120b-a12b", 262_144),
+    ("nemotron-3-super-120b-a12b", 1_000_000),
     ("nemotron-3.5-lightning-30b-a3b", 262_144),
+    ("nemotron-3.5-super-vl-120b-a12b", 262_144),
     ("nemotron-nano-12b-v2-vl", 128_000),
     ("nemotron-nano-9b-v2", 131_072),
     ("nemotron-3-ultra-free", 1_000_000),
     ("nemotron-3.5-lightning-free", 1_000_000),
     ("llama-3.3-nemotron-super-49b-v1", 131_072),
     ("llama-3.3-nemotron-super-49b-v1.5", 131_072),
+    // StepFun (via NVIDIA NIM)
+    ("step-5-preview", 1_000_000),
     // DeepSeek
     ("deepseek-v4.1-pro", 1_000_000),
     ("deepseek-v4.1-flash", 1_000_000),
