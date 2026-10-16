@@ -115,6 +115,7 @@ impl ToolRegistry {
         registry.register(Arc::new(super::multi_edit::MultiEditTool));
         registry.register(Arc::new(super::grep::GrepTool));
         registry.register(Arc::new(super::glob::GlobTool));
+        registry.register(Arc::new(super::glob_alias::GlobToolAlias));
         registry.register(Arc::new(super::notebook_edit::NotebookEditTool));
         registry.register(Arc::new(super::lsp_tool::LspTool));
         registry.register(Arc::new(super::mcp_resources::ListMcpResourcesTool));
