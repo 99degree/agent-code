@@ -170,18 +170,20 @@ impl Provider for AnthropicProvider {
 
         debug!("Anthropic request to {url} (thinking budget: {thinking_budget})");
 
-        // Lazily probe whether this endpoint accepts gzip request bodies.
-        // Run concurrently with building the response: the first real call
-        // uses the uncompressed path below; the result is cached for later.
-        let _ = super::encoding::probe_if_needed(
-            &self.http,
-            &url,
-            &headers,
-            &request.model,
-            &self.encoder,
-            Some(&request.cancel),
-        )
-        .await;
+        // Lazily probe whether this endpoint accepts gzip request bodies,
+        // but only when the caller has enabled compression. When disabled,
+        // skip the probe entirely (no network cost) and encode() is a no-op.
+        if request.enable_compression {
+            let _ = super::encoding::probe_if_needed(
+                &self.http,
+                &url,
+                &headers,
+                &request.model,
+                &self.encoder,
+                Some(&request.cancel),
+            )
+            .await;
+        }
 
         // For this call, compress if already negotiated (i.e. a prior probe
         // completed) and the body is large enough to benefit.

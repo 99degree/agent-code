@@ -137,6 +137,14 @@ pub fn probe_body(model: &str) -> std::io::Result<Vec<u8>> {
 /// [`Encoder`] ensures only the first caller's probe result is recorded; if
 /// a caller is already probing, this call returns immediately and lets the
 /// in-flight probe's outcome populate the cache.
+///
+/// The probe runs only over the network when the endpoint has not yet been
+/// negotiated (checked via `encoder.is_negotiated`'s backing `OnceLock`). If
+/// a previous probe already recorded a result — success (`true`) or failure
+/// (`false`) — this is a cheap no-op returning that cached value. This means
+/// a failed probe (endpoint rejected gzip) permanently disables compression
+/// for that provider instance for the process lifetime, avoiding repeated
+/// probe round-trips to an endpoint that provably doesn't support gzip.
 pub async fn probe_if_needed(
     http: &reqwest::Client,
     url: &str,
@@ -145,7 +153,9 @@ pub async fn probe_if_needed(
     encoder: &Encoder,
     cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> bool {
-    // Fast path: already probed (success or failure).
+    // Fast path: already probed (success or failure). A cached `false` means
+    // a prior probe proved this endpoint doesn't accept gzip — honor it and
+    // skip the network entirely.
     if encoder.negotiated.get().is_some() {
         return encoder.is_negotiated();
     }

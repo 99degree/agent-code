@@ -310,16 +310,20 @@ impl Provider for OpenCodeProvider {
             .build()
             .expect("failed to build HTTP client");
 
-        // Lazily probe whether this endpoint accepts gzip request bodies.
-        super::encoding::probe_if_needed(
-            &http,
-            &url,
-            &headers,
-            &request.model,
-            &self.encoder,
-            Some(&request.cancel),
-        )
-        .await;
+        // Lazily probe whether this endpoint accepts gzip request bodies,
+        // but only when the caller has enabled compression. When disabled,
+        // skip the probe entirely (no network cost) and encode() is a no-op.
+        if request.enable_compression {
+            super::encoding::probe_if_needed(
+                &http,
+                &url,
+                &headers,
+                &request.model,
+                &self.encoder,
+                Some(&request.cancel),
+            )
+            .await;
+        }
 
         let json_bytes = serde_json::to_vec(&body)
             .map_err(|e| ProviderError::Network(format!("json serialize: {e}")))?;
