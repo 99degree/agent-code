@@ -179,6 +179,7 @@ impl Provider for AnthropicProvider {
             &headers,
             &request.model,
             &self.encoder,
+            Some(&request.cancel),
         )
         .await;
 

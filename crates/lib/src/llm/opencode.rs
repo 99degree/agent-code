@@ -311,8 +311,15 @@ impl Provider for OpenCodeProvider {
             .expect("failed to build HTTP client");
 
         // Lazily probe whether this endpoint accepts gzip request bodies.
-        super::encoding::probe_if_needed(&http, &url, &headers, &request.model, &self.encoder)
-            .await;
+        super::encoding::probe_if_needed(
+            &http,
+            &url,
+            &headers,
+            &request.model,
+            &self.encoder,
+            Some(&request.cancel),
+        )
+        .await;
 
         let json_bytes = serde_json::to_vec(&body)
             .map_err(|e| ProviderError::Network(format!("json serialize: {e}")))?;

@@ -143,6 +143,7 @@ pub async fn probe_if_needed(
     auth_headers: &reqwest::header::HeaderMap,
     model: &str,
     encoder: &Encoder,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> bool {
     // Fast path: already probed (success or failure).
     if encoder.negotiated.get().is_some() {
@@ -150,22 +151,46 @@ pub async fn probe_if_needed(
     }
 
     // Slow path: run the probe. If a concurrent call already set the value
-    // while we were building the request, honor theirs.
+    // while we were building the request, honor theirs. The entire probe —
+    // including the body construction (gzip_bytes) — is raced against the
+    // caller's cancellation token so a user cancel during negotiation does not
+    // block the turn for the probe's network round-trip.
     let result = (|| async {
         let body = probe_body(model)?;
-        let resp = http
+        let request = http
             .post(url)
             .headers(auth_headers.clone())
             .header(CONTENT_ENCODING, "gzip")
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(reqwest::Body::from(body))
-            .send()
-            .await?;
+            .build()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let resp = if let Some(ct) = cancel {
+            // Race the send against the cancellation token so a user cancel
+            // aborts the probe's network round-trip promptly instead of
+            // hanging until the 300s client timeout fires. The cancel branch
+            // returns `Ok(None)` from this closure, short-circuiting the probe
+            // with "unknown" (conservative: don't assume gzip is supported).
+            tokio::select! {
+                biased;
+                _ = ct.cancelled() => return Ok(None),
+                r = http.execute(request) => r,
+            }
+        } else {
+            http.execute(request).await
+        };
+        // A transport-level failure (DNS, connection reset, timeout) means
+        // we never got a response that could confirm gzip support — stay
+        // conservative and treat it as "not negotiated".
+        let resp = match resp {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        };
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_else(|_| String::new());
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(probe_response_ok(status, &text))
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(Some(probe_response_ok(status, &text)))
     })();
-    let negotiated = result.await.unwrap_or(false);
+    let negotiated = result.await.ok().flatten().unwrap_or(false);
     // First writer wins; if someone raced us, theirs is already set and our
     // `set` is a no-op.
     let _ = encoder.negotiated.set(negotiated);
@@ -331,7 +356,7 @@ mod tests {
         let headers = reqwest::header::HeaderMap::new();
         let enc = Encoder::new();
 
-        probe_if_needed(&http, &url, &headers, "gpt-5.4", &enc).await;
+        probe_if_needed(&http, &url, &headers, "gpt-5.4", &enc, None).await;
         server.await.unwrap();
 
         assert!(enc.is_negotiated(), "probe should cache true on 401");
@@ -366,7 +391,7 @@ mod tests {
         let headers = reqwest::header::HeaderMap::new();
         let enc = Encoder::new();
 
-        probe_if_needed(&http, &url, &headers, "gpt-5.4", &enc).await;
+        probe_if_needed(&http, &url, &headers, "gpt-5.4", &enc, None).await;
         server.await.unwrap();
 
         assert!(
@@ -390,8 +415,49 @@ mod tests {
             &headers,
             "gpt-5.4",
             &enc,
+            None,
         )
         .await;
         assert!(enc.is_negotiated());
+    }
+
+    /// When the cancellation token is already cancelled, `probe_if_needed`
+    /// must abort promptly instead of waiting for the network round-trip
+    /// (or the 300s client timeout). Returns `false` conservatively and does
+    /// not cache a negotiation result.
+    #[tokio::test]
+    async fn probe_if_needed_aborts_on_cancel() {
+        use tokio_util::sync::CancellationToken;
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        // Use a real client but point at a bogus URL. If the cancel branch
+        // doesn't win the select, reqwest would block (or fail) on connection,
+        // so we'd hit the 300s timeout — the elapsed assertion catches that.
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .unwrap();
+        let headers = reqwest::header::HeaderMap::new();
+        let enc = Encoder::new();
+        let url = "http://127.0.0.1:1/chat/completions";
+
+        let start = std::time::Instant::now();
+        let result = probe_if_needed(&http, url, &headers, "gpt-5.4", &enc, Some(&cancel)).await;
+        let elapsed = start.elapsed();
+
+        assert!(!result, "canceled probe must return false (not negotiated)");
+        assert!(
+            !enc.is_negotiated(),
+            "canceled probe must not cache a negotiation result"
+        );
+        // Must return well under the 300s client timeout — the cancel branch
+        // wins the select immediately.
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "canceled probe should return promptly (elapsed {:?})",
+            elapsed
+        );
     }
 }

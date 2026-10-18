@@ -408,14 +408,13 @@ impl OpenAiProvider {
         debug!("OpenAI request to {url}");
 
         // Lazily probe whether this endpoint accepts gzip request bodies.
-        // The first real call uses the (possibly still-plain) result below;
-        // subsequent calls benefit from the cached outcome.
         let _ = super::encoding::probe_if_needed(
             &self.http,
             &url,
             &headers,
             &request.model,
             &self.encoder,
+            Some(&request.cancel),
         )
         .await;
 
@@ -510,6 +509,7 @@ impl OpenAiProvider {
             &headers,
             &request.model,
             &self.encoder,
+            Some(&request.cancel),
         )
         .await;
 

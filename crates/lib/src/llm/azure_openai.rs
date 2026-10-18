@@ -261,6 +261,7 @@ impl Provider for AzureOpenAiProvider {
             &headers,
             &request.model,
             &self.encoder,
+            Some(&request.cancel),
         )
         .await;
 
