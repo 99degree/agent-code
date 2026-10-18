@@ -8,13 +8,17 @@
 //! is compatible. We reuse the OpenAI provider's logic but allow a different
 //! base URL and API key environment variable.
 
+use super::encoding::Encoder;
+use super::identity;
 use async_trait::async_trait;
 use futures::StreamExt;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::Body;
+use reqwest::header::{
+    AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue,
+};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use super::identity;
 use super::message::{ContentBlock, Message, StopReason, Usage};
 use super::provider::{Provider, ProviderError, ProviderRequest, ToolChoice};
 use super::stream::{StreamEvent, stream_timeout_error, wait_for_stream_timeout};
@@ -28,6 +32,9 @@ pub struct OpenCodeProvider {
     project_id: String,
     client: String,
     version: String,
+    /// Per-instance cache of whether this endpoint negotiated gzip request
+    /// compression via a probe request.
+    encoder: Encoder,
 }
 
 impl OpenCodeProvider {
@@ -49,6 +56,7 @@ impl OpenCodeProvider {
             project_id: project_id.to_string(),
             client: client.to_string(),
             version: version.to_string(),
+            encoder: Encoder::new(),
         }
     }
 
@@ -302,10 +310,19 @@ impl Provider for OpenCodeProvider {
             .build()
             .expect("failed to build HTTP client");
 
-        let response = http
-            .post(&url)
-            .headers(headers)
-            .json(&body)
+        // Lazily probe whether this endpoint accepts gzip request bodies.
+        super::encoding::probe_if_needed(&http, &url, &headers, &request.model, &self.encoder)
+            .await;
+
+        let json_bytes = serde_json::to_vec(&body)
+            .map_err(|e| ProviderError::Network(format!("json serialize: {e}")))?;
+        let (payload, use_gzip) = self.encoder.encode(&json_bytes);
+        let mut req = http.post(&url).headers(headers);
+        if request.enable_compression && use_gzip {
+            req = req.header(CONTENT_ENCODING, "gzip");
+        }
+        let response = req
+            .body(Body::from(payload))
             .send()
             .await
             .map_err(|e| ProviderError::Network(e.to_string()))?;
@@ -648,5 +665,134 @@ mod tests {
         assert_eq!(provider.base_url(), "https://opencode.ai/zen/v1");
         assert_eq!(provider.api_key(), "test-key");
         assert_eq!(provider.session_id(), "session-id");
+    }
+
+    /// End-to-end check on a throwaway TCP server: the provider should send
+    /// `Content-Encoding: gzip` on the body of the *real* request once the
+    /// gzip probe has succeeded, and the gzipped bytes must decompress to the
+    /// expected JSON. The real request body is tiny, so to exercise the
+    /// compression path we build a provider whose negotiated cache is already
+    /// `true` and send a large message to clear the `MIN_COMPRESS_LEN`
+    /// threshold.
+    #[tokio::test]
+    async fn stream_uses_gzip_after_probe() {
+        use crate::llm::message::{Message, UserMessage};
+        use crate::llm::provider::{Provider, ProviderError, ProviderRequest, ToolChoice};
+        use std::io::Read;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::time::timeout;
+        use tokio_util::sync::CancellationToken;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}/zen/v1");
+
+        // NOTE: `provider.encoder` is pre-seeded to `negotiated=true`, so
+        // `probe_if_needed` returns immediately without sending a probe
+        // request. Only the real streaming request reaches the server — the
+        // server must therefore handle a single connection.
+        let server = tokio::spawn(async move {
+            let (mut s, _) = match timeout(std::time::Duration::from_secs(20), listener.accept())
+                .await
+                .expect("server: timed out accepting connection")
+            {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let mut buf = vec![0u8; 65536];
+            let n = s.read(&mut buf).await.unwrap();
+            let raw = &buf[..n];
+            let sep = raw
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|p| p + 4)
+                .unwrap_or(raw.len());
+            let (head, body) = raw.split_at(sep);
+            let text = String::from_utf8_lossy(head);
+            assert!(
+                text.contains("content-encoding: gzip"),
+                "real request should set Content-Encoding: gzip; head:\n{}",
+                &text[..text.len().min(512)]
+            );
+            let mut decoded = Vec::new();
+            {
+                let mut dec = flate2::read::GzDecoder::new(body);
+                dec.read_to_end(&mut decoded).unwrap();
+            }
+            let json: serde_json::Value =
+                serde_json::from_slice(&decoded).expect("gunzipped body is valid JSON");
+            assert_eq!(json["messages"][0]["role"], "user");
+            // OpenAI-compat providers serialize a single text block as a bare
+            // string, not an array of blocks — check both shapes.
+            let text_len = json["messages"][0]["content"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.get("text"))
+                .and_then(|v| v.as_str())
+                .or_else(|| json["messages"][0]["content"].as_str())
+                .map(|t| t.len())
+                .unwrap_or(0);
+            assert!(
+                text_len >= crate::llm::encoding::MIN_COMPRESS_LEN * 4,
+                "large message should be present in the request body, got len {text_len}"
+            );
+
+            let body = r#"{"error":"unauthorized"}"#;
+            let mut resp = String::new();
+            resp.push_str("HTTP/1.1 401 Unauthorized\r\n");
+            resp.push_str("Content-Type: application/json\r\n");
+            resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
+            resp.push_str("Connection: close\r\n\r\n");
+            resp.push_str(body);
+            let _ = s.write_all(resp.as_bytes()).await;
+        });
+
+        let provider = OpenCodeProvider::new(
+            &base,
+            "test-key",
+            "user-id",
+            "project-id",
+            "cli",
+            "1.0.0",
+            "session-id",
+        );
+        // Pre-seed the negotiated cache so the (tiny) real request compresses:
+        // the probe is still sent to exercise the server, but the real request
+        // must already be gzip because negotiate==true here.
+        let _ = provider.encoder.set_negotiated(true);
+
+        // Build a message large enough to exceed MIN_COMPRESS_LEN after
+        // serialization.
+        let big = "A".repeat(crate::llm::encoding::MIN_COMPRESS_LEN * 4);
+        let request = ProviderRequest {
+            model: "gpt-5.4".into(),
+            system_prompt: String::new(),
+            messages: vec![Message::User(UserMessage {
+                uuid: uuid::Uuid::new_v4(),
+                timestamp: "2026-04-27T00:00:00Z".to_string(),
+                content: vec![crate::llm::message::ContentBlock::Text { text: big }],
+                is_meta: false,
+                is_compact_summary: false,
+            })],
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_tokens: 100,
+            temperature: None,
+            enable_caching: false,
+            metadata: None,
+            cancel: CancellationToken::new(),
+            stream_timeout: None,
+            enable_compression: true,
+        };
+
+        // Stream the real request: the provider is pre-seeded as negotiated,
+        // so the body goes out gzip-encoded. The mock server replies 401,
+        // which surfaces as ProviderError::Auth.
+        let result = provider.stream(&request).await;
+        assert!(
+            matches!(result, Err(ProviderError::Auth(_))),
+            "expected auth error from 401, got {result:?}"
+        );
+        server.await.unwrap();
     }
 }

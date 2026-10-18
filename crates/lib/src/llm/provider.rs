@@ -78,6 +78,11 @@ pub struct ProviderRequest {
     /// instead of hanging until the HTTP client's total deadline. `None`
     /// disables the per-chunk wait.
     pub stream_timeout: Option<std::time::Duration>,
+    /// Whether to gzip-compress this request's body (after the provider has
+    /// negotiated gzip support with the endpoint via a probe). Set from
+    /// `features.request_compression` by the caller; providers treat
+    /// `false` as "no compression and no probe".
+    pub enable_compression: bool,
 }
 
 /// Provider-level errors.

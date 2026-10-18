@@ -1570,6 +1570,7 @@ impl QueryEngine {
                     stream_timeout: (self.state.config.api.timeout_secs > 0).then(|| {
                         std::time::Duration::from_secs(self.state.config.api.timeout_secs)
                     }),
+                    enable_compression: self.state.config.features.request_compression,
                 };
                 // Snapshot the request fields so we can dump them on a final
                 // failed attempt. Only the *current* send is captured; the

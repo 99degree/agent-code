@@ -684,6 +684,7 @@ pub async fn compact_with_llm(
         metadata: None,
         cancel,
         stream_timeout,
+        enable_compression: false,
     };
 
     let mut rx = match llm.stream(&request).await {

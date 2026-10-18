@@ -5,10 +5,12 @@
 //! tool definitions with input_schema, and SSE streaming with
 //! content_block_start/delta/stop events.
 
+use super::encoding::Encoder;
 use super::identity;
 use async_trait::async_trait;
 use futures::StreamExt;
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::Body;
+use reqwest::header::{CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderValue};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -23,6 +25,9 @@ pub struct AnthropicProvider {
     http: reqwest::Client,
     base_url: String,
     api_key: String,
+    /// Per-instance cache of whether this endpoint negotiated gzip request
+    /// compression via a probe request.
+    encoder: Encoder,
 }
 
 impl AnthropicProvider {
@@ -38,6 +43,7 @@ impl AnthropicProvider {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
+            encoder: Encoder::new(),
         }
     }
 }
@@ -164,11 +170,29 @@ impl Provider for AnthropicProvider {
 
         debug!("Anthropic request to {url} (thinking budget: {thinking_budget})");
 
-        let response = self
-            .http
-            .post(&url)
-            .headers(headers)
-            .json(&body)
+        // Lazily probe whether this endpoint accepts gzip request bodies.
+        // Run concurrently with building the response: the first real call
+        // uses the uncompressed path below; the result is cached for later.
+        let _ = super::encoding::probe_if_needed(
+            &self.http,
+            &url,
+            &headers,
+            &request.model,
+            &self.encoder,
+        )
+        .await;
+
+        // For this call, compress if already negotiated (i.e. a prior probe
+        // completed) and the body is large enough to benefit.
+        let json_bytes = serde_json::to_vec(&body)
+            .map_err(|e| ProviderError::Network(format!("json serialize: {e}")))?;
+        let (payload, use_gzip) = self.encoder.encode(&json_bytes);
+        let mut req = self.http.post(&url).headers(headers);
+        if request.enable_compression && use_gzip {
+            req = req.header(CONTENT_ENCODING, "gzip");
+        }
+        let response = req
+            .body(Body::from(payload))
             .send()
             .await
             .map_err(|e| ProviderError::Network(format!("messages: {e}")))?;

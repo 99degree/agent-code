@@ -4,10 +4,14 @@
 //! Together, Ollama, DeepSeek, OpenRouter, vLLM, LMStudio, etc.).
 //! The only difference between providers is the base URL and auth.
 
+use super::encoding::Encoder;
 use super::identity;
 use async_trait::async_trait;
 use futures::StreamExt;
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::Body;
+use reqwest::header::{
+    ACCEPT, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderValue,
+};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -25,6 +29,9 @@ pub struct OpenAiProvider {
     base_url: String,
     auth: OpenAiAuth,
     api: OpenAiApi,
+    /// Per-instance cache of whether this endpoint negotiated gzip request
+    /// compression via a probe request.
+    encoder: Encoder,
 }
 
 enum OpenAiAuth {
@@ -55,6 +62,7 @@ impl OpenAiProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: OpenAiAuth::ApiKey(api_key.to_string()),
             api: OpenAiApi::ChatCompletions,
+            encoder: Encoder::new(),
         }
     }
 
@@ -71,6 +79,7 @@ impl OpenAiProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: OpenAiAuth::CodexChatGpt(auth),
             api: OpenAiApi::Responses,
+            encoder: Encoder::new(),
         }
     }
 
@@ -88,6 +97,7 @@ impl OpenAiProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: OpenAiAuth::XaiOauth(auth),
             api: OpenAiApi::ChatCompletions,
+            encoder: Encoder::new(),
         }
     }
 
@@ -106,6 +116,7 @@ impl OpenAiProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: OpenAiAuth::ApiKey(api_key.to_string()),
             api: OpenAiApi::Nemotron,
+            encoder: Encoder::new(),
         }
     }
 
@@ -396,11 +407,27 @@ impl OpenAiProvider {
 
         debug!("OpenAI request to {url}");
 
-        let response = self
-            .http
-            .post(&url)
-            .headers(headers)
-            .json(&body)
+        // Lazily probe whether this endpoint accepts gzip request bodies.
+        // The first real call uses the (possibly still-plain) result below;
+        // subsequent calls benefit from the cached outcome.
+        let _ = super::encoding::probe_if_needed(
+            &self.http,
+            &url,
+            &headers,
+            &request.model,
+            &self.encoder,
+        )
+        .await;
+
+        let json_bytes = serde_json::to_vec(&body)
+            .map_err(|e| ProviderError::Network(format!("json serialize: {e}")))?;
+        let (payload, use_gzip) = self.encoder.encode(&json_bytes);
+        let mut req = self.http.post(&url).headers(headers);
+        if request.enable_compression && use_gzip {
+            req = req.header(CONTENT_ENCODING, "gzip");
+        }
+        let response = req
+            .body(Body::from(payload))
             .send()
             .await
             .map_err(|e| ProviderError::Network(e.to_string()))?;
@@ -476,11 +503,25 @@ impl OpenAiProvider {
 
         debug!("OpenAI Responses request to {url}");
 
-        let response = self
-            .http
-            .post(&url)
-            .headers(headers)
-            .json(&body)
+        // Lazily probe whether this endpoint accepts gzip request bodies.
+        let _ = super::encoding::probe_if_needed(
+            &self.http,
+            &url,
+            &headers,
+            &request.model,
+            &self.encoder,
+        )
+        .await;
+
+        let json_bytes = serde_json::to_vec(&body)
+            .map_err(|e| ProviderError::Network(format!("json serialize: {e}")))?;
+        let (payload, use_gzip) = self.encoder.encode(&json_bytes);
+        let mut req = self.http.post(&url).headers(headers);
+        if request.enable_compression && use_gzip {
+            req = req.header(CONTENT_ENCODING, "gzip");
+        }
+        let response = req
+            .body(Body::from(payload))
             .send()
             .await
             .map_err(|e| ProviderError::Network(e.to_string()))?;
@@ -1465,6 +1506,7 @@ mod tests {
             metadata: None,
             cancel: CancellationToken::new(),
             stream_timeout: None,
+            enable_compression: false,
         };
 
         let body = provider.build_responses_body(&request);
@@ -1495,6 +1537,7 @@ mod tests {
             metadata: None,
             cancel: CancellationToken::new(),
             stream_timeout: None,
+            enable_compression: false,
         };
 
         let body = provider.build_responses_body(&request);
@@ -1640,18 +1683,23 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let base = format!("http://127.0.0.1:{port}/v1");
 
+        // The provider issues a gzip-negotiation probe request before the real
+        // call, so the server must accept two connections and answer both
+        // identically.
         let server = tokio::spawn(async move {
-            let (mut s, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 4096];
-            let _ = s.read(&mut buf).await;
-            let body = r#"{"error":{"message":"model laguna-s-2.1:free not found","type":"invalid_request_error"}}"#;
-            let mut resp = String::new();
-            resp.push_str("HTTP/1.1 404 Not Found\r\n");
-            resp.push_str("Content-Type: application/json\r\n");
-            resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
-            resp.push_str("Connection: close\r\n\r\n");
-            resp.push_str(body);
-            let _ = s.write_all(resp.as_bytes()).await;
+            for _ in 0..2 {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let _ = s.read(&mut buf).await;
+                let body = r#"{"error":{"message":"model laguna-s-2.1:free not found","type":"invalid_request_error"}}"#;
+                let mut resp = String::new();
+                resp.push_str("HTTP/1.1 404 Not Found\r\n");
+                resp.push_str("Content-Type: application/json\r\n");
+                resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
+                resp.push_str("Connection: close\r\n\r\n");
+                resp.push_str(body);
+                let _ = s.write_all(resp.as_bytes()).await;
+            }
         });
 
         let provider = OpenAiProvider::new(&base, "test-key");
@@ -1667,6 +1715,7 @@ mod tests {
             metadata: None,
             cancel: CancellationToken::new(),
             stream_timeout: None,
+            enable_compression: false,
         };
 
         let err = provider.stream(&request).await.unwrap_err();
@@ -1695,17 +1744,19 @@ mod tests {
         let base = format!("http://127.0.0.1:{port}/v1");
 
         let server = tokio::spawn(async move {
-            let (mut s, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 4096];
-            let _ = s.read(&mut buf).await;
-            let body = r#"{"error":{"message":"Input length 262243 exceeds the maximum allowed input length of 262112 tokens.","type":"Bad Request"}}"#;
-            let mut resp = String::new();
-            resp.push_str("HTTP/1.1 400 Bad Request\r\n");
-            resp.push_str("Content-Type: application/json\r\n");
-            resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
-            resp.push_str("Connection: close\r\n\r\n");
-            resp.push_str(body);
-            let _ = s.write_all(resp.as_bytes()).await;
+            for _ in 0..2 {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let _ = s.read(&mut buf).await;
+                let body = r#"{"error":{"message":"Input length 262243 exceeds the maximum allowed input length of 262112 tokens.","type":"Bad Request"}}"#;
+                let mut resp = String::new();
+                resp.push_str("HTTP/1.1 400 Bad Request\r\n");
+                resp.push_str("Content-Type: application/json\r\n");
+                resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
+                resp.push_str("Connection: close\r\n\r\n");
+                resp.push_str(body);
+                let _ = s.write_all(resp.as_bytes()).await;
+            }
         });
 
         let provider = OpenAiProvider::new(&base, "test-key");
@@ -1721,6 +1772,7 @@ mod tests {
             metadata: None,
             cancel: CancellationToken::new(),
             stream_timeout: None,
+            enable_compression: false,
         };
 
         let err = provider.stream(&request).await.unwrap_err();
@@ -1745,17 +1797,19 @@ mod tests {
         let base = format!("http://127.0.0.1:{port}/v1");
 
         let server = tokio::spawn(async move {
-            let (mut s, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 4096];
-            let _ = s.read(&mut buf).await;
-            let body = r#"{"error":{"message":"model laguna-s-2.1:free not found","type":"invalid_request_error"}}"#;
-            let mut resp = String::new();
-            resp.push_str("HTTP/1.1 400 Bad Request\r\n");
-            resp.push_str("Content-Type: application/json\r\n");
-            resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
-            resp.push_str("Connection: close\r\n\r\n");
-            resp.push_str(body);
-            let _ = s.write_all(resp.as_bytes()).await;
+            for _ in 0..2 {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let _ = s.read(&mut buf).await;
+                let body = r#"{"error":{"message":"model laguna-s-2.1:free not found","type":"invalid_request_error"}}"#;
+                let mut resp = String::new();
+                resp.push_str("HTTP/1.1 400 Bad Request\r\n");
+                resp.push_str("Content-Type: application/json\r\n");
+                resp.push_str(&format!("Content-Length: {}\r\n", body.len()));
+                resp.push_str("Connection: close\r\n\r\n");
+                resp.push_str(body);
+                let _ = s.write_all(resp.as_bytes()).await;
+            }
         });
 
         let provider = OpenAiProvider::new(&base, "test-key");
@@ -1771,6 +1825,7 @@ mod tests {
             metadata: None,
             cancel: CancellationToken::new(),
             stream_timeout: None,
+            enable_compression: false,
         };
 
         let err = provider.stream(&request).await.unwrap_err();
@@ -1807,6 +1862,7 @@ mod tests {
             metadata: None,
             cancel: CancellationToken::new(),
             stream_timeout: None,
+            enable_compression: false,
         };
 
         let body = provider.build_body(&request);
@@ -1845,6 +1901,7 @@ mod tests {
             metadata: None,
             cancel: CancellationToken::new(),
             stream_timeout: None,
+            enable_compression: false,
         };
 
         let body = provider.build_responses_body(&request);

@@ -13,6 +13,7 @@ pub mod anthropic;
 pub mod azure_openai;
 pub mod client;
 pub mod codex_auth;
+pub mod encoding;
 pub mod kilo;
 pub mod message;
 pub mod nemotron;

@@ -7,10 +7,14 @@
 //! Auth: `api-key` header by default, or `Authorization: Bearer {ad_token}`
 //! when `AZURE_OPENAI_AD_TOKEN` is set.
 
+use super::encoding::Encoder;
 use super::identity;
 use async_trait::async_trait;
 use futures::StreamExt;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::Body;
+use reqwest::header::{
+    AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue,
+};
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -25,6 +29,9 @@ pub struct AzureOpenAiProvider {
     base_url: String,
     api_key: String,
     api_version: String,
+    /// Per-instance cache of whether this endpoint negotiated gzip request
+    /// compression via a probe request.
+    encoder: Encoder,
 }
 
 impl AzureOpenAiProvider {
@@ -44,6 +51,7 @@ impl AzureOpenAiProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             api_version,
+            encoder: Encoder::new(),
         }
     }
 
@@ -246,11 +254,25 @@ impl Provider for AzureOpenAiProvider {
 
         debug!("Azure OpenAI request to {url}");
 
-        let response = self
-            .http
-            .post(&url)
-            .headers(headers)
-            .json(&body)
+        // Lazily probe whether this endpoint accepts gzip request bodies.
+        let _ = super::encoding::probe_if_needed(
+            &self.http,
+            &url,
+            &headers,
+            &request.model,
+            &self.encoder,
+        )
+        .await;
+
+        let json_bytes = serde_json::to_vec(&body)
+            .map_err(|e| ProviderError::Network(format!("json serialize: {e}")))?;
+        let (payload, use_gzip) = self.encoder.encode(&json_bytes);
+        let mut req = self.http.post(&url).headers(headers);
+        if request.enable_compression && use_gzip {
+            req = req.header(CONTENT_ENCODING, "gzip");
+        }
+        let response = req
+            .body(Body::from(payload))
             .send()
             .await
             .map_err(|e| ProviderError::Network(format!("chat/completions: {e}")))?;

@@ -29,6 +29,9 @@ anyhow = "1"
 # Async traits
 async-trait = "0.1"
 
+# Gzip compression of LLM request bodies when the provider negotiates it.
+flate2 = { version = "1", default-features = false, features = ["miniz_oxide"] }
+
 # File operations
 glob = "0.3"
 ignore = "0.4"

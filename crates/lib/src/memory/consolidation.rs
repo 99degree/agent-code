@@ -190,6 +190,7 @@ pub async fn run_consolidation(
         // Background consolidation: not user-cancellable, passes a fresh token.
         cancel: tokio_util::sync::CancellationToken::new(),
         stream_timeout: None,
+        enable_compression: false,
     };
 
     let result = match llm.stream(&request).await {

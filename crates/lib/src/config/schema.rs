@@ -971,6 +971,10 @@ pub struct FeaturesConfig {
     pub dump_failed_requests: bool,
     /// Print last LLM response and stop location when agent stops.
     pub debug_mode: bool,
+    /// Gzip-compress outbound LLM request bodies (after a per-endpoint probe)
+    /// to cut upload bandwidth and latency. Off by default; a per-endpoint probe
+    /// runs on first use of each provider instance once enabled.
+    pub request_compression: bool,
 }
 
 impl Default for FeaturesConfig {
@@ -991,6 +995,7 @@ impl Default for FeaturesConfig {
             prompt_caching: true,
             dump_failed_requests: true,
             debug_mode: false,
+            request_compression: false,
         }
     }
 }

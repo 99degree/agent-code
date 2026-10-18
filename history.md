@@ -164,3 +164,11 @@ Implement robust context window handling with API priority (API > baked-in table
 - crates/lib/tests/debug_response_test.rs: Updated MockProvider to match new fetch_models signature
 - crates/cli/src/ui/modern/run.rs: Added context_window to SessionSnapshot and session handling
 - crates/cli/src/commands/import_pi.rs: Updated session creation to include context_window field
+
+## Compaction 2026-10-17T10:26:49.740727027+00:00
+
+Let me check the requesty provider and confirm the full set of request-sending sites.<tool_call>Read<arg_key>path</arg_key><arg_value>/data/data/com.termux/files/home/agent-code/crates/lib/src/llm/requesty.rs</arg_value></tool_call><tool_call>Grep<arg_key>output_mode</arg_key><arg_value>content</arg_value><arg_key>path</arg_key><arg_value>/data/data/com.termux/files/home/agent-code/crates/lib/src/llm</arg_value><arg_key>pattern</arg_key><arg_value>\.json\(&body\)|\.json\(&request\)</arg_value></tool_call>
+
+## Compaction 2026-10-17T11:06:38.919204501+00:00
+
+<tool_call>Grep<arg_key>output_mode</arg_key><arg_value>content</arg_value><arg_key>path</arg_key><arg_value>/data/data/com.termux/files/home/agent-code/crates/lib/src/llm/message.rs</arg_value><arg_key>pattern</arg_key><arg_value>pub struct UserMessage|pub struct AssistantMessage|pub struct SystemMessage|pub enum ContentBlock|pub fn user_message</arg_value></tool_call>
