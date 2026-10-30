@@ -88,6 +88,10 @@ pub enum SseEvent {
     #[serde(rename = "turn_complete")]
     TurnComplete { turn: usize },
 
+    /// Terminal outcome of a turn: `done` | `cancelled` | `error` | `max_turns`.
+    #[serde(rename = "turn_outcome")]
+    TurnOutcome { turn: usize, outcome: String },
+
     /// Token usage update.
     #[serde(rename = "usage")]
     Usage {
@@ -272,6 +276,13 @@ impl StreamSink for SseBroadcastSink {
 
     fn on_turn_complete(&self, turn: usize) {
         self.send(SseEvent::TurnComplete { turn });
+    }
+
+    fn on_turn_outcome(&self, turn: usize, outcome: &str) {
+        self.send(SseEvent::TurnOutcome {
+            turn,
+            outcome: outcome.to_string(),
+        });
     }
 
     fn on_error(&self, error: &str) {
@@ -725,6 +736,7 @@ async fn handle_ws_request(
                         SseEvent::ToolResult { .. } => "events/tool_result",
                         SseEvent::Thinking { .. } => "events/thinking",
                         SseEvent::TurnComplete { .. } => "events/turn_complete",
+                        SseEvent::TurnOutcome { .. } => "events/turn_outcome",
                         SseEvent::Usage { .. } => "events/usage",
                         SseEvent::Error { .. } => "events/error",
                         SseEvent::Compact { .. } => "events/compact",
@@ -871,6 +883,30 @@ mod tests {
             result["content"].as_str().unwrap().contains("@@"),
             "diff content must survive serialization"
         );
+    }
+
+    #[test]
+    fn turn_outcome_serializes_with_snake_case_type() {
+        let event = serde_json::to_value(SseEvent::TurnOutcome {
+            turn: 2,
+            outcome: "done".into(),
+        })
+        .unwrap();
+        assert_eq!(event["type"], "turn_outcome");
+        assert_eq!(event["turn"], 2);
+        assert_eq!(event["outcome"], "done");
+    }
+
+    #[test]
+    fn turn_outcome_cancelled_variant() {
+        let event = serde_json::to_value(SseEvent::TurnOutcome {
+            turn: 1,
+            outcome: "cancelled".into(),
+        })
+        .unwrap();
+        assert_eq!(event["type"], "turn_outcome");
+        assert_eq!(event["outcome"], "cancelled");
+        assert_eq!(event["turn"], 1);
     }
 
     fn skill(

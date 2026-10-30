@@ -147,6 +147,15 @@ enum Event<'a> {
         total_cost_usd: f64,
         exit_code: u8,
     },
+    /// Terminal outcome of a turn: `done` | `cancelled` | `error` | `max_turns`.
+    /// Fires at the end of a turn, after `TurnComplete` (if the turn finished
+    /// normally) or in place of it (if the turn was cancelled/errored). Consumers
+    /// can use this to drive lifecycle state (e.g. marking a turn as finished
+    /// in a dashboard) without guessing from the absence of further events.
+    TurnOutcome {
+        turn: usize,
+        outcome: &'a str,
+    },
 }
 
 /// Internal mutable state shared across sink callbacks.
@@ -297,6 +306,12 @@ impl StreamSink for JsonStreamSink {
         let turn = self.inner.lock().unwrap().turn;
         emit(&Event::Compact { freed_tokens, turn });
         let _ = writeln!(std::io::stderr(), "compacted: freed ~{freed_tokens} tokens");
+    }
+
+    fn on_turn_outcome(&self, turn: usize, outcome: &str) {
+        let mut state = self.inner.lock().unwrap();
+        state.turn = turn;
+        emit(&Event::TurnOutcome { turn, outcome });
     }
 }
 
@@ -510,6 +525,11 @@ mod tests {
                 turn: 4,
             })
             .unwrap(),
+            serde_json::to_value(Event::TurnOutcome {
+                turn: 2,
+                outcome: "done",
+            })
+            .unwrap(),
         ];
         for val in events {
             let line = serde_json::to_string(&val).unwrap();
@@ -617,6 +637,41 @@ mod tests {
         assert!(json.contains(r#""type":"compact""#));
         assert!(json.contains(r#""freed_tokens":2048"#));
         assert!(json.contains(r#""turn":7"#));
+    }
+
+    #[test]
+    fn event_serialization_turn_outcome_uses_snake_case_type() {
+        let event = Event::TurnOutcome {
+            turn: 3,
+            outcome: "done",
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"turn_outcome""#));
+        assert!(json.contains(r#""turn":3"#));
+        assert!(json.contains(r#""outcome":"done""#));
+    }
+
+    #[test]
+    fn event_serialization_turn_outcome_cancelled() {
+        let event = Event::TurnOutcome {
+            turn: 1,
+            outcome: "cancelled",
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"turn_outcome""#));
+        assert!(json.contains(r#""outcome":"cancelled""#));
+        assert!(json.contains(r#""turn":1"#));
+    }
+
+    #[test]
+    fn turn_outcome_event_is_single_line() {
+        let event = Event::TurnOutcome {
+            turn: 2,
+            outcome: "max_turns",
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains('\n'), "event must be single-line: {json}");
+        assert!(json.contains(r#""type":"turn_outcome""#));
     }
 
     #[test]

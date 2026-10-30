@@ -166,6 +166,13 @@ impl StreamSink for AcpSink {
         self.notify("events/turn_complete", serde_json::json!({ "turn": turn }));
     }
 
+    fn on_turn_outcome(&self, turn: usize, outcome: &str) {
+        self.notify(
+            "events/turn_outcome",
+            serde_json::json!({ "turn": turn, "outcome": outcome }),
+        );
+    }
+
     fn on_error(&self, error: &str) {
         if let Ok(mut t) = self.text.lock() {
             t.push_str(&format!("\n[Error: {error}]"));
