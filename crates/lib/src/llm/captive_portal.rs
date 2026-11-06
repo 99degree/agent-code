@@ -88,6 +88,12 @@ impl CaptivePortal {
     /// Returns `Ok(())` when the agree submission was accepted, or a
     /// `String` error describing why login failed.
     pub async fn login(&self) -> Result<(), String> {
+        tracing::info!(
+            "captive portal: GET login page (profile={}, url={})",
+            self.profile.name,
+            self.login_url
+        );
+
         // Fetch the login page. reqwest follows redirects automatically, so
         // if the initial request gets redirected to the captive portal page
         // (e.g. http://google.com →
@@ -102,17 +108,29 @@ impl CaptivePortal {
 
         let status = resp.status();
         if !status.is_success() {
+            tracing::warn!(
+                "captive portal: login page returned status {} for {}",
+                status.as_u16(),
+                self.login_url
+            );
             return Err(format!(
                 "captive portal login page returned status {}",
                 status.as_u16()
             ));
         }
 
+        tracing::info!(
+            "captive portal: login page fetched, status={}, final_url={}",
+            status.as_u16(),
+            resp.url()
+        );
+
         // The final URL after any redirects — captive portals often redirect
         // from a generic URL (google.com) to the portal-specific login page.
         let final_url: String = resp.url().as_str().to_string();
 
         // Collect cookies from all Set-Cookie headers.
+        let mut cookie_count = 0;
         for set_cookie in resp.headers().get_all(SET_COOKIE).iter() {
             if let Ok(values) = set_cookie.to_str() {
                 for cookie in values.split(';') {
@@ -124,11 +142,13 @@ impl CaptivePortal {
                                 .lock()
                                 .unwrap()
                                 .insert(name.to_string(), value.to_string());
+                            cookie_count += 1;
                         }
                     }
                 }
             }
         }
+        tracing::debug!("captive portal: collected {cookie_count} cookies");
 
         let html = resp
             .text()
@@ -142,6 +162,12 @@ impl CaptivePortal {
         // Resolve the form action against the *final* URL (after redirects),
         // not the original login URL, since the page may have moved.
         let action_url = resolve_action_url(&final_url, &form.action);
+
+        tracing::info!(
+            "captive portal: found form, action={}, inputs={}",
+            action_url,
+            form.inputs.len()
+        );
 
         // Build form data: include all existing inputs, overriding the agree
         // field. Captive portals often carry the original target URL as a
@@ -166,14 +192,33 @@ impl CaptivePortal {
             .join("; ");
 
         // Submit the agree POST.
+        tracing::info!(
+            "captive portal: POST agree form (profile={}, field={}, action={})",
+            self.profile.name,
+            self.profile.agree_field,
+            action_url
+        );
         let mut req = self.client.post(&action_url).form(&form_data);
         if !cookie_header.is_empty() {
             req = req.header("Cookie", cookie_header);
         }
-        let _resp = req
+        let resp = req
             .send()
             .await
             .map_err(|e| format!("failed to submit captive portal agree form: {e}"))?;
+
+        let status = resp.status();
+        tracing::info!(
+            "captive portal: agree form submitted, status={}",
+            status.as_u16()
+        );
+
+        if !status.is_success() {
+            return Err(format!(
+                "captive portal agree form returned status {}",
+                status.as_u16()
+            ));
+        }
 
         Ok(())
     }
@@ -181,6 +226,11 @@ impl CaptivePortal {
     /// The profile name.
     pub fn name(&self) -> &'static str {
         self.profile.name
+    }
+
+    /// The portal login URL.
+    pub fn login_url(&self) -> &str {
+        &self.login_url
     }
 }
 
@@ -203,6 +253,16 @@ impl CaptivePortalManager {
             })
             .collect();
         Self { portals }
+    }
+
+    /// Number of portals configured.
+    pub fn portal_count(&self) -> usize {
+        self.portals.len()
+    }
+
+    /// Iterate over the configured portals.
+    pub fn portals(&self) -> std::slice::Iter<'_, CaptivePortal> {
+        self.portals.iter()
     }
 
     /// Try logging into each portal in order. Returns `Ok(())` on the first

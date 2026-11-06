@@ -1634,6 +1634,17 @@ impl QueryEngine {
                                 .collect();
                             let manager =
                                 crate::llm::captive_portal::CaptivePortalManager::new(&entries);
+                            tracing::info!(
+                                "captive portal: attempting login on {} portal(s)",
+                                manager.portal_count()
+                            );
+                            for portal in manager.portals() {
+                                sink.on_warning(&format!(
+                                    "Captive portal login request: {} (profile={})",
+                                    portal.login_url(),
+                                    portal.name()
+                                ));
+                            }
                             match manager.login().await {
                                 Ok(()) => {
                                     sink.on_warning(
@@ -1646,7 +1657,7 @@ impl QueryEngine {
                                         "Captive portal login failed: {portal_err}; falling through to normal retry"
                                     );
                                     sink.on_warning(&format!(
-                                        "Captive portal login failed: {portal_err}"
+                                        "Captive portal login response: failed - {portal_err}"
                                     ));
                                 }
                             }
