@@ -1368,7 +1368,12 @@ impl QueryEngine {
 
             // Step 1: Auto-compact if context is too large.
             let provider_name = current_provider_kind.as_name();
-            if compact::should_auto_compact(self.state.history(), provider_name, &model, &compact_tracking) {
+            if compact::should_auto_compact(
+                self.state.history(),
+                provider_name,
+                &model,
+                &compact_tracking,
+            ) {
                 let token_count = tokens::estimate_context_tokens(self.state.history());
                 let threshold = compact::auto_compact_threshold(provider_name, &model);
                 info!("Auto-compact triggered: {token_count} tokens >= {threshold} threshold");
@@ -1606,6 +1611,47 @@ impl QueryEngine {
                             warn!("LLM call cancelled by user; aborting turn");
                             return Ok(());
                         }
+
+                        // Captive portal recovery: if the LLM call failed with a
+                        // transport-level network error, try each builtin captive
+                        // portal profile in order: GET the login page, submit the
+                        // "agree"/"accept"/"continue" form, then retry the LLM call
+                        // in place (does not consume a turn).
+                        if matches!(&e, ProviderError::Network(_))
+                            && !self.state.config.api.captive_portal_urls.is_empty()
+                        {
+                            let entries: Vec<(&'static str, String)> = self
+                                .state
+                                .config
+                                .api
+                                .captive_portal_urls
+                                .iter()
+                                .flat_map(|url| {
+                                    crate::llm::captive_portal::CAPTIVE_PORTAL_PROFILES
+                                        .iter()
+                                        .map(move |p| (p.name, url.clone()))
+                                })
+                                .collect();
+                            let manager =
+                                crate::llm::captive_portal::CaptivePortalManager::new(&entries);
+                            match manager.login().await {
+                                Ok(()) => {
+                                    sink.on_warning(
+                                        "Captive portal login succeeded; retrying LLM call",
+                                    );
+                                    continue 'acquire;
+                                }
+                                Err(portal_err) => {
+                                    warn!(
+                                        "Captive portal login failed: {portal_err}; falling through to normal retry"
+                                    );
+                                    sink.on_warning(&format!(
+                                        "Captive portal login failed: {portal_err}"
+                                    ));
+                                }
+                            }
+                        }
+
                         let retryable = crate::llm::retry::RetryableError::classify(&e);
 
                         match retry_state.next_action(
@@ -4727,7 +4773,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(user_texts.iter().any(|t| t.contains("first prompt")), "user_texts: {:?}", user_texts);
+        assert!(
+            user_texts.iter().any(|t| t.contains("first prompt")),
+            "user_texts: {:?}",
+            user_texts
+        );
         assert_eq!(assistant_texts, vec!["hello"]);
 
         let saved = crate::services::session::save_session_full(

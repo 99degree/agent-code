@@ -11,6 +11,7 @@
 
 pub mod anthropic;
 pub mod azure_openai;
+pub mod captive_portal;
 pub mod client;
 pub mod codex_auth;
 pub mod encoding;
