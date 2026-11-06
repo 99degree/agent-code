@@ -56,6 +56,13 @@ pub const CAPTIVE_PORTAL_PROFILES: &[CaptivePortalProfile] = &[
     },
 ];
 
+/// Default captive portal URLs (hardcoded in code — no config needed).
+///
+/// Add a new portal URL here as needed; no TOML configuration change
+/// required. Each URL is tried against every `CAPTIVE_PORTAL_PROFILES`
+/// profile until one succeeds.
+pub const DEFAULT_PORTALS: &[&str] = &[];
+
 /// Captive portal client for one portal. Holds cookies collected from the
 /// login page so they can be sent with the agree POST.
 pub struct CaptivePortal {

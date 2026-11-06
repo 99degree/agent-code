@@ -552,14 +552,6 @@ pub struct ApiConfig {
     /// Installation version for OpenCode provider header (built as "opencode/<version>").
     #[serde(default)]
     pub version: Option<String>,
-    /// URLs of captive portal login pages tried on LLM network errors.
-    /// When an LLM API call fails with a transport-level network error, the
-    /// agent tries each builtin captive portal profile (agree, accept,
-    /// continue, terms) against each URL in order, submitting the agree
-    /// form, then retries the LLM call. Intended for networks behind a
-    /// captive portal (e.g. Wi-Fi login pages).
-    #[serde(default)]
-    pub captive_portal_urls: Vec<String>,
 }
 
 fn default_max_retry_after_secs() -> u64 {
@@ -686,7 +678,6 @@ impl Default for ApiConfig {
             project_id: None,
             client: None,
             version: None,
-            captive_portal_urls: Vec::new(),
         }
     }
 }

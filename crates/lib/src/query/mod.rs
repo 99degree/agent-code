@@ -1614,24 +1614,23 @@ impl QueryEngine {
 
                         // Captive portal recovery: if the LLM call failed with a
                         // transport-level network error, try each builtin captive
-                        // portal profile in order: GET the login page, submit the
-                        // "agree"/"accept"/"continue" form, then retry the LLM call
-                        // in place (does not consume a turn).
+                        // portal profile (agree/accept/continue/terms) against each
+                        // hardcoded portal URL (see `DEFAULT_PORTALS`), submitting
+                        // the agree form, then retry the LLM call in place (does not
+                        // consume a turn). No TOML config needed — add URLs to
+                        // `DEFAULT_PORTALS` in code.
                         if matches!(&e, ProviderError::Network(_))
-                            && !self.state.config.api.captive_portal_urls.is_empty()
+                            && !crate::llm::captive_portal::DEFAULT_PORTALS.is_empty()
                         {
-                            let entries: Vec<(&'static str, String)> = self
-                                .state
-                                .config
-                                .api
-                                .captive_portal_urls
-                                .iter()
-                                .flat_map(|url| {
-                                    crate::llm::captive_portal::CAPTIVE_PORTAL_PROFILES
-                                        .iter()
-                                        .map(move |p| (p.name, url.clone()))
-                                })
-                                .collect();
+                            let entries: Vec<(&'static str, String)> =
+                                crate::llm::captive_portal::CAPTIVE_PORTAL_PROFILES
+                                    .iter()
+                                    .flat_map(|p| {
+                                        crate::llm::captive_portal::DEFAULT_PORTALS
+                                            .iter()
+                                            .map(move |url| (p.name, url.to_string()))
+                                    })
+                                    .collect();
                             let manager =
                                 crate::llm::captive_portal::CaptivePortalManager::new(&entries);
                             tracing::info!(
