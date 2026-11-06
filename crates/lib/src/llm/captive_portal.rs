@@ -61,7 +61,10 @@ pub const CAPTIVE_PORTAL_PROFILES: &[CaptivePortalProfile] = &[
 /// Add a new portal URL here as needed; no TOML configuration change
 /// required. Each URL is tried against every `CAPTIVE_PORTAL_PROFILES`
 /// profile until one succeeds.
-pub const DEFAULT_PORTALS: &[&str] = &["https://integrate.api.nvidia.com/v1/chat/completions"];
+pub const DEFAULT_PORTALS: &[&str] = &[
+    "https://integrate.api.nvidia.com/v1/chat/completions",
+    "https://free.wifi.gov.hk/GovWifiUI_/userlanding/tc/login.html?&url=http%3A%2F%2Fgoogle.com%2F&",
+];
 
 /// Captive portal client for one portal. Holds cookies collected from the
 /// login page so they can be sent with the agree POST.
