@@ -112,6 +112,7 @@ impl ToolRegistry {
         registry.register(Arc::new(super::file_write::FileWriteTool));
         registry.register(Arc::new(super::file_edit::FileEditTool));
         registry.register(Arc::new(super::edit_alias::EditTool));
+        registry.register(Arc::new(super::edit_capital::EditCapitalTool));
         registry.register(Arc::new(super::multi_edit::MultiEditTool));
         registry.register(Arc::new(super::grep::GrepTool));
         registry.register(Arc::new(super::glob::GlobTool));
@@ -255,6 +256,7 @@ mod tests {
         assert!(reg.get("Bash").is_some());
         assert!(reg.get("FileRead").is_some());
         assert!(reg.get("NonExistent").is_none());
+        assert!(reg.get("Edit").is_some());
     }
 
     #[test]
