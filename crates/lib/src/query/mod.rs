@@ -675,12 +675,18 @@ impl QueryEngine {
     /// success. Used by `/connect` so the user can test portal recovery
     /// manually without waiting for an LLM call to fail.
     pub async fn captive_portal_login(&self) -> Result<(), String> {
-        let probe_url = "http://example.com/";
-        let entries: Vec<(&'static str, String)> =
-            crate::llm::captive_portal::CAPTIVE_PORTAL_PROFILES
-                .iter()
-                .map(|p| (p.name, probe_url.to_string()))
-                .collect();
+        let probe_urls = crate::llm::captive_portal::TEST_PORTALS;
+        if probe_urls.is_empty() {
+            return Err("no test portal URLs configured".to_string());
+        }
+        let entries: Vec<(&'static str, String)> = probe_urls
+            .iter()
+            .flat_map(|url| {
+                crate::llm::captive_portal::CAPTIVE_PORTAL_PROFILES
+                    .iter()
+                    .map(move |p| (p.name, url.to_string()))
+            })
+            .collect();
         let manager = crate::llm::captive_portal::CaptivePortalManager::new(&entries);
         tracing::info!(
             "captive portal: attempting login on {} portal(s)",
@@ -1634,16 +1640,21 @@ impl QueryEngine {
 
                         // Captive portal recovery: if the LLM call failed with a
                         // transport-level network error, the agent is likely behind
-                        // a captive portal. Probe a well-known detection URL to get
+                        // a captive portal. Probe test portal URLs to get
                         // the portal login page, submit the agree form, then retry
                         // the LLM call in place (does not consume a turn).
-                        if matches!(&e, ProviderError::Network(_)) {
-                            let probe_url = "http://example.com/";
-                            let entries: Vec<(&'static str, String)> =
-                                crate::llm::captive_portal::CAPTIVE_PORTAL_PROFILES
-                                    .iter()
-                                    .map(|p| (p.name, probe_url.to_string()))
-                                    .collect();
+                        if matches!(&e, ProviderError::Network(_))
+                            && !crate::llm::captive_portal::TEST_PORTALS.is_empty()
+                        {
+                            let probe_urls = crate::llm::captive_portal::TEST_PORTALS;
+                            let entries: Vec<(&'static str, String)> = probe_urls
+                                .iter()
+                                .flat_map(|url| {
+                                    crate::llm::captive_portal::CAPTIVE_PORTAL_PROFILES
+                                        .iter()
+                                        .map(move |p| (p.name, url.to_string()))
+                                })
+                                .collect();
                             let manager =
                                 crate::llm::captive_portal::CaptivePortalManager::new(&entries);
                             tracing::info!(
