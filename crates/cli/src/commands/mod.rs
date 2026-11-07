@@ -14,7 +14,7 @@ mod import_pi;
 mod settings_sync;
 mod uninstall;
 
-use agent_code_lib::config::ApiAuthMode;
+use agent_code_lib::config::{ApiAuthMode, DualMaster};
 use agent_code_lib::llm::provider::ProviderKind;
 use agent_code_lib::query::QueryEngine;
 use std::collections::{HashMap, HashSet};
@@ -164,6 +164,18 @@ pub const COMMANDS: &[Command] = &[
         name: "model",
         aliases: &[],
         description: "Show or change the current model",
+        hidden: false,
+    },
+    Command {
+        name: "model2",
+        aliases: &[],
+        description: "Set the alternative model for dual-LLM mode (same provider)",
+        hidden: false,
+    },
+    Command {
+        name: "dual-master",
+        aliases: &[],
+        description: "Choose which model's response is master in dual-LLM mode",
         hidden: false,
     },
     Command {
@@ -868,6 +880,7 @@ pub const INTERACTIVE_SLASH_NAMES: &[&str] = &[
     // Theme / model / tutorial pickers.
     "theme",
     "model",
+    "model2",
     "powerup",
     // Full interactive uninstall flow.
     "uninstall",
@@ -894,6 +907,7 @@ pub fn needs_real_tty_stdout(cmd: &str) -> bool {
             | "open"
             | "theme"
             | "model"
+            | "model2"
             | "powerup"
             | "uninstall"
             | "login"
@@ -2286,6 +2300,14 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
         }
         Some("fast") => {
             execute_fast(engine);
+            CommandResult::Handled
+        }
+        Some("model2") => {
+            execute_model2(args, engine);
+            CommandResult::Handled
+        }
+        Some("dual-master") => {
+            execute_dual_master(args, engine);
             CommandResult::Handled
         }
         Some("files") => {
@@ -6662,6 +6684,191 @@ fn default_fast_model(current: &str) -> String {
         // Generic fallback — the provider will error if the name is bad,
         // which nudges the user to configure `fast_model` explicitly.
         "haiku".to_string()
+    }
+}
+
+/// Execute `/model2` — set or clear the alternative (secondary) model used
+/// by dual-LLM mode. The secondary model must belong to the same provider
+/// as the current `api.model`; switching it also repoints `base_url` to
+/// that provider's default when applicable.
+///
+/// Usage:
+///   /model2 <model>   — set the alternative model (and enable dual LLM)
+///   /model2 clear     — disable dual-LLM mode and clear the alternative
+///   /model2           — show the current alternative + master selection
+fn execute_model2(args: Option<&str>, engine: &mut QueryEngine) {
+    // Snapshot everything we need from api before borrowing engine mutably
+    // for fetch_model_entries.
+    let (current, kind, dual_master) = {
+        let api = &mut engine.state_mut().config.api;
+        let current = api.model.clone();
+        let kind = agent_code_lib::llm::provider::get_provider_for_model(&current, &api.base_url);
+        let dual_master = api.dual_master;
+        (current, kind, dual_master)
+    };
+
+    match args {
+        None | Some("") => {
+            // Interactive secondary-model picker — same style as /model,
+            // but targets api.secondary_model instead of api.model.
+            let mut all_models: Vec<(String, String, agent_code_lib::llm::provider::ProviderKind)> =
+                Vec::new();
+            for &k in agent_code_lib::llm::provider::ProviderKind::all() {
+                if !k.is_configured() {
+                    continue;
+                }
+                let models = fetch_model_entries(engine, k);
+                if models.is_empty() {
+                    continue;
+                }
+                for (name, desc, _ctx) in models {
+                    all_models.push((name, desc, k));
+                }
+            }
+
+            if all_models.is_empty() {
+                let state = engine.state();
+                let api = &state.config.api;
+                println!(
+                    "Dual LLM: {}",
+                    if api.dual_llm_enabled { "on" } else { "off" }
+                );
+                if let Some(m) = &api.secondary_model {
+                    println!("Secondary model: {m}");
+                } else {
+                    println!("Secondary model: (not set)");
+                }
+                println!("Master: {:?}", api.dual_master);
+                println!("Primary model: {current} [{kind:?}]");
+                println!("No providers configured to pick from.");
+            } else {
+                println!();
+                println!("  Select secondary model");
+                println!();
+
+                let secondary_current = engine.state().config.api.secondary_model.clone();
+
+                let options: Vec<crate::ui::selector::SelectOption> = all_models
+                    .iter()
+                    .map(|(name, desc, kind)| {
+                        let check = if secondary_current.as_deref() == Some(name.as_str()) {
+                            " ✔"
+                        } else {
+                            ""
+                        };
+                        crate::ui::selector::SelectOption {
+                            label: format!("{name}{check}"),
+                            description: format!("[{kind:?}] {desc}"),
+                            value: name.to_string(),
+                            preview: None,
+                        }
+                    })
+                    .collect();
+
+                let chosen = crate::ui::selector::select(&options);
+                if !chosen.is_empty() {
+                    let state = engine.state_mut();
+                    let api = &mut state.config.api;
+                    let found_kind = all_models
+                        .iter()
+                        .find(|(n, _, _)| n == &chosen)
+                        .map(|(_, _, k)| *k);
+                    if let Some(kind) = found_kind
+                        && let Some(url) = kind.default_base_url()
+                    {
+                        api.base_url = url.to_string();
+                    }
+                    api.secondary_model = Some(chosen.clone());
+                    api.dual_llm_enabled = true;
+                    println!(
+                        "Secondary model set to '{chosen}' [{found_kind:?}]. Dual LLM enabled."
+                    );
+                    println!("  Every request goes to both '{current}' and '{chosen}'.");
+                    println!(
+                        "  Master response: {:?} (use /dual-master to change).",
+                        dual_master
+                    );
+                }
+            }
+        }
+        Some("clear") => {
+            let api = &mut engine.state_mut().config.api;
+            api.secondary_model = None;
+            api.dual_llm_enabled = false;
+            println!("Dual LLM disabled; secondary model cleared.");
+        }
+        Some(new_model) => {
+            let (new_kind, current_model, dual_master_val, auth) = {
+                let api = &mut engine.state_mut().config.api;
+                let base_url = api.base_url.clone();
+                let auth = api.auth_mode;
+                let new_kind =
+                    agent_code_lib::llm::provider::get_provider_for_model(new_model, &base_url);
+                let default_url = new_kind.default_base_url().map(|u| u.to_string());
+                let current_model = api.model.clone();
+                let dual_master_val = api.dual_master;
+                api.secondary_model = Some(new_model.to_string());
+                api.dual_llm_enabled = true;
+                if let Some(url) = default_url.as_ref() {
+                    api.base_url = url.clone();
+                }
+                (new_kind, current_model, dual_master_val, auth)
+            };
+            // Rebuild provider so the new model/base_url take effect on next request.
+            if auth == agent_code_lib::config::ApiAuthMode::ApiKey {
+                if engine.reload_llm().is_ok() {
+                    println!("Live session now uses provider `{new_kind:?}` for dual LLM.");
+                }
+            }
+            println!("Secondary model set to '{new_model}' [{new_kind:?}]. Dual LLM enabled.");
+            println!("  Every request goes to both '{current_model}' and '{new_model}'.");
+            println!(
+                "  Master response: {:?} (use /dual-master to change).",
+                dual_master_val
+            );
+        }
+    }
+}
+
+/// Execute `/dual-master` — choose which model's response is returned
+/// as the master in dual-LLM mode.
+///
+/// Usage:
+///   /dual-master first   — use the primary `model` response (default)
+///   /dual-master second  — use the `secondary_model` response
+///   /dual-master         — show current selection
+fn execute_dual_master(args: Option<&str>, engine: &mut QueryEngine) {
+    let state = engine.state_mut();
+    let api = &mut state.config.api;
+
+    if !api.dual_llm_enabled {
+        println!("Dual LLM is not enabled. Set a secondary model with /model2 first.");
+        return;
+    }
+
+    match args {
+        None | Some("") => {
+            println!("Dual LLM master: {:?}", api.dual_master);
+            println!("Primary model: {}", api.model);
+            if let Some(m) = &api.secondary_model {
+                println!("Secondary model: {m}");
+            }
+        }
+        Some("first") => {
+            api.dual_master = DualMaster::First;
+            println!("Dual LLM master set to: primary model ({})", api.model);
+        }
+        Some("second") => {
+            api.dual_master = DualMaster::Second;
+            if let Some(m) = &api.secondary_model {
+                println!("Dual LLM master set to: secondary model ({m})");
+            } else {
+                println!("Dual LLM master set to: secondary model (not set)");
+            }
+        }
+        Some(other) => {
+            println!("Unknown selection '{other}'. Use: /dual-master first | second");
+        }
     }
 }
 

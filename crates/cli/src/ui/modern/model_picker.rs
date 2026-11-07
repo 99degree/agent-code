@@ -20,10 +20,22 @@ pub struct ModelPicker {
     pub entries: Vec<(String, String, Option<u64>)>,
     /// Model active when the picker opened.
     pub current: String,
+    /// Whether this picker targets the main model or the secondary model.
+    pub kind: ModelPickerKind,
     /// When true, the list shows effort levels for the highlighted model.
     pub effort_phase: bool,
     /// Selected effort row.
     pub effort_selected: usize,
+}
+
+/// Whether the model picker targets the main `model` or `secondary_model`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelPickerKind {
+    /// Main model picker (Ctrl+M / `/model`).
+    #[default]
+    Main,
+    /// Secondary model picker (`/model2`).
+    Secondary,
 }
 
 impl ModelPicker {
@@ -139,7 +151,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// Accept the current model selection: stage a `Set` for the run loop.
+    /// Accept the current model selection: stage a `Set`/`Set2` for the run loop.
     pub fn model_picker_accept(&mut self) {
         let Some(p) = self.model_picker.clone() else {
             return;
@@ -155,9 +167,17 @@ impl App {
             None
         };
         self.close_model_picker();
-        self.work.stage_model(PendingModelAction::Set {
-            model: id.into(),
-            effort,
-        });
+        match p.kind {
+            ModelPickerKind::Main => {
+                self.work.stage_model(PendingModelAction::Set {
+                    model: id.into(),
+                    effort,
+                });
+            }
+            ModelPickerKind::Secondary => {
+                self.work
+                    .stage_model(PendingModelAction::Set2 { model: id.into() });
+            }
+        }
     }
 }

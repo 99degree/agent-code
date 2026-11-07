@@ -36,6 +36,8 @@ pub struct Session {
     pending_model: Arc<std::sync::Mutex<Option<String>>>,
     /// Live pending-effort handle (see [`Self::pending_model`]).
     pending_effort: Arc<std::sync::Mutex<Option<String>>>,
+    /// Live pending secondary-model handle (dual-LLM).
+    pending_secondary_model: Arc<std::sync::Mutex<Option<String>>>,
     /// Live permission checker (same Arc the tool executor uses).
     permissions: Arc<PermissionChecker>,
 }
@@ -46,12 +48,14 @@ impl Session {
         let live_plan_mode = engine.live_plan_mode_handle();
         let pending_model = engine.pending_model_handle();
         let pending_effort = engine.pending_effort_handle();
+        let pending_secondary_model = engine.pending_secondary_model_handle();
         let permissions = engine.permissions_handle();
         Self {
             engine: Arc::new(Mutex::new(engine)),
             live_plan_mode,
             pending_model,
             pending_effort,
+            pending_secondary_model,
             permissions,
         }
     }
@@ -125,6 +129,12 @@ impl Session {
     /// [`Self::request_model`]).
     pub fn request_effort(&self, effort: String) {
         *self.pending_effort.lock().unwrap() = Some(effort);
+    }
+
+    /// Request a secondary-model change for dual-LLM mode (see
+    /// [`Self::request_model`]). Enables dual-LLM mode on the next request.
+    pub fn request_secondary_model(&self, model: String) {
+        *self.pending_secondary_model.lock().unwrap() = Some(model);
     }
 
     /// Cancel any pending effort change.

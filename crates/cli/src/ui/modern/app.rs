@@ -43,6 +43,10 @@ pub enum PendingModelAction {
     },
     /// Set reasoning effort on the current model only.
     SetEffort(String),
+    /// Open the in-TUI secondary-model picker (`/model2`).
+    Show2,
+    /// Set `config.api.secondary_model` and enable dual-LLM mode.
+    Set2 { model: String },
 }
 
 /// Canonical reasoning-effort levels (Grok-compatible vocabulary).
@@ -149,7 +153,13 @@ pub(crate) fn parse_provider_slash(input: &str) -> Option<PendingProviderAction>
         None => (rest, None),
     };
     let alias_cmds = [
-        "provider", "p", "nvidia", "kilo", "poolside", "opencode", "openrouter",
+        "provider",
+        "p",
+        "nvidia",
+        "kilo",
+        "poolside",
+        "opencode",
+        "openrouter",
     ];
     if !alias_cmds.iter().any(|a| cmd.eq_ignore_ascii_case(a)) {
         return None;
@@ -173,6 +183,29 @@ pub(crate) fn parse_provider_slash(input: &str) -> Option<PendingProviderAction>
     }
 }
 
+/// Parse `/model2` / `/model2 <id>` from a slash line.
+pub(crate) fn parse_model2_slash(input: &str) -> Option<PendingModelAction> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let rest = trimmed.trim_start_matches('/');
+    let (cmd, args) = match rest.split_once(char::is_whitespace) {
+        Some((c, a)) => (c, Some(a.trim())),
+        None => (rest, None),
+    };
+    if !cmd.eq_ignore_ascii_case("model2") {
+        return None;
+    }
+    match args {
+        None | Some("") => Some(PendingModelAction::Show2),
+        Some(model) => Some(PendingModelAction::Set2 {
+            model: model.to_string(),
+        }),
+    }
+}
+
+/// Canonical reasoning-effort normalization (Grok-compatible vocabulary).
 fn normalize_effort(s: &str) -> String {
     let t = s.trim().to_ascii_lowercase();
     if t == "max" { "xhigh".into() } else { t }
@@ -2241,6 +2274,14 @@ impl App {
             self.dirty = true;
             return;
         }
+        // /model2 sets the alternative dual-LLM model (engine lock needed).
+        if let Some(action) = parse_model2_slash(&text) {
+            self.work.stage_model(action);
+            self.input.clear();
+            self.cursor = 0;
+            self.dirty = true;
+            return;
+        }
         // /provider switches the default provider (engine lock needed).
         if let Some(action) = parse_provider_slash(&text) {
             self.work.stage_provider(action);
@@ -2517,8 +2558,7 @@ impl App {
                     (api, "API")
                 } else {
                     let provider_name =
-                        agent_code_lib::llm::provider::detect_provider(&model, base_url)
-                            .as_name();
+                        agent_code_lib::llm::provider::detect_provider(&model, base_url).as_name();
                     let table = context_window_for_model(provider_name, &model);
                     (table, "baked-in")
                 };
@@ -2563,6 +2603,17 @@ impl App {
                 self.transcript.push(TranscriptItem::System(format!(
                     "Reasoning effort → {level} (model {})",
                     self.model
+                )));
+            }
+            PendingModelAction::Show2 => {
+                // Handled in run.rs where engine config is accessible.
+                self.open_model2_picker(None, entries);
+            }
+            PendingModelAction::Set2 { model } => {
+                // Handled in run.rs where engine config is accessible.
+                self.status_message = format!("secondary model → {model}");
+                self.transcript.push(TranscriptItem::System(format!(
+                    "Secondary model set to: {model} (dual LLM enabled)"
                 )));
             }
         }
@@ -2630,11 +2681,42 @@ impl App {
             top: selected.saturating_sub(6),
             entries,
             current: current.to_string(),
+            kind: super::model_picker::ModelPickerKind::Main,
             effort_phase: false,
             effort_selected: 0,
         });
         self.status_message =
             "model picker · type to filter · Enter select · Tab effort · Esc close".into();
+        self.dirty = true;
+    }
+
+    /// Open the secondary-model picker overlay (`/model2`).
+    pub fn open_model2_picker(
+        &mut self,
+        current: Option<&str>,
+        entries: Vec<(String, String, Option<u64>)>,
+    ) {
+        if self.front_modal().is_some() {
+            return;
+        }
+        self.dismiss_completion();
+        self.command_palette = None;
+        self.show_shortcuts = false;
+        let selected = current
+            .and_then(|c| entries.iter().position(|(id, _, _)| id == c))
+            .unwrap_or(0);
+        self.model_picker = Some(super::model_picker::ModelPicker {
+            query: String::new(),
+            selected,
+            top: selected.saturating_sub(6),
+            entries,
+            current: current.unwrap_or_default().to_string(),
+            kind: super::model_picker::ModelPickerKind::Secondary,
+            effort_phase: false,
+            effort_selected: 0,
+        });
+        self.status_message =
+            "secondary model picker · type to filter · Enter select · Esc close".into();
         self.dirty = true;
     }
 

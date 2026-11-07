@@ -194,7 +194,8 @@ fn render_all(options: &[SelectOption], selected: usize, has_preview: bool) {
 
     // Render options.
     for (i, opt) in options.iter().enumerate() {
-        let letter = (b'A' + i as u8) as char;
+        // Wrap letter labels after 'Z' so we never overflow u8 with long lists.
+        let letter = (b'A' + (i % 26) as u8) as char;
         let t = super::theme::current();
         if i == selected {
             write!(

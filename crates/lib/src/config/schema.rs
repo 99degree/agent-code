@@ -418,7 +418,16 @@ pub struct McpServerEntry {
     pub env: std::collections::HashMap<String, String>,
 }
 
-/// Authentication mode for the configured LLM API.
+/// Which response to use as master in dual-LLM mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DualMaster {
+    /// Use the response from the primary `model`.
+    #[default]
+    First,
+    /// Use the response from `secondary_model`.
+    Second,
+}
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiAuthMode {
@@ -471,6 +480,22 @@ pub struct ApiConfig {
     /// remainder of the session. Defaults to None — falls back to a
     /// provider-aware sensible default when toggled.
     pub fast_model: Option<String>,
+    /// Alternative model used by dual-LLM mode. When dual LLM is enabled,
+    /// every request is sent to both `model` and `secondary_model`, and
+    /// one is selected as the master response. Under the same provider
+    /// as `model` (set via `/model2 <name>`).
+    #[serde(default)]
+    pub secondary_model: Option<String>,
+    /// When true, every LLM request is sent to both `model` and
+    /// `secondary_model` (dual-LLM mode). The `master` selection
+    /// decides which response is returned to the user.
+    #[serde(default)]
+    pub dual_llm_enabled: bool,
+    /// Which response to use as master in dual-LLM mode:
+    /// - "first"  → response from `model` (primary)
+    /// - "second" → response from `secondary_model`
+    #[serde(default)]
+    pub dual_master: DualMaster,
     /// Default model for spawned subagents. Overridden by the Agent
     /// tool's per-call `model` field and by an agent definition's
     /// `model`. Unset → subagents inherit the parent's model.
@@ -666,6 +691,9 @@ impl Default for ApiConfig {
             thinking: None,
             effort: None,
             max_cost_usd: None,
+            secondary_model: None,
+            dual_llm_enabled: false,
+            dual_master: DualMaster::First,
             // Default timeout generous enough for reasoning models that may not emit
             // the first token for up to two minutes. Historically this value was
             // 120 seconds; a recent refactor mistakenly set it to 20 seconds,

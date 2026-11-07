@@ -1115,9 +1115,10 @@ pub(super) async fn event_loop(
                     let kind = agent_code_lib::llm::provider::detect_provider(&current, &base_url);
                     let entries = crate::commands::fetch_model_entries(&eng, kind);
                     let mut next_model: Option<String> = None;
+                    let mut next_secondary: Option<String> = None;
                     let mut next_effort: Option<Option<String>> = None;
                     app.apply_model_action(
-                        action,
+                        action.clone(),
                         &current,
                         &base_url,
                         entries,
@@ -1127,8 +1128,20 @@ pub(super) async fn event_loop(
                     if let Some(name) = next_model {
                         eng.state_mut().config.api.model = name;
                     }
+                    // Secondary-model set: persist into engine config.
+                    if let PendingModelAction::Set2 { model } = &action {
+                        eng.state_mut().config.api.secondary_model = Some(model.clone());
+                        eng.state_mut().config.api.dual_llm_enabled = true;
+                        next_secondary = Some(model.clone());
+                    }
                     if let Some(effort) = next_effort {
                         eng.state_mut().config.api.effort = effort;
+                    }
+                    if let Some(name) = next_secondary.as_deref() {
+                        app.transcript
+                            .push(super::app::TranscriptItem::System(format!(
+                                "Secondary model set to: {name} (dual LLM enabled)"
+                            )));
                     }
                 }
                 Err(_) => {
@@ -1136,25 +1149,39 @@ pub(super) async fn event_loop(
                     // through the lock-free pending handle so it takes effect
                     // on the next in-flight request, instead of staging to be
                     // retried after the turn finishes.
-                    if let PendingModelAction::Set { model, effort } = action {
-                        session.request_model(model.clone());
-                        // Mirror into the App badge immediately so the header
-                        // reflects the pending switch, like the idle path does.
-                        app.model = model.clone();
-                        if let Some(e) = effort {
-                            session.request_effort(e.clone());
-                            app.effort = Some(e.clone());
+                    match action {
+                        PendingModelAction::Set { model, effort } => {
+                            session.request_model(model.clone());
+                            // Mirror into the App badge immediately so the header
+                            // reflects the pending switch, like the idle path does.
+                            app.model = model.clone();
+                            if let Some(e) = effort {
+                                session.request_effort(e.clone());
+                                app.effort = Some(e.clone());
+                            }
+                            app.status_message = format!("model → {model} (next request)");
+                            app.transcript
+                                .push(super::app::TranscriptItem::System(format!(
+                                    "Model change queued: {model} (applies to next request)"
+                                )));
+                            app.dirty = true;
                         }
-                        app.status_message = format!("model → {model} (next request)");
-                        app.transcript
-                            .push(super::app::TranscriptItem::System(format!(
-                                "Model change queued: {model} (applies to next request)"
-                            )));
-                        app.dirty = true;
-                    } else {
-                        // Show/SetEffort without a turn: re-stage for the next
-                        // idle loop so the catalog can open / effort apply.
-                        app.work.stage_model(action);
+                        PendingModelAction::Set2 { model } => {
+                            // Secondary-model set while a turn is running: apply
+                            // to engine config so the next dual-LLM request picks
+                            // it up.
+                            session.request_secondary_model(model.clone());
+                            app.transcript
+                                .push(super::app::TranscriptItem::System(format!(
+                                    "Secondary model set to: {model} (dual LLM enabled)"
+                                )));
+                            app.dirty = true;
+                        }
+                        other => {
+                            // Show/SetEffort without a turn: re-stage for the next
+                            // idle loop so the catalog can open / effort apply.
+                            app.work.stage_model(other);
+                        }
                     }
                 }
             }

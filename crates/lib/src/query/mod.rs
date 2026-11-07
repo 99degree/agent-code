@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::config::DualMaster;
 use crate::hooks::{HookEvent, HookRegistry};
 use crate::llm::message::*;
 use crate::llm::provider::{Provider, ProviderError, ProviderRequest};
@@ -126,6 +127,7 @@ pub struct QueryEngine {
     live_plan_mode: Arc<std::sync::atomic::AtomicBool>,
     pending_model: Arc<std::sync::Mutex<Option<String>>>,
     pending_effort: Arc<std::sync::Mutex<Option<String>>>,
+    pending_secondary_model: Arc<std::sync::Mutex<Option<String>>>,
     last_llm_response: std::sync::Mutex<String>,
     stop_location: std::sync::Mutex<String>,
 }
@@ -260,6 +262,7 @@ impl QueryEngine {
         let live_plan_mode = Arc::new(std::sync::atomic::AtomicBool::new(state.plan_mode));
         let pending_model = Arc::new(std::sync::Mutex::new(None));
         let pending_effort = Arc::new(std::sync::Mutex::new(None));
+        let pending_secondary_model = Arc::new(std::sync::Mutex::new(None));
         Self {
             llm,
             tools,
@@ -294,6 +297,7 @@ impl QueryEngine {
             live_plan_mode,
             pending_model,
             pending_effort,
+            pending_secondary_model,
             last_llm_response: std::sync::Mutex::new(String::new()),
             stop_location: std::sync::Mutex::new(String::new()),
         }
@@ -310,6 +314,10 @@ impl QueryEngine {
 
     pub fn pending_effort_handle(&self) -> Arc<std::sync::Mutex<Option<String>>> {
         self.pending_effort.clone()
+    }
+
+    pub fn pending_secondary_model_handle(&self) -> Arc<std::sync::Mutex<Option<String>>> {
+        self.pending_secondary_model.clone()
     }
 
     /// Shared permission checker (same Arc the tool executor uses).
@@ -1161,13 +1169,17 @@ impl QueryEngine {
     fn apply_pending_model_switch(&mut self, sink: &dyn StreamSink) {
         let next_model = self.pending_model.lock().unwrap().take();
         let next_effort = self.pending_effort.lock().unwrap().take();
+        let next_secondary = self.pending_secondary_model.lock().unwrap().take();
         if let Some(m) = &next_model {
             sink.on_warning(&format!("MODEL_SWITCH_TO={m}"));
         }
         if let Some(e) = &next_effort {
             sink.on_warning(&format!("EFFORT_TO={e}"));
         }
-        if next_model.is_some() || next_effort.is_some() {
+        if let Some(m) = &next_secondary {
+            sink.on_warning(&format!("SECONDARY_MODEL_SWITCH_TO={m}"));
+        }
+        if next_model.is_some() || next_effort.is_some() || next_secondary.is_some() {
             self.reset_system_prompt_cache();
         }
         if let Some(m) = next_model {
@@ -1175,6 +1187,10 @@ impl QueryEngine {
         }
         if let Some(e) = next_effort {
             self.state.config.api.effort = Some(e);
+        }
+        if let Some(m) = next_secondary {
+            self.state.config.api.secondary_model = Some(m.clone());
+            self.state.config.api.dual_llm_enabled = true;
         }
     }
 
@@ -2324,6 +2340,80 @@ impl QueryEngine {
                 let _ = self.fire_error_hooks("llm_call_failed", &error_text).await;
                 sink.on_turn_outcome(self.state.turn_count, "error");
                 return Err(crate::error::Error::Other(error_text));
+            }
+
+            // Dual LLM: when enabled, every request is also sent to the
+            // secondary model (`api.secondary_model`, same provider). The
+            // master response (selected by `api.dual_master`) is the one
+            // returned to the user and whose tool calls get executed.
+            if self.state.config.api.dual_llm_enabled
+                && self.state.config.api.secondary_model.is_some()
+            {
+                let secondary_model_name = self.state.config.api.secondary_model.clone().unwrap();
+                let secondary_llm = crate::llm::provider::create_provider_from_config(
+                    &secondary_model_name,
+                    &self.state.config.api.base_url,
+                    &self.state.config,
+                    None,
+                );
+                let secondary_request = ProviderRequest {
+                    messages: self.state.history().to_vec(),
+                    system_prompt: system_prompt.clone(),
+                    tools: tool_schemas.clone(),
+                    model: secondary_model_name.clone(),
+                    max_tokens: effective_tokens,
+                    temperature: None,
+                    enable_caching: self.state.config.features.prompt_caching && !cache_suppressed,
+                    tool_choice: Default::default(),
+                    metadata: None,
+                    cancel: self.cancel.clone(),
+                    stream_timeout: (self.state.config.api.timeout_secs > 0).then(|| {
+                        std::time::Duration::from_secs(self.state.config.api.timeout_secs)
+                    }),
+                    enable_compression: self.state.config.features.request_compression,
+                };
+                match secondary_llm.stream(&secondary_request).await {
+                    Ok(mut secondary_rx) => {
+                        let mut secondary_blocks = Vec::new();
+                        let mut secondary_usage = Usage::default();
+                        let mut secondary_stop_reason: Option<StopReason> = None;
+                        while let Some(event) = secondary_rx.recv().await {
+                            match event {
+                                StreamEvent::TextDelta(text) => {
+                                    secondary_blocks.push(ContentBlock::Text { text });
+                                }
+                                StreamEvent::ContentBlockComplete(block) => {
+                                    secondary_blocks.push(block);
+                                }
+                                StreamEvent::Done {
+                                    usage: u,
+                                    stop_reason: sr,
+                                } => {
+                                    secondary_usage = u.clone();
+                                    secondary_stop_reason = sr.clone();
+                                }
+                                StreamEvent::Error(_)
+                                | StreamEvent::ToolUseStart { .. }
+                                | StreamEvent::ToolInputDelta { .. }
+                                | StreamEvent::Ttft(_) => {}
+                            }
+                        }
+                        let use_secondary =
+                            matches!(self.state.config.api.dual_master, DualMaster::Second);
+                        if use_secondary {
+                            content_blocks = secondary_blocks;
+                            usage = secondary_usage;
+                            stop_reason = secondary_stop_reason;
+                            model = secondary_model_name;
+                            sink.on_warning("Dual LLM: using secondary model response as master.");
+                        } else {
+                            sink.on_warning("Dual LLM: using primary model response as master.");
+                        }
+                    }
+                    Err(e) => {
+                        sink.on_warning(&format!("Dual LLM: secondary model request failed: {e}"));
+                    }
+                }
             }
 
             // Step 5: Record the assistant message. If the assistant produced no
