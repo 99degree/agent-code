@@ -302,11 +302,14 @@ impl CaptivePortal {
             status.as_u16()
         ));
 
-        // Captive portals commonly redirect (3xx) to the original URL after a
-        // successful login, so treat 2xx and 3xx as success.
-        if !status.is_success() && !status.is_redirection() {
+        // Captive portals commonly redirect (3xx) back to the original URL after
+        // a successful login. reqwest follows redirects automatically, so the
+        // final status here is what the redirected destination (e.g. example.com)
+        // returns — require a real 2xx to confirm the external connection is
+        // actually unblocked, not just that the portal accepted the form.
+        if !status.is_success() {
             return Err(format!(
-                "captive portal agree form returned status {}",
+                "captive portal agree form returned status {} (expected 2xx after redirect)",
                 status.as_u16()
             ));
         }
