@@ -399,12 +399,12 @@ impl CaptivePortal {
             summary.push_str(&format!("captive portal: redirect Location: {loc}\n"));
         }
 
-        // A captive portal login is accepted when the agree form returns 2xx
-        // — the portal sets a session cookie that authorizes the client.
-        // Some portals respond 2xx from their own domain (not redirecting
-        // away), so we do not require escaping the portal host here. The real
-        // proof that the external network is unblocked comes when the LLM
-        // request is retried with the cookie attached.
+        // A captive portal login is accepted when the agree form returns 2xx.
+        // The portal sets a session cookie authorizing the client. Some portals
+        // respond 2xx from their own domain (not redirecting away); we accept
+        // that as success — the real proof that the external network is
+        // unblocked comes when the LLM request is retried with the cookie
+        // attached.
         if !status.is_success() {
             return Err(format!(
                 "captive portal agree form returned status {}",
