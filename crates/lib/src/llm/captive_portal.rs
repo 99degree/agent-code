@@ -72,6 +72,8 @@ pub struct CaptivePortal {
     profile: CaptivePortalProfile,
     login_url: String,
     cookies: std::sync::Mutex<HashMap<String, String>>,
+    /// Diagnostics from the last login attempt (form action, inputs, headers).
+    diagnostics: std::sync::Mutex<Option<String>>,
 }
 
 impl CaptivePortal {
@@ -86,7 +88,13 @@ impl CaptivePortal {
             profile,
             login_url,
             cookies: std::sync::Mutex::new(HashMap::new()),
+            diagnostics: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Return the diagnostics string from the last login attempt, if any.
+    pub fn diagnostics(&self) -> Option<String> {
+        self.diagnostics.lock().unwrap().clone()
     }
 
     /// Log into the captive portal: GET the login page (following redirects
@@ -147,9 +155,19 @@ impl CaptivePortal {
             resp.url()
         );
         summary.push_str(&format!(
-            "captive portal: login page fetched, status={}\n",
-            status.as_u16()
+            "captive portal: login page fetched, status={}, final_url={}\n",
+            status.as_u16(),
+            resp.url()
         ));
+
+        // Log all response headers for debugging (redirection, security,
+        // content-type that hint at how the portal works).
+        summary.push_str("captive portal: GET response headers:\n");
+        for (name, value) in resp.headers() {
+            if let Ok(v) = value.to_str() {
+                summary.push_str(&format!("  {name}: {v}\n"));
+            }
+        }
 
         // The final URL after any redirects — captive portals often redirect
         // from a generic URL (google.com) to the portal-specific login page.
@@ -157,6 +175,7 @@ impl CaptivePortal {
 
         // Collect cookies from all Set-Cookie headers.
         let mut cookie_count = 0;
+        let mut cookie_list = Vec::new();
         for set_cookie in resp.headers().get_all(SET_COOKIE).iter() {
             if let Ok(values) = set_cookie.to_str() {
                 for cookie in values.split(';') {
@@ -169,6 +188,7 @@ impl CaptivePortal {
                                 .unwrap()
                                 .insert(name.to_string(), value.to_string());
                             cookie_count += 1;
+                            cookie_list.push(format!("{name}={value}"));
                         }
                     }
                 }
@@ -176,7 +196,8 @@ impl CaptivePortal {
         }
         tracing::debug!("captive portal: collected {cookie_count} cookies");
         summary.push_str(&format!(
-            "captive portal: collected {cookie_count} cookies\n"
+            "captive portal: collected {cookie_count} cookies: {}\n",
+            cookie_list.join(", ")
         ));
 
         let html = resp
@@ -239,6 +260,12 @@ impl CaptivePortal {
             form.action,
             form.inputs.len()
         ));
+        for input in &form.inputs {
+            summary.push_str(&format!(
+                "captive portal:   form input name={} value={}\n",
+                input.name, input.value
+            ));
+        }
 
         // Resolve the form action against the *final* URL (after redirects),
         // not the original login URL, since the page may have moved.
@@ -283,9 +310,14 @@ impl CaptivePortal {
             "captive portal: POST agree form (profile={}, field={}, action={})\n",
             self.profile.name, self.profile.agree_field, action_url
         ));
+        summary.push_str("captive portal: POST body:\n");
+        for (k, v) in &form_data {
+            summary.push_str(&format!("  {k}={v}\n"));
+        }
         let mut req = self.client.post(&action_url).form(&form_data);
         if !cookie_header.is_empty() {
-            req = req.header("Cookie", cookie_header);
+            summary.push_str(&format!("captive portal: POST Cookie header: {cookie_header}\n"));
+            req = req.header("Cookie", cookie_header.clone());
         }
         let resp = req
             .send()
@@ -299,9 +331,20 @@ impl CaptivePortal {
             resp.url()
         );
         summary.push_str(&format!(
-            "captive portal: agree form submitted, status={}\n",
-            status.as_u16()
+            "captive portal: agree form submitted, status={}, final_url={}\n",
+            status.as_u16(),
+            resp.url()
         ));
+        // Log response headers from the submit (Set-Cookie, Location, etc.).
+        summary.push_str("captive portal: POST response headers:\n");
+        for (name, value) in resp.headers() {
+            if let Ok(v) = value.to_str() {
+                summary.push_str(&format!("  {name}: {v}\n"));
+            }
+        }
+        if let Some(loc) = resp.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()) {
+            summary.push_str(&format!("captive portal: redirect Location: {loc}\n"));
+        }
 
         // A captive portal login only truly "passed" when we escape the
         // portal domain and land on an external host with a real 2xx.
