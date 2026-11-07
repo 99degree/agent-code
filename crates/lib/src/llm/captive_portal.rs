@@ -166,18 +166,15 @@ impl CaptivePortal {
 
         // Parse the first form and find its action + inputs. Some captive
         // portals drive login via JavaScript (no <form> element), in which
-        // case reaching the login page itself counts as progress — the
-        // redirect from the probe already put us behind the portal.
+        // case we cannot auto-submit without executing JS.
         let form = match parse_first_form(&html) {
             Some(f) => f,
             None => {
-                tracing::warn!(
-                    "captive portal: no HTML form found on login page (profile={}, url={}); \
-                     treating page fetch as portal reached",
-                    self.profile.name,
+                return Err(format!(
+                    "captive portal: reached login page for {} but no HTML form found \
+                     (JavaScript-driven login; cannot auto-submit)",
                     self.login_url
-                );
-                return Ok(());
+                ));
             }
         };
 
