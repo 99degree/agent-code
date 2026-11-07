@@ -164,13 +164,33 @@ impl CaptivePortal {
             .await
             .map_err(|e| format!("failed to read login page body: {e}"))?;
 
+        // Fetch any JS files referenced by <script src> tags and append their
+        // text to the HTML so JS-driven forms (e.g. GovWiFi) can be parsed.
+        let mut integrated = html.clone();
+        if let Some(scripts) = extract_script_srcs(&html) {
+            for src in scripts {
+                let js_url = resolve_action_url(&final_url, &src);
+                match self.client.get(&js_url).send().await {
+                    Ok(js_resp) => {
+                        if let Ok(js_text) = js_resp.text().await {
+                            integrated.push_str("\n<!-- JS: ");
+                            integrated.push_str(&js_url);
+                            integrated.push_str(" -->\n");
+                            integrated.push_str(&js_text);
+                        }
+                    }
+                    Err(e) => tracing::debug!("captive portal: failed to fetch JS {js_url}: {e}"),
+                }
+            }
+        }
+
         // Parse the first form and find its action + inputs. Some captive
-        // portals drive login via JavaScript (no <form> element), in which
-        // case we fall back to scanning for a login button with an onclick
-        // handler and POST to the current page URL with the agree field.
-        let form = match parse_first_form(&html) {
+        // portals drive login via JavaScript (no <form> element in HTML),
+        // but the JS file carries the form action/inputs, which we now
+        // integrated into `integrated`.
+        let form = match parse_first_form(&integrated) {
             Some(f) => f,
-            None => match parse_login_button(&html) {
+            None => match parse_login_button(&integrated) {
                 Some(btn) => {
                     tracing::info!(
                         "captive portal: no <form> found; using JS login button on page (action={})",
@@ -428,8 +448,33 @@ fn parse_login_button(html: &str) -> Option<Form> {
         inputs,
     })
 }
+
+/// Extract all `<script src="...">` URLs from HTML.
+fn extract_script_srcs(html: &str) -> Option<Vec<String>> {
+    let re = Regex::new(r#"(?i)<script[^>]*src\s*=\s*["']([^"']*)["'][^>]*>"#).ok()?;
+    let srcs: Vec<String> = re
+        .captures_iter(html)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+        .collect();
+    if srcs.is_empty() { None } else { Some(srcs) }
+}
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_extract_script_srcs() {
+        let html = r#"<html><head><script src="../js/main.js"></script><script src="https://cdn.example.com/lib.js"></script></head><body></body></html>"#;
+        let srcs = extract_script_srcs(html).expect("should find scripts");
+        assert_eq!(srcs.len(), 2);
+        assert!(srcs.contains(&"../js/main.js".to_string()));
+        assert!(srcs.contains(&"https://cdn.example.com/lib.js".to_string()));
+    }
+
+    #[test]
+    fn test_extract_script_srcs_none() {
+        let html = "<html><body>No scripts here</body></html>";
+        assert!(extract_script_srcs(html).is_none());
+    }
 
     #[test]
     fn test_parse_first_form_extracts_action_and_inputs() {
