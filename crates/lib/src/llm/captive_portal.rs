@@ -164,9 +164,22 @@ impl CaptivePortal {
             .await
             .map_err(|e| format!("failed to read login page body: {e}"))?;
 
-        // Parse the first form and find its action + inputs.
-        let form = parse_first_form(&html)
-            .ok_or_else(|| "no HTML form found on captive portal login page".to_string())?;
+        // Parse the first form and find its action + inputs. Some captive
+        // portals drive login via JavaScript (no <form> element), in which
+        // case reaching the login page itself counts as progress — the
+        // redirect from the probe already put us behind the portal.
+        let form = match parse_first_form(&html) {
+            Some(f) => f,
+            None => {
+                tracing::warn!(
+                    "captive portal: no HTML form found on login page (profile={}, url={}); \
+                     treating page fetch as portal reached",
+                    self.profile.name,
+                    self.login_url
+                );
+                return Ok(());
+            }
+        };
 
         // Resolve the form action against the *final* URL (after redirects),
         // not the original login URL, since the page may have moved.
