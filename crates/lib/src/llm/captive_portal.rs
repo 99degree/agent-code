@@ -223,7 +223,9 @@ impl CaptivePortal {
             status.as_u16()
         );
 
-        if !status.is_success() {
+        // Captive portals commonly redirect (3xx) to the original URL after a
+        // successful login, so treat 2xx and 3xx as success.
+        if !status.is_success() && !status.is_redirection() {
             return Err(format!(
                 "captive portal agree form returned status {}",
                 status.as_u16()
