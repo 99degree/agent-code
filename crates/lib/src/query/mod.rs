@@ -244,6 +244,11 @@ impl TurnStatus {
     }
 }
 
+/// Max captive-portal login attempts per turn. A portal that reports
+/// success but doesn't actually unblock the network would otherwise loop
+/// forever retrying the same request.
+const CAPTIVE_PORTAL_MAX_ATTEMPTS: u32 = 3;
+
 impl QueryEngine {
     pub fn new(
         llm: Arc<dyn Provider>,
@@ -1333,6 +1338,7 @@ impl QueryEngine {
         };
         let mut max_output_recovery_count = 0u32;
         let mut no_output_retry_count = 0u32;
+        let mut captive_portal_attempts = 0u32;
 
         // Session-cumulative turn base: `turn` below is the 0-based iteration
         // index within THIS user exchange (and gates the per-query max_turns
@@ -1667,9 +1673,14 @@ impl QueryEngine {
                         // a captive portal. Probe test portal URLs to get
                         // the portal login page, submit the agree form, then retry
                         // the LLM call in place (does not consume a turn).
+                        // Bounded by `captive_portal_attempts` so a portal that
+                        // reports success but doesn't actually unblock the network
+                        // doesn't loop forever.
                         if matches!(&e, ProviderError::Network(_))
                             && !crate::llm::captive_portal::TEST_PORTALS.is_empty()
+                            && captive_portal_attempts < CAPTIVE_PORTAL_MAX_ATTEMPTS
                         {
+                            captive_portal_attempts += 1;
                             let probe_urls = crate::llm::captive_portal::TEST_PORTALS;
                             let entries: Vec<(&'static str, String)> = probe_urls
                                 .iter()
