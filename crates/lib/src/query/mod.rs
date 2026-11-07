@@ -674,25 +674,33 @@ impl QueryEngine {
     /// profile (agree/accept/continue/terms), returning `Ok(())` on first
     /// success. Used by `/connect` so the user can test portal recovery
     /// manually without waiting for an LLM call to fail.
-    pub async fn captive_portal_login(&self) -> Result<(), String> {
+    pub async fn captive_portal_login(&self) -> Result<String, String> {
         let probe_urls = crate::llm::captive_portal::TEST_PORTALS;
         if probe_urls.is_empty() {
             return Err("no test portal URLs configured".to_string());
         }
-        let entries: Vec<(&'static str, String)> = probe_urls
-            .iter()
-            .flat_map(|url| {
-                crate::llm::captive_portal::CAPTIVE_PORTAL_PROFILES
-                    .iter()
-                    .map(move |p| (p.name, url.to_string()))
-            })
-            .collect();
-        let manager = crate::llm::captive_portal::CaptivePortalManager::new(&entries);
-        tracing::info!(
-            "captive portal: attempting login on {} portal(s)",
-            manager.portal_count()
-        );
-        manager.login().await
+        let mut summary = String::new();
+        for probe_url in probe_urls {
+            for profile in crate::llm::captive_portal::CAPTIVE_PORTAL_PROFILES.iter() {
+                let portal = crate::llm::captive_portal::CaptivePortal::new(
+                    profile.clone(),
+                    probe_url.to_string(),
+                );
+                match portal.login_detailed().await {
+                    Ok(step_summary) => {
+                        summary.push_str(&step_summary);
+                        summary.push_str("captive portal: login succeeded\n");
+                        return Ok(summary);
+                    }
+                    Err(e) => {
+                        summary.push_str(&format!("captive portal: {e}\n"));
+                    }
+                }
+            }
+        }
+        Err(format!(
+            "captive portal login failed on all portals:\n{summary}"
+        ))
     }
 
     /// Clone the active LLM provider handle.

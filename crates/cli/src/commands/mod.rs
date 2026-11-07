@@ -1286,11 +1286,11 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 Err("no tokio runtime available".to_string())
             };
             match result {
-                Ok(()) => {
-                    println!("Captive portal login succeeded.");
+                Ok(summary) => {
+                    println!("{summary}");
                 }
                 Err(e) => {
-                    println!("Captive portal login failed: {e}");
+                    println!("Captive portal login failed:\n{e}");
                 }
             }
             CommandResult::Handled

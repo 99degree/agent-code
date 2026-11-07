@@ -97,11 +97,24 @@ impl CaptivePortal {
     /// Returns `Ok(())` when the agree submission was accepted, or a
     /// `String` error describing why login failed.
     pub async fn login(&self) -> Result<(), String> {
+        self.login_detailed().await.map(|_| ())
+    }
+
+    /// Like [`Self::login`] but returns a human-readable step-by-step
+    /// summary of each phase (fetch page, fetch JS, find form, submit,
+    /// response) for debugging via `/connect`.
+    pub async fn login_detailed(&self) -> Result<String, String> {
+        let mut summary = String::new();
+
         tracing::info!(
             "captive portal: GET login page (profile={}, url={})",
             self.profile.name,
             self.login_url
         );
+        summary.push_str(&format!(
+            "captive portal: GET login page (profile={}, url={})\n",
+            self.profile.name, self.login_url
+        ));
 
         // Fetch the login page. reqwest follows redirects automatically, so
         // if the initial request gets redirected to the captive portal page
@@ -133,6 +146,10 @@ impl CaptivePortal {
             status.as_u16(),
             resp.url()
         );
+        summary.push_str(&format!(
+            "captive portal: login page fetched, status={}\n",
+            status.as_u16()
+        ));
 
         // The final URL after any redirects — captive portals often redirect
         // from a generic URL (google.com) to the portal-specific login page.
@@ -158,6 +175,9 @@ impl CaptivePortal {
             }
         }
         tracing::debug!("captive portal: collected {cookie_count} cookies");
+        summary.push_str(&format!(
+            "captive portal: collected {cookie_count} cookies\n"
+        ));
 
         let html = resp
             .text()
@@ -170,6 +190,7 @@ impl CaptivePortal {
         if let Some(scripts) = extract_script_srcs(&html) {
             for src in scripts {
                 let js_url = resolve_action_url(&final_url, &src);
+                summary.push_str(&format!("captive portal: fetching JS {js_url}\n"));
                 match self.client.get(&js_url).send().await {
                     Ok(js_resp) => {
                         if let Ok(js_text) = js_resp.text().await {
@@ -179,7 +200,12 @@ impl CaptivePortal {
                             integrated.push_str(&js_text);
                         }
                     }
-                    Err(e) => tracing::debug!("captive portal: failed to fetch JS {js_url}: {e}"),
+                    Err(e) => {
+                        tracing::debug!("captive portal: failed to fetch JS {js_url}: {e}");
+                        summary.push_str(&format!(
+                            "captive portal: failed to fetch JS {js_url}: {e}\n"
+                        ));
+                    }
                 }
             }
         }
@@ -207,6 +233,12 @@ impl CaptivePortal {
                 }
             },
         };
+
+        summary.push_str(&format!(
+            "captive portal: parsed form, action={}, inputs={}\n",
+            form.action,
+            form.inputs.len()
+        ));
 
         // Resolve the form action against the *final* URL (after redirects),
         // not the original login URL, since the page may have moved.
@@ -247,6 +279,10 @@ impl CaptivePortal {
             self.profile.agree_field,
             action_url
         );
+        summary.push_str(&format!(
+            "captive portal: POST agree form (profile={}, field={}, action={})\n",
+            self.profile.name, self.profile.agree_field, action_url
+        ));
         let mut req = self.client.post(&action_url).form(&form_data);
         if !cookie_header.is_empty() {
             req = req.header("Cookie", cookie_header);
@@ -261,6 +297,10 @@ impl CaptivePortal {
             "captive portal: agree form submitted, status={}",
             status.as_u16()
         );
+        summary.push_str(&format!(
+            "captive portal: agree form submitted, status={}\n",
+            status.as_u16()
+        ));
 
         // Captive portals commonly redirect (3xx) to the original URL after a
         // successful login, so treat 2xx and 3xx as success.
@@ -271,7 +311,7 @@ impl CaptivePortal {
             ));
         }
 
-        Ok(())
+        Ok(summary)
     }
 
     /// The profile name.
