@@ -294,22 +294,27 @@ impl CaptivePortal {
 
         let status = resp.status();
         tracing::info!(
-            "captive portal: agree form submitted, status={}",
-            status.as_u16()
+            "captive portal: agree form submitted, status={}, final_url={}",
+            status.as_u16(),
+            resp.url()
         );
         summary.push_str(&format!(
             "captive portal: agree form submitted, status={}\n",
             status.as_u16()
         ));
 
-        // Captive portals commonly redirect (3xx) back to the original URL after
-        // a successful login. reqwest follows redirects automatically, so the
-        // final status here is what the redirected destination (e.g. example.com)
-        // returns — require a real 2xx to confirm the external connection is
-        // actually unblocked, not just that the portal accepted the form.
-        if !status.is_success() {
+        // A captive portal login only truly "passed" when we escape the
+        // portal domain and land on an external host with a real 2xx.
+        // reqwest follows redirects automatically, so resp.url() is the
+        // final destination after all redirects.
+        let final_host = resp.url().host_str().unwrap_or("");
+        let portal_host = reqwest::Url::parse(&self.login_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_string()))
+            .unwrap_or_default();
+        if !status.is_success() || final_host.is_empty() || final_host == portal_host {
             return Err(format!(
-                "captive portal agree form returned status {} (expected 2xx after redirect)",
+                "captive portal did not escape the portal (host={final_host}, status={})",
                 status.as_u16()
             ));
         }
