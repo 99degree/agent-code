@@ -166,16 +166,26 @@ impl CaptivePortal {
 
         // Parse the first form and find its action + inputs. Some captive
         // portals drive login via JavaScript (no <form> element), in which
-        // case we cannot auto-submit without executing JS.
+        // case we fall back to scanning for a login button with an onclick
+        // handler and POST to the current page URL with the agree field.
         let form = match parse_first_form(&html) {
             Some(f) => f,
-            None => {
-                return Err(format!(
-                    "captive portal: reached login page for {} but no HTML form found \
-                     (JavaScript-driven login; cannot auto-submit)",
-                    self.login_url
-                ));
-            }
+            None => match parse_login_button(&html) {
+                Some(btn) => {
+                    tracing::info!(
+                        "captive portal: no <form> found; using JS login button on page (action={})",
+                        btn.action
+                    );
+                    btn
+                }
+                None => {
+                    return Err(format!(
+                        "captive portal: reached login page for {} but no HTML form or login button found \
+                         (JavaScript-driven login; cannot auto-submit)",
+                        self.login_url
+                    ));
+                }
+            },
         };
 
         // Resolve the form action against the *final* URL (after redirects),
@@ -388,7 +398,36 @@ fn resolve_action_url(page_url: &str, action: &str) -> String {
     format!("{base}/{action}")
 }
 
-#[cfg(test)]
+/// Parse a JavaScript-driven login button (e.g. `<button onclick="Service.userLogin(...)">`).
+///
+/// Returns a synthetic `Form` whose action is empty (resolved to the page
+/// URL by [`resolve_action_url`]), carrying all inputs found on the page
+/// plus a synthetic agree field. Captive portals that render their login
+/// button via JS often POST back to the same page URL with the agree field.
+fn parse_login_button(html: &str) -> Option<Form> {
+    // Detect a login/submit button without a <form> element.
+    let btn_re = Regex::new(r#"(?i)<button[^>]*onclick\s*=\s*["'][^"']*["'][^>]*>"#).ok()?;
+    btn_re.find(html)?;
+
+    // Collect all named inputs on the page.
+    let input_re = Regex::new(
+        r#"(?i)<input[^>]*name\s*=\s*["']([^"']*)["'][^>]*value\s*=\s*["']([^"']*)["']"#,
+    )
+    .ok()?;
+    let inputs: Vec<Input> = input_re
+        .captures_iter(html)
+        .filter_map(|c| {
+            let name = c.get(1)?.as_str().to_string();
+            let value = c.get(2)?.as_str().to_string();
+            Some(Input { name, value })
+        })
+        .collect();
+
+    Some(Form {
+        action: String::new(),
+        inputs,
+    })
+}
 mod tests {
     use super::*;
 
