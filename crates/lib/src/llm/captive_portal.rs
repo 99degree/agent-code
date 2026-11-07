@@ -399,18 +399,15 @@ impl CaptivePortal {
             summary.push_str(&format!("captive portal: redirect Location: {loc}\n"));
         }
 
-        // A captive portal login only truly "passed" when we escape the
-        // portal domain and land on an external host with a real 2xx.
-        // reqwest follows redirects automatically, so resp.url() is the
-        // final destination after all redirects.
-        let final_host = resp.url().host_str().unwrap_or("");
-        let portal_host = reqwest::Url::parse(&self.login_url)
-            .ok()
-            .and_then(|u| u.host_str().map(|h| h.to_string()))
-            .unwrap_or_default();
-        if !status.is_success() || final_host.is_empty() || final_host == portal_host {
+        // A captive portal login is accepted when the agree form returns 2xx
+        // — the portal sets a session cookie that authorizes the client.
+        // Some portals respond 2xx from their own domain (not redirecting
+        // away), so we do not require escaping the portal host here. The real
+        // proof that the external network is unblocked comes when the LLM
+        // request is retried with the cookie attached.
+        if !status.is_success() {
             return Err(format!(
-                "captive portal did not escape the portal (host={final_host}, status={})",
+                "captive portal agree form returned status {}",
                 status.as_u16()
             ));
         }
