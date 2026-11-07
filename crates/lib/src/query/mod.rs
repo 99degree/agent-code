@@ -669,6 +669,26 @@ impl QueryEngine {
         self.llm = llm;
     }
 
+    /// Attempt captive portal login: probe a well-known detection URL to get
+    /// the portal login page, submit the agree form against each builtin
+    /// profile (agree/accept/continue/terms), returning `Ok(())` on first
+    /// success. Used by `/connect` so the user can test portal recovery
+    /// manually without waiting for an LLM call to fail.
+    pub async fn captive_portal_login(&self) -> Result<(), String> {
+        let probe_url = "http://detectportal.firefox.com/";
+        let entries: Vec<(&'static str, String)> =
+            crate::llm::captive_portal::CAPTIVE_PORTAL_PROFILES
+                .iter()
+                .map(|p| (p.name, probe_url.to_string()))
+                .collect();
+        let manager = crate::llm::captive_portal::CaptivePortalManager::new(&entries);
+        tracing::info!(
+            "captive portal: attempting login on {} portal(s)",
+            manager.portal_count()
+        );
+        manager.login().await
+    }
+
     /// Clone the active LLM provider handle.
     ///
     /// Lets CLI surfaces call provider methods (e.g. `fetch_models`, which

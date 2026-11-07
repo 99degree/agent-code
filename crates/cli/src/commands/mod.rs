@@ -155,6 +155,12 @@ pub const COMMANDS: &[Command] = &[
         hidden: false,
     },
     Command {
+        name: "connect",
+        aliases: &[],
+        description: "Test captive portal login (probe and submit agree form)",
+        hidden: false,
+    },
+    Command {
         name: "model",
         aliases: &[],
         description: "Show or change the current model",
@@ -1271,6 +1277,24 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
             }
             CommandResult::Handled
         }
+        Some("connect") => {
+            // Run captive portal login probe and submit the agree form.
+            let handle = tokio::runtime::Handle::try_current();
+            let result = if let Ok(ref h) = handle {
+                h.block_on(engine.captive_portal_login())
+            } else {
+                Err("no tokio runtime available".to_string())
+            };
+            match result {
+                Ok(()) => {
+                    println!("Captive portal login succeeded.");
+                }
+                Err(e) => {
+                    println!("Captive portal login failed: {e}");
+                }
+            }
+            CommandResult::Handled
+        }
         Some("provider") => {
             // When invoked via alias (e.g. /nvidia) with no explicit arg, use alias as provider name.
             let args = if args.is_none()
@@ -2369,12 +2393,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 &engine.state().config.api.base_url,
             )
             .as_name();
-            let window = agent_code_lib::services::tokens::context_window_for_model(
-                provider_name, model,
-            );
-            let threshold = agent_code_lib::services::compact::auto_compact_threshold(
-                provider_name, model,
-            );
+            let window =
+                agent_code_lib::services::tokens::context_window_for_model(provider_name, model);
+            let threshold =
+                agent_code_lib::services::compact::auto_compact_threshold(provider_name, model);
             let pct = if window > 0 {
                 (tokens as f64 / window as f64 * 100.0).round() as u64
             } else {
@@ -5306,15 +5328,11 @@ fn compute_context_breakdown(
         + tool_schemas;
 
     let model = &state.config.api.model;
-    let provider_name = agent_code_lib::llm::provider::detect_provider(
-        model,
-        &state.config.api.base_url,
-    )
-    .as_name();
+    let provider_name =
+        agent_code_lib::llm::provider::detect_provider(model, &state.config.api.base_url).as_name();
     let window = tokens::context_window_for_model(provider_name, model);
-    let compact_threshold = agent_code_lib::services::compact::auto_compact_threshold(
-        provider_name, model,
-    );
+    let compact_threshold =
+        agent_code_lib::services::compact::auto_compact_threshold(provider_name, model);
 
     ContextBreakdown {
         system_prompt: system_prompt_tokens,
