@@ -675,7 +675,7 @@ impl QueryEngine {
     /// success. Used by `/connect` so the user can test portal recovery
     /// manually without waiting for an LLM call to fail.
     pub async fn captive_portal_login(&self) -> Result<(), String> {
-        let probe_url = "http://detectportal.firefox.com/";
+        let probe_url = "http://example.com/";
         let entries: Vec<(&'static str, String)> =
             crate::llm::captive_portal::CAPTIVE_PORTAL_PROFILES
                 .iter()
@@ -1637,10 +1637,8 @@ impl QueryEngine {
                         // a captive portal. Probe a well-known detection URL to get
                         // the portal login page, submit the agree form, then retry
                         // the LLM call in place (does not consume a turn).
-                        // No pre-configured URLs needed — the redirect from the probe
-                        // reveals the portal page.
                         if matches!(&e, ProviderError::Network(_)) {
-                            let probe_url = "http://detectportal.firefox.com/";
+                            let probe_url = "http://example.com/";
                             let entries: Vec<(&'static str, String)> =
                                 crate::llm::captive_portal::CAPTIVE_PORTAL_PROFILES
                                     .iter()
