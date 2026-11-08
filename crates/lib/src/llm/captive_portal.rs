@@ -316,7 +316,9 @@ impl CaptivePortal {
         }
         let mut req = self.client.post(&action_url).form(&form_data);
         if !cookie_header.is_empty() {
-            summary.push_str(&format!("captive portal: POST Cookie header: {cookie_header}\n"));
+            summary.push_str(&format!(
+                "captive portal: POST Cookie header: {cookie_header}\n"
+            ));
             req = req.header("Cookie", cookie_header.clone());
         }
         // Disable automatic redirect following so we can inspect the raw
@@ -324,7 +326,7 @@ impl CaptivePortal {
         // preserving cookies — captive portals often redirect back to the
         // original URL via a 3xx that automatic following would swallow.
         let mut current_url = action_url.clone();
-        let mut max_redirects = 10u32;
+        let max_redirects = 10u32;
         let mut final_resp = None;
         for _ in 0..max_redirects {
             let resp = req
@@ -353,7 +355,10 @@ impl CaptivePortal {
             }
             // Follow redirect manually if we get a 3xx with Location.
             if status.is_redirection() {
-                if let Some(loc) = headers.get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()) {
+                if let Some(loc) = headers
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                {
                     let next_url = resolve_action_url(&url.as_str().to_string(), loc);
                     tracing::info!(
                         "captive portal: following redirect {status} {current_url} -> {next_url}"
@@ -364,7 +369,14 @@ impl CaptivePortal {
                     current_url = next_url;
                     let mut next_req = self.client.get(&current_url);
                     // Re-send collected cookies.
-                    let ch = self.cookies.lock().unwrap().iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ");
+                    let ch = self
+                        .cookies
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join("; ");
                     if !ch.is_empty() {
                         next_req = next_req.header("Cookie", ch);
                     }
@@ -395,7 +407,11 @@ impl CaptivePortal {
                 summary.push_str(&format!("  {name}: {v}\n"));
             }
         }
-        if let Some(loc) = resp.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()) {
+        if let Some(loc) = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+        {
             summary.push_str(&format!("captive portal: redirect Location: {loc}\n"));
         }
 
@@ -599,6 +615,7 @@ fn extract_script_srcs(html: &str) -> Option<Vec<String>> {
         .collect();
     if srcs.is_empty() { None } else { Some(srcs) }
 }
+
 mod tests {
     use super::*;
 
