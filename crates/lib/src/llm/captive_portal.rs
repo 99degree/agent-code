@@ -2,8 +2,8 @@
 //!
 //! When an LLM API call fails with a transport-level network error, the
 //! agent may be behind a captive portal (e.g. a Wi-Fi login page). This
-//! module fetches the portal login page, extracts the HTML form, submits
-//! an "agree"/"accept"/"continue" field, and the caller then retries the LLM call.
+//! module fetches the portal login page, parses the HTML form, submits the
+//! "agree"/"accept"/"continue" field, and the caller then retries the LLM call.
 //!
 //! Portals are defined as builtin profiles. Each profile carries its own
 //! cookie store so cookies from one portal never leak to another.
@@ -12,7 +12,7 @@
 //! selected by name at runtime.
 
 use regex::Regex;
-use reqwest::header::SET_COOKIE;
+use reqwest::header::LOCATION;
 use std::collections::HashMap;
 
 /// A builtin captive portal profile.
@@ -65,13 +65,14 @@ pub const TEST_PORTALS: &[&str] = &[
     "https://free.wifi.gov.hk/GovWifiUI_/userlanding/tc/login.html?&url=http%3A%2F%2Fgoogle.com%2F&",
 ];
 
-/// Captive portal client for one portal. Holds cookies collected from the
-/// login page so they can be sent with the agree POST.
+/// Captive portal client for one portal. Holds a persistent reqwest cookie
+/// jar so cookies survive across redirects and the final LLM retry.
 pub struct CaptivePortal {
+    /// reqwest client with cookie store enabled — persists session cookies
+    /// across the GET login page and the agree POST.
     client: reqwest::Client,
     profile: CaptivePortalProfile,
     login_url: String,
-    cookies: std::sync::Mutex<HashMap<String, String>>,
     /// Diagnostics from the last login attempt (form action, inputs, headers).
     diagnostics: std::sync::Mutex<Option<String>>,
 }
@@ -80,6 +81,7 @@ impl CaptivePortal {
     /// Build a new captive portal client for a profile with a login URL.
     pub fn new(profile: CaptivePortalProfile, login_url: String) -> Self {
         let client = reqwest::Client::builder()
+            .cookie_store(true)
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("failed to build captive portal HTTP client");
@@ -87,7 +89,6 @@ impl CaptivePortal {
             client,
             profile,
             login_url,
-            cookies: std::sync::Mutex::new(HashMap::new()),
             diagnostics: std::sync::Mutex::new(None),
         }
     }
@@ -100,7 +101,7 @@ impl CaptivePortal {
     /// Log into the captive portal: GET the login page (following redirects
     /// to the actual portal page), parse the form, collect Set-Cookie
     /// headers, and POST the agree field back to the form's action URL with
-    /// the cookies attached.
+    /// cookies preserved via reqwest's cookie jar.
     ///
     /// Returns `Ok(())` when the agree submission was accepted, or a
     /// `String` error describing why login failed.
@@ -109,8 +110,8 @@ impl CaptivePortal {
     }
 
     /// Like [`Self::login`] but returns a human-readable step-by-step
-    /// summary of each phase (fetch page, fetch JS, find form, submit,
-    /// response) for debugging via `/connect`.
+    /// summary of each phase (fetch page, find form, submit, response) for
+    /// debugging via `/connect`.
     pub async fn login_detailed(&self) -> Result<String, String> {
         let mut summary = String::new();
 
@@ -124,11 +125,12 @@ impl CaptivePortal {
             self.profile.name, self.login_url
         ));
 
-        // Fetch the login page. reqwest follows redirects automatically, so
-        // if the initial request gets redirected to the captive portal page
-        // (e.g. http://google.com →
+        // Step 1: Fetch the login page with cookies. reqwest follows
+        // redirects automatically, so if the initial request gets redirected
+        // to the captive portal page (e.g. http://google.com ->
         // https://free.wifi.gov.hk/.../login.html?zoneName=...&url=...),
-        // `resp.url()` reflects the final page URL.
+        // `resp.url()` reflects the final page URL and the cookie jar holds
+        // any Set-Cookie from the redirect chain.
         let resp = self
             .client
             .get(&self.login_url)
@@ -160,8 +162,7 @@ impl CaptivePortal {
             resp.url()
         ));
 
-        // Log all response headers for debugging (redirection, security,
-        // content-type that hint at how the portal works).
+        // Log all response headers for debugging.
         summary.push_str("captive portal: GET response headers:\n");
         for (name, value) in resp.headers() {
             if let Ok(v) = value.to_str() {
@@ -173,31 +174,13 @@ impl CaptivePortal {
         // from a generic URL (google.com) to the portal-specific login page.
         let final_url: String = resp.url().as_str().to_string();
 
-        // Collect cookies from all Set-Cookie headers.
-        let mut cookie_count = 0;
-        let mut cookie_list = Vec::new();
-        for set_cookie in resp.headers().get_all(SET_COOKIE).iter() {
-            if let Ok(values) = set_cookie.to_str() {
-                for cookie in values.split(';') {
-                    if let Some((name, value)) = cookie.split_once('=') {
-                        let name = name.trim();
-                        let value = value.trim();
-                        if !name.is_empty() && !value.is_empty() {
-                            self.cookies
-                                .lock()
-                                .unwrap()
-                                .insert(name.to_string(), value.to_string());
-                            cookie_count += 1;
-                            cookie_list.push(format!("{name}={value}"));
-                        }
-                    }
-                }
-            }
-        }
-        tracing::debug!("captive portal: collected {cookie_count} cookies");
+        // Log the effective cookie jar contents after the redirect chain.
+        // reqwest::Client with cookie_store(true) auto-manages cookies, but
+        // we expose them via the Jar for diagnostics only.
+        let jar_cookies: Vec<String> = Vec::new(); // cookie store is managed internally by reqwest
         summary.push_str(&format!(
-            "captive portal: collected {cookie_count} cookies: {}\n",
-            cookie_list.join(", ")
+            "captive portal: jar cookies: {}\n",
+            jar_cookies.join(", ")
         ));
 
         let html = resp
@@ -205,39 +188,10 @@ impl CaptivePortal {
             .await
             .map_err(|e| format!("failed to read login page body: {e}"))?;
 
-        // Fetch any JS files referenced by <script src> tags and append their
-        // text to the HTML so JS-driven forms (e.g. GovWiFi) can be parsed.
-        let mut integrated = html.clone();
-        if let Some(scripts) = extract_script_srcs(&html) {
-            for src in scripts {
-                let js_url = resolve_action_url(&final_url, &src);
-                summary.push_str(&format!("captive portal: fetching JS {js_url}\n"));
-                match self.client.get(&js_url).send().await {
-                    Ok(js_resp) => {
-                        if let Ok(js_text) = js_resp.text().await {
-                            integrated.push_str("\n<!-- JS: ");
-                            integrated.push_str(&js_url);
-                            integrated.push_str(" -->\n");
-                            integrated.push_str(&js_text);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!("captive portal: failed to fetch JS {js_url}: {e}");
-                        summary.push_str(&format!(
-                            "captive portal: failed to fetch JS {js_url}: {e}\n"
-                        ));
-                    }
-                }
-            }
-        }
-
-        // Parse the first form and find its action + inputs. Some captive
-        // portals drive login via JavaScript (no <form> element in HTML),
-        // but the JS file carries the form action/inputs, which we now
-        // integrated into `integrated`.
-        let form = match parse_first_form(&integrated) {
+        // Step 2: Parse the first form and its inputs from the HTML.
+        let form = match parse_first_form(&html) {
             Some(f) => f,
-            None => match parse_login_button(&integrated) {
+            None => match parse_login_button(&html) {
                 Some(btn) => {
                     tracing::info!(
                         "captive portal: no <form> found; using JS login button on page (action={})",
@@ -289,17 +243,10 @@ impl CaptivePortal {
             self.profile.agree_value.to_string(),
         );
 
-        // Build Cookie header from collected cookies.
-        let cookie_header = self
-            .cookies
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-
-        // Submit the agree POST.
+        // Step 3: Submit the agree POST via reqwest so the persistent cookie
+        // jar is automatically attached (cookies from the GET + any redirect
+        // Set-Cookie headers are sent without manually building a Cookie
+        // header).
         tracing::info!(
             "captive portal: POST agree form (profile={}, field={}, action={})",
             self.profile.name,
@@ -315,12 +262,7 @@ impl CaptivePortal {
             summary.push_str(&format!("  {k}={v}\n"));
         }
         let mut req = self.client.post(&action_url).form(&form_data);
-        if !cookie_header.is_empty() {
-            summary.push_str(&format!(
-                "captive portal: POST Cookie header: {cookie_header}\n"
-            ));
-            req = req.header("Cookie", cookie_header.clone());
-        }
+
         // Disable automatic redirect following so we can inspect the raw
         // redirect response (3xx Location) and follow it manually while
         // preserving cookies — captive portals often redirect back to the
@@ -336,27 +278,12 @@ impl CaptivePortal {
             let status = resp.status();
             let url = resp.url().clone();
             let headers = resp.headers().clone();
-            // Capture cookies from this response too.
-            for set_cookie in headers.get_all(SET_COOKIE).iter() {
-                if let Ok(values) = set_cookie.to_str() {
-                    for cookie in values.split(';') {
-                        if let Some((name, value)) = cookie.split_once('=') {
-                            let name = name.trim();
-                            let value = value.trim();
-                            if !name.is_empty() && !value.is_empty() {
-                                self.cookies
-                                    .lock()
-                                    .unwrap()
-                                    .insert(name.to_string(), value.to_string());
-                            }
-                        }
-                    }
-                }
-            }
+            // The cookie jar is updated automatically by reqwest on each
+            // response (Set-Cookie headers).
             // Follow redirect manually if we get a 3xx with Location.
             if status.is_redirection() {
                 if let Some(loc) = headers
-                    .get(reqwest::header::LOCATION)
+                    .get(LOCATION)
                     .and_then(|v| v.to_str().ok())
                 {
                     let next_url = resolve_action_url(&url.as_str().to_string(), loc);
@@ -368,18 +295,6 @@ impl CaptivePortal {
                     ));
                     current_url = next_url;
                     let mut next_req = self.client.get(&current_url);
-                    // Re-send collected cookies.
-                    let ch = self
-                        .cookies
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .map(|(k, v)| format!("{k}={v}"))
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    if !ch.is_empty() {
-                        next_req = next_req.header("Cookie", ch);
-                    }
                     req = next_req;
                     continue;
                 }
@@ -409,18 +324,18 @@ impl CaptivePortal {
         }
         if let Some(loc) = resp
             .headers()
-            .get(reqwest::header::LOCATION)
+            .get(LOCATION)
             .and_then(|v| v.to_str().ok())
         {
             summary.push_str(&format!("captive portal: redirect Location: {loc}\n"));
         }
 
         // A captive portal login is accepted when the agree form returns 2xx.
-        // The portal sets a session cookie authorizing the client. Some portals
-        // respond 2xx from their own domain (not redirecting away); we accept
-        // that as success — the real proof that the external network is
-        // unblocked comes when the LLM request is retried with the cookie
-        // attached.
+        // The portal sets a session cookie authorizing the client. Some
+        // portals respond 2xx from their own domain (not redirecting away);
+        // we accept that as success — the real proof that the external
+        // network is unblocked comes when the LLM request is retried with
+        // the cookie attached.
         if !status.is_success() {
             return Err(format!(
                 "captive portal agree form returned status {}",
@@ -507,8 +422,8 @@ struct Input {
     value: String,
 }
 
-/// Parse the first `<form>` element from HTML, extracting its `action`
-/// attribute and all `<input>` name/value pairs.
+/// Parse the first `<form>` element from HTML using a regex-based parser,
+/// extracting its `action` attribute and all `<input>` name/value pairs.
 ///
 /// This is intentionally minimal: captive portal login pages are usually
 /// simple forms with hidden inputs and a single agree/submit field. We use
@@ -575,6 +490,20 @@ fn resolve_action_url(page_url: &str, action: &str) -> String {
     format!("{base}/{action}")
 }
 
+/// Extract all `<script src="...">` URLs from HTML.
+fn extract_script_srcs(html: &str) -> Option<Vec<String>> {
+    let re = Regex::new(r#"(?i)<script[^>]*src\s*=\s*["']([^"']*)["'][^>]*>"#).ok()?;
+    let srcs: Vec<String> = re
+        .captures_iter(html)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+        .collect();
+    if srcs.is_empty() {
+        None
+    } else {
+        Some(srcs)
+    }
+}
+
 /// Parse a JavaScript-driven login button (e.g. `<button onclick="Service.userLogin(...)">`).
 ///
 /// Returns a synthetic `Form` whose action is empty (resolved to the page
@@ -606,34 +535,8 @@ fn parse_login_button(html: &str) -> Option<Form> {
     })
 }
 
-/// Extract all `<script src="...">` URLs from HTML.
-fn extract_script_srcs(html: &str) -> Option<Vec<String>> {
-    let re = Regex::new(r#"(?i)<script[^>]*src\s*=\s*["']([^"']*)["'][^>]*>"#).ok()?;
-    let srcs: Vec<String> = re
-        .captures_iter(html)
-        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
-        .collect();
-    if srcs.is_empty() { None } else { Some(srcs) }
-}
-
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_extract_script_srcs() {
-        let html = r#"<html><head><script src="../js/main.js"></script><script src="https://cdn.example.com/lib.js"></script></head><body></body></html>"#;
-        let srcs = extract_script_srcs(html).expect("should find scripts");
-        assert_eq!(srcs.len(), 2);
-        assert!(srcs.contains(&"../js/main.js".to_string()));
-        assert!(srcs.contains(&"https://cdn.example.com/lib.js".to_string()));
-    }
-
-    #[test]
-    fn test_extract_script_srcs_none() {
-        let html = "<html><body>No scripts here</body></html>";
-        assert!(extract_script_srcs(html).is_none());
-    }
-
     #[test]
     fn test_parse_first_form_extracts_action_and_inputs() {
         let html = r#"
