@@ -2767,6 +2767,7 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
                 &state.additional_dirs,
                 state.pre_fast_model.clone(),
                 state.disk_output_style.as_ref().map(|s| s.name.clone()),
+                state.config.api.dual_master,
                 None, // context_window - will be derived on resume
             ) {
                 Ok(_) => {

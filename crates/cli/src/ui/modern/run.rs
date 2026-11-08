@@ -71,7 +71,7 @@ type LoadedSession = (
     Option<std::path::PathBuf>,
 );
 
-use agent_code_lib::config::PermissionMode;
+use agent_code_lib::config::{DualMaster, PermissionMode};
 use agent_code_lib::query::{QueryEngine, Session, TurnHandle};
 use agent_code_lib::services::notifier::{NotificationKind, NotifierService};
 use agent_code_lib::tools::PermissionResponse;
@@ -1741,6 +1741,7 @@ pub(super) async fn event_loop(
                             st.config.api.effort = data.effort.clone();
                             st.additional_dirs = data.additional_dirs.clone();
                             st.pre_fast_model = data.pre_fast_model.clone();
+                            st.config.api.dual_master = data.dual_master;
                             // Re-resolve the disk output style by id from
                             // the live registry instead of stashing the
                             // body — picks up edits made to the style file
@@ -1988,6 +1989,7 @@ pub(super) async fn event_loop(
                         &state.additional_dirs,
                         state.pre_fast_model.clone(),
                         state.disk_output_style.as_ref().map(|s| s.name.clone()),
+                        state.config.api.dual_master,
                         None, // context_window - will be derived on resume
                     );
                 }
@@ -2862,6 +2864,9 @@ struct SessionSnapshot {
     /// resumed session uses the same context window rather than
     /// re-deriving it.
     context_window: Option<u64>,
+    /// Dual-LLM master selection at save time: which of `model` /
+    /// `secondary_model` drove the conversation.
+    dual_master: DualMaster,
 }
 
 /// Copy the live conversation out of the engine, or `None` when there is
@@ -2902,6 +2907,7 @@ fn session_snapshot(eng: &agent_code_lib::query::QueryEngine) -> Option<SessionS
         pre_fast_model: st.pre_fast_model.clone(),
         disk_output_style: st.disk_output_style.as_ref().map(|s| s.name.clone()),
         context_window: None, // Will be derived from tokens service when needed
+        dual_master: st.config.api.dual_master,
     })
 }
 
@@ -2933,6 +2939,7 @@ fn write_session_snapshot(snap: &SessionSnapshot) -> Result<(), String> {
         &snap.additional_dirs,
         snap.pre_fast_model.clone(),
         snap.disk_output_style.clone(),
+        snap.dual_master,
         snap.context_window,
     )
     .map(|_| ())

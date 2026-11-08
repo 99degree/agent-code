@@ -4975,6 +4975,7 @@ mod tests {
                 .disk_output_style
                 .as_ref()
                 .map(|s| s.name.clone()),
+            engine.state().config.api.dual_master,
             None, // context_window - will be derived on resume
         )
         .unwrap();

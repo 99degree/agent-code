@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::config::ApiAuthMode;
 use crate::config::atomic::atomic_write_secret;
+use crate::config::{ApiAuthMode, DualMaster};
 use crate::llm::message::{ContentBlock, Message};
 use crate::services::secret_masker;
 
@@ -141,6 +141,12 @@ pub struct SessionData {
     /// "unknown" rather than assuming the current process is safe.
     #[serde(default)]
     pub provider: Option<ProviderIdentity>,
+    /// Dual-LLM master selection at save time: which of `model` /
+    /// `secondary_model` drove the conversation. Restored so a resumed
+    /// session keeps sending to the same provider. `#[serde(default)]`
+    /// (`First`) keeps legacy files valid.
+    #[serde(default)]
+    pub dual_master: DualMaster,
     /// Context window size for the model at save time. Stored so a
     /// resumed session uses the same context window rather than
     /// re-deriving it (which could differ if the API catalog or
@@ -252,6 +258,7 @@ pub fn save_session(
     additional_dirs: &[String],
     pre_fast_model: Option<String>,
     disk_output_style: Option<String>,
+    dual_master: DualMaster,
 ) -> Result<PathBuf, String> {
     save_session_full(
         session_id,
@@ -272,6 +279,7 @@ pub fn save_session(
         additional_dirs,
         pre_fast_model,
         disk_output_style,
+        dual_master,
         None, // context_window - not tracked in thin wrapper
     )
 }
@@ -306,6 +314,7 @@ pub fn save_session_full(
     additional_dirs: &[String],
     pre_fast_model: Option<String>,
     disk_output_style: Option<String>,
+    dual_master: DualMaster,
     context_window: Option<u64>,
 ) -> Result<PathBuf, String> {
     with_session_lock(session_id, |path| {
@@ -365,6 +374,7 @@ pub fn save_session_full(
             pre_fast_model: pre_fast_model.or(prior_pre_fast),
             disk_output_style: disk_output_style.or(prior_disk_style),
             context_window: context_window.or(prior_context_window),
+            dual_master,
             label,
             tags,
             provider: provider.or(prior_provider),
@@ -1298,6 +1308,7 @@ mod tests {
             pre_fast_model: None,
             disk_output_style: None,
             context_window: None,
+            dual_master: DualMaster::First,
         }
     }
 
@@ -1367,6 +1378,7 @@ mod tests {
             pre_fast_model: None,
             disk_output_style: None,
             context_window: None,
+            dual_master: DualMaster::First,
         };
         let json = serde_json::to_string_pretty(&data).unwrap();
         std::fs::create_dir_all(dir.path()).unwrap();
@@ -1407,6 +1419,7 @@ mod tests {
             pre_fast_model: None,
             disk_output_style: None,
             context_window: None,
+            dual_master: DualMaster::First,
         };
 
         let json = serde_json::to_string(&data).unwrap();
@@ -1477,6 +1490,7 @@ mod tests {
             &[],
             None,
             None,
+            DualMaster::First,
             None,
         )
         .unwrap();
@@ -1528,6 +1542,7 @@ mod tests {
             pre_fast_model: None,
             disk_output_style: None,
             context_window: None,
+            dual_master: DualMaster::First,
         };
         let out = serialize_masked(&data).unwrap();
         assert!(
@@ -1567,6 +1582,7 @@ mod tests {
             pre_fast_model: None,
             disk_output_style: None,
             context_window: None,
+            dual_master: DualMaster::First,
         };
         let out = serialize_masked(&data).unwrap();
         assert!(!out.contains("verylongprovidersecret1234567890"));
@@ -1603,6 +1619,7 @@ mod tests {
             pre_fast_model: None,
             disk_output_style: None,
             context_window: None,
+            dual_master: DualMaster::First,
         };
         let out = serialize_masked(&data).unwrap();
         // Must still parse back as a SessionData.
@@ -1651,6 +1668,7 @@ mod tests {
                 pre_fast_model: None,
                 disk_output_style: None,
                 context_window: None,
+                dual_master: DualMaster::First,
             };
             let out = serialize_masked(&data).unwrap();
             let parsed: Result<SessionData, _> = serde_json::from_str(&out);
@@ -1766,6 +1784,7 @@ mod tests {
             pre_fast_model: None,
             disk_output_style: None,
             context_window: None,
+            dual_master: DualMaster::First,
         };
         let out = serialize_masked(&data).unwrap();
         assert!(!out.contains("REDACTED"));
@@ -1798,6 +1817,7 @@ mod tests {
             pre_fast_model: None,
             disk_output_style: None,
             context_window: None,
+            dual_master: DualMaster::First,
         };
         let json = serde_json::to_string(&data).unwrap();
         let back: SessionData = serde_json::from_str(&json).unwrap();
@@ -1899,6 +1919,7 @@ mod tests {
             pre_fast_model: None,
             disk_output_style: None,
             context_window: None,
+            dual_master: DualMaster::First,
         };
         let json = serde_json::to_string_pretty(&data).unwrap();
         std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
@@ -2039,6 +2060,7 @@ mod tests {
             &[],
             None,
             None,
+            DualMaster::First,
         )
         .expect("seed");
 
@@ -2066,6 +2088,7 @@ mod tests {
                     &[],
                     None,
                     None,
+                    DualMaster::First,
                 )
                 .expect("save");
             }
@@ -2114,6 +2137,7 @@ mod tests {
             &[],
             None,
             None,
+            DualMaster::First,
         )
         .expect("seed");
 
@@ -2144,6 +2168,7 @@ mod tests {
                     &[],
                     None,
                     None,
+                    DualMaster::First,
                 )
                 .expect("a");
             }
@@ -2167,6 +2192,7 @@ mod tests {
                     &[],
                     None,
                     None,
+                    DualMaster::First,
                 )
                 .expect("b");
             }
@@ -2242,6 +2268,7 @@ mod tests {
             &[],
             None,
             None,
+            DualMaster::First,
         )
         .expect("save");
         assert!(
@@ -2317,6 +2344,7 @@ mod tests {
             &[],
             None,
             None,
+            DualMaster::First,
             None,
         )
         .expect("save");
@@ -2353,6 +2381,7 @@ mod tests {
             &["/work/extra".to_string()],
             Some("grok-4".to_string()),
             Some("friendly".to_string()),
+            DualMaster::First,
             None,
         )
         .expect("save");
@@ -2378,6 +2407,7 @@ mod tests {
             &[],
             None,
             None,
+            DualMaster::First,
             None,
         )
         .expect("resave");
