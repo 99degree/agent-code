@@ -128,6 +128,9 @@ pub struct QueryEngine {
     pending_model: Arc<std::sync::Mutex<Option<String>>>,
     pending_effort: Arc<std::sync::Mutex<Option<String>>>,
     pending_secondary_model: Arc<std::sync::Mutex<Option<String>>>,
+    /// Last dual-LLM master selection, so the "using X as master" warning
+    /// only fires when the master actually switches (primary <-> secondary).
+    last_dual_master: Option<DualMaster>,
     last_llm_response: std::sync::Mutex<String>,
     stop_location: std::sync::Mutex<String>,
 }
@@ -303,6 +306,7 @@ impl QueryEngine {
             pending_model,
             pending_effort,
             pending_secondary_model,
+            last_dual_master: None,
             last_llm_response: std::sync::Mutex::new(String::new()),
             stop_location: std::sync::Mutex::new(String::new()),
         }
@@ -391,6 +395,8 @@ impl QueryEngine {
 
         *self.pending_model.lock().unwrap() = None;
         *self.pending_effort.lock().unwrap() = None;
+        *self.pending_secondary_model.lock().unwrap() = None;
+        self.last_dual_master = None;
 
         let initial_style = self.initial_disk_output_style.clone();
         let initial_effort = self.initial_effort.clone();
@@ -2411,12 +2417,33 @@ impl QueryEngine {
                         }
                         let use_secondary =
                             matches!(self.state.config.api.dual_master, DualMaster::Second);
-                        if use_secondary {
+                        let master = if use_secondary {
+                            DualMaster::Second
+                        } else {
+                            DualMaster::First
+                        };
+                        // Only warn when the master actually switches — a steady
+                        // state (no switching) doesn't need a message every turn.
+                        if self.last_dual_master != Some(master) {
+                            self.last_dual_master = Some(master);
+                            if use_secondary {
+                                content_blocks = secondary_blocks;
+                                usage = secondary_usage;
+                                stop_reason = secondary_stop_reason;
+                                model = secondary_model_name;
+                                sink.on_warning(
+                                    "Dual LLM: using secondary model response as master.",
+                                );
+                            } else {
+                                sink.on_warning(
+                                    "Dual LLM: using primary model response as master.",
+                                );
+                            }
+                        } else if use_secondary {
                             content_blocks = secondary_blocks;
                             usage = secondary_usage;
                             stop_reason = secondary_stop_reason;
                             model = secondary_model_name;
-                            sink.on_warning("Dual LLM: using secondary model response as master.");
                         }
                     }
                     Err(e) => {
