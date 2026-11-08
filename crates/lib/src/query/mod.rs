@@ -2417,8 +2417,6 @@ impl QueryEngine {
                             stop_reason = secondary_stop_reason;
                             model = secondary_model_name;
                             sink.on_warning("Dual LLM: using secondary model response as master.");
-                        } else {
-                            sink.on_warning("Dual LLM: using primary model response as master.");
                         }
                     }
                     Err(e) => {
