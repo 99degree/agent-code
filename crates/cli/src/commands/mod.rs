@@ -6798,29 +6798,61 @@ fn execute_model2(args: Option<&str>, engine: &mut QueryEngine) {
             println!("Dual LLM disabled; secondary model cleared.");
         }
         Some(new_model) => {
-            let (new_kind, current_model, dual_master_val, auth) = {
-                let api = &mut engine.state_mut().config.api;
-                let base_url = api.base_url.clone();
-                let auth = api.auth_mode;
-                let new_kind =
-                    agent_code_lib::llm::provider::get_provider_for_model(new_model, &base_url);
-                let default_url = new_kind.default_base_url().map(|u| u.to_string());
-                let current_model = api.model.clone();
-                let dual_master_val = api.dual_master;
-                api.secondary_model = Some(new_model.to_string());
-                api.dual_llm_enabled = true;
-                if let Some(url) = default_url.as_ref() {
-                    api.base_url = url.clone();
+            // Find provider for this model using URL-first logic with fallback.
+            let base_url = engine.state().config.api.base_url.clone();
+            let provider_kind =
+                agent_code_lib::llm::provider::get_provider_for_model(new_model, &base_url);
+
+            // Set base URL based on provider (clear if no default URL).
+            let mut base_url_changed = false;
+            if let Some(url) = provider_kind.default_base_url() {
+                if engine.state().config.api.base_url != url {
+                    base_url_changed = true;
                 }
-                (new_kind, current_model, dual_master_val, auth)
-            };
-            // Rebuild provider so the new model/base_url take effect on next request.
-            if auth == agent_code_lib::config::ApiAuthMode::ApiKey {
-                if engine.reload_llm().is_ok() {
-                    println!("Live session now uses provider `{new_kind:?}` for dual LLM.");
+                engine.state_mut().config.api.base_url = url.to_string();
+            } else {
+                // Provider has no default URL — clear a stale base_url
+                // that was auto-set from a different provider's default.
+                let stale = agent_code_lib::llm::provider::ProviderKind::all()
+                    .iter()
+                    .any(|k| k.default_base_url().is_some_and(|u| u == base_url));
+                if stale {
+                    engine.state_mut().config.api.base_url.clear();
+                    base_url_changed = true;
                 }
             }
-            println!("Secondary model set to '{new_model}' [{new_kind:?}]. Dual LLM enabled.");
+
+            // Snapshot values needed after we release the mutable borrow.
+            let current_model = engine.state().config.api.model.clone();
+            let dual_master_val = engine.state().config.api.dual_master;
+
+            engine.state_mut().config.api.secondary_model = Some(new_model.to_string());
+            engine.state_mut().config.api.dual_llm_enabled = true;
+            // If the base URL changed, rebuild the provider object so the
+            // switch takes effect before the next API request (base_url is
+            // bound at provider construction). Only API-key auth can be
+            // rebuilt; OAuth sessions are left to be repointed on restart.
+            if base_url_changed
+                && engine.state().config.api.auth_mode
+                    == agent_code_lib::config::ApiAuthMode::ApiKey
+            {
+                engine.reload_llm().ok();
+            }
+            // Record secondary model change in conversation history.
+            engine
+                .state_mut()
+                .messages
+                .push(agent_code_lib::llm::message::Message::System(
+                    agent_code_lib::llm::message::SystemMessage {
+                        uuid: uuid::Uuid::new_v4(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        subtype: agent_code_lib::llm::message::SystemMessageType::Informational,
+                        content: format!("Secondary model set to {new_model}"),
+                        level: agent_code_lib::llm::message::MessageLevel::Info,
+                    },
+                ));
+
+            println!("Secondary model set to: {new_model} [{provider_kind:?}]");
             println!("  Every request goes to both '{current_model}' and '{new_model}'.");
             println!(
                 "  Master response: {:?} (use /dual-master to change).",
