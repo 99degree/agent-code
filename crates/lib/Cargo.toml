@@ -62,12 +62,9 @@ tree-sitter-python = "0.25"
 tree-sitter-javascript = "0.25"
 pulldown-cmark = "0.13"
 
-# HTML parsing + JS engine for captive portal pages that populate dynamic
-# form fields via inline/external scripts. html5ever parses HTML robustly;
-# boa_engine executes JS so JS-generated hidden inputs/CSRF tokens are
-# available before form extraction.
-html5ever = "0.27"
-boa_engine = "0.20"
+# HTML parsing for captive portal pages. scraper provides a CSS-selector-based
+# DOM API that replaces the regex-based HTML parsing in captive_portal.rs.
+scraper = "0.15"
 
 # Linux OS-level sandbox: Landlock (filesystem confinement) + seccomp
 # (network kill). Linux-only so non-Linux targets still build.

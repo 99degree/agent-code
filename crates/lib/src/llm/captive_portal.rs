@@ -11,8 +11,8 @@
 //! No TOML configuration is required — profiles are compiled in and
 //! selected by name at runtime.
 
-use regex::Regex;
 use reqwest::header::LOCATION;
+use scraper::{Html, Selector};
 use std::collections::HashMap;
 
 /// A builtin captive portal profile.
@@ -281,23 +281,20 @@ impl CaptivePortal {
             // The cookie jar is updated automatically by reqwest on each
             // response (Set-Cookie headers).
             // Follow redirect manually if we get a 3xx with Location.
-            if status.is_redirection() {
-                if let Some(loc) = headers
-                    .get(LOCATION)
-                    .and_then(|v| v.to_str().ok())
-                {
-                    let next_url = resolve_action_url(&url.as_str().to_string(), loc);
-                    tracing::info!(
-                        "captive portal: following redirect {status} {current_url} -> {next_url}"
-                    );
-                    summary.push_str(&format!(
-                        "captive portal: redirect {status} -> {next_url}\n"
-                    ));
-                    current_url = next_url;
-                    let mut next_req = self.client.get(&current_url);
-                    req = next_req;
-                    continue;
-                }
+            if status.is_redirection()
+                && let Some(loc) = headers.get(LOCATION).and_then(|v| v.to_str().ok())
+            {
+                let next_url = resolve_action_url(url.as_str(), loc);
+                tracing::info!(
+                    "captive portal: following redirect {status} {current_url} -> {next_url}"
+                );
+                summary.push_str(&format!(
+                    "captive portal: redirect {status} -> {next_url}\n"
+                ));
+                current_url = next_url;
+                let next_req = self.client.get(&current_url);
+                req = next_req;
+                continue;
             }
             final_resp = Some(resp);
             break;
@@ -322,11 +319,7 @@ impl CaptivePortal {
                 summary.push_str(&format!("  {name}: {v}\n"));
             }
         }
-        if let Some(loc) = resp
-            .headers()
-            .get(LOCATION)
-            .and_then(|v| v.to_str().ok())
-        {
+        if let Some(loc) = resp.headers().get(LOCATION).and_then(|v| v.to_str().ok()) {
             summary.push_str(&format!("captive portal: redirect Location: {loc}\n"));
         }
 
@@ -422,37 +415,26 @@ struct Input {
     value: String,
 }
 
-/// Parse the first `<form>` element from HTML using a regex-based parser,
+/// Parse the first `<form>` element from HTML using scraper's DOM parser,
 /// extracting its `action` attribute and all `<input>` name/value pairs.
 ///
 /// This is intentionally minimal: captive portal login pages are usually
 /// simple forms with hidden inputs and a single agree/submit field. We use
-/// regex instead of a full HTML parser to avoid pulling in a heavy
-/// dependency.
+/// scraper (a CSS-selector HTML parser) instead of regex so malformed HTML
+/// and missing attributes are handled correctly.
 fn parse_first_form(html: &str) -> Option<Form> {
-    let form_re = Regex::new(r"(?is)<form[^>]*>.*?</form>").ok()?;
-    let form_match = form_re.find(html)?;
-    let form_html = form_match.as_str();
+    let document = Html::parse_document(html);
+    let form_selector = Selector::parse("form").ok()?;
+    let form = document.select(&form_selector).next()?;
 
-    // Extract action attribute.
-    let action_re = Regex::new(r#"(?i)action\s*=\s*["']([^"']*)["']"#).ok()?;
-    let action = action_re
-        .captures(form_html)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())
-        .unwrap_or_default();
+    let action = form.value().attr("action").unwrap_or_default().to_string();
 
-    // Extract all inputs with name and value.
-    let input_re = Regex::new(
-        r#"(?i)<input[^>]*name\s*=\s*["']([^"']*)["'][^>]*value\s*=\s*["']([^"']*)["']"#,
-    )
-    .ok()?;
-    let inputs = input_re
-        .captures_iter(form_html)
-        .filter_map(|c| {
-            let name = c.get(1)?.as_str().to_string();
-            let value = c.get(2)?.as_str().to_string();
-            Some(Input { name, value })
+    let input_selector = Selector::parse("input[name][value]").ok()?;
+    let inputs: Vec<Input> = form
+        .select(&input_selector)
+        .map(|input| Input {
+            name: input.value().attr("name").unwrap_or_default().to_string(),
+            value: input.value().attr("value").unwrap_or_default().to_string(),
         })
         .collect();
 
@@ -490,18 +472,15 @@ fn resolve_action_url(page_url: &str, action: &str) -> String {
     format!("{base}/{action}")
 }
 
-/// Extract all `<script src="...">` URLs from HTML.
+/// Extract all `<script src="...">` URLs from HTML using scraper.
 fn extract_script_srcs(html: &str) -> Option<Vec<String>> {
-    let re = Regex::new(r#"(?i)<script[^>]*src\s*=\s*["']([^"']*)["'][^>]*>"#).ok()?;
-    let srcs: Vec<String> = re
-        .captures_iter(html)
-        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+    let document = Html::parse_document(html);
+    let selector = Selector::parse("script[src]").ok()?;
+    let srcs: Vec<String> = document
+        .select(&selector)
+        .filter_map(|script| script.value().attr("src").map(|s| s.to_string()))
         .collect();
-    if srcs.is_empty() {
-        None
-    } else {
-        Some(srcs)
-    }
+    if srcs.is_empty() { None } else { Some(srcs) }
 }
 
 /// Parse a JavaScript-driven login button (e.g. `<button onclick="Service.userLogin(...)">`).
@@ -511,21 +490,19 @@ fn extract_script_srcs(html: &str) -> Option<Vec<String>> {
 /// plus a synthetic agree field. Captive portals that render their login
 /// button via JS often POST back to the same page URL with the agree field.
 fn parse_login_button(html: &str) -> Option<Form> {
-    // Detect a login/submit button without a <form> element.
-    let btn_re = Regex::new(r#"(?i)<button[^>]*onclick\s*=\s*["'][^"']*["'][^>]*>"#).ok()?;
-    btn_re.find(html)?;
+    let document = Html::parse_document(html);
+
+    // Detect a login/submit button with an onclick handler (no <form> element).
+    let btn_selector = Selector::parse("button[onclick]").ok()?;
+    document.select(&btn_selector).next()?;
 
     // Collect all named inputs on the page.
-    let input_re = Regex::new(
-        r#"(?i)<input[^>]*name\s*=\s*["']([^"']*)["'][^>]*value\s*=\s*["']([^"']*)["']"#,
-    )
-    .ok()?;
-    let inputs: Vec<Input> = input_re
-        .captures_iter(html)
-        .filter_map(|c| {
-            let name = c.get(1)?.as_str().to_string();
-            let value = c.get(2)?.as_str().to_string();
-            Some(Input { name, value })
+    let input_selector = Selector::parse("input[name][value]").ok()?;
+    let inputs: Vec<Input> = document
+        .select(&input_selector)
+        .map(|input| Input {
+            name: input.value().attr("name").unwrap_or_default().to_string(),
+            value: input.value().attr("value").unwrap_or_default().to_string(),
         })
         .collect();
 
@@ -535,6 +512,7 @@ fn parse_login_button(html: &str) -> Option<Form> {
     })
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
