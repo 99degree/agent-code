@@ -210,6 +210,7 @@ pub const MODEL_CONTEXT_WINDOWS: &[(&str, &str, u64)] = &[
     ("*", "magistral-medium-latest", 128_000),
     // MiniMax
     ("*", "minimax-m3", 524_288),
+    ("*", "minimax-m3.1-flash", 1_048_576),
     // Qwen
     ("*", "qwen3.6-plus", 1_000_000),
     ("*", "qwen3.7-max", 1_000_000),
