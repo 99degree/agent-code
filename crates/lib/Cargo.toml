@@ -64,7 +64,7 @@ pulldown-cmark = "0.13"
 
 # HTML parsing for captive portal pages. scraper provides a CSS-selector-based
 # DOM API that replaces the regex-based HTML parsing in captive_portal.rs.
-scraper = "0.15"
+scraper = "0.27"
 
 # Linux OS-level sandbox: Landlock (filesystem confinement) + seccomp
 # (network kill). Linux-only so non-Linux targets still build.
