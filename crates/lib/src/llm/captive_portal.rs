@@ -72,6 +72,11 @@ pub struct CaptivePortal {
     /// across the GET login page and the agree POST.
     client: reqwest::Client,
     profile: CaptivePortalProfile,
+    /// The URL the user originally wanted to reach (e.g. http://google.com).
+    /// After the portal agree flow, we check that redirects brought us back
+    /// here — that, not an HTTP 200 from the portal itself, is the real
+    /// proof the external network is unblocked.
+    origin_url: String,
     login_url: String,
     /// Diagnostics from the last login attempt (form action, inputs, headers).
     diagnostics: std::sync::Mutex<Option<String>>,
@@ -88,6 +93,7 @@ impl CaptivePortal {
         Self {
             client,
             profile,
+            origin_url: login_url.clone(),
             login_url,
             diagnostics: std::sync::Mutex::new(None),
         }
@@ -323,16 +329,24 @@ impl CaptivePortal {
             summary.push_str(&format!("captive portal: redirect Location: {loc}\n"));
         }
 
-        // A captive portal login is accepted when the agree form returns 2xx.
-        // The portal sets a session cookie authorizing the client. Some
-        // portals respond 2xx from their own domain (not redirecting away);
-        // we accept that as success — the real proof that the external
-        // network is unblocked comes when the LLM request is retried with
-        // the cookie attached.
-        if !status.is_success() {
+        // A captive portal login is accepted when the agree form redirect
+        // brings us back to the origin URL the user started from — that's
+        // the real proof the external network is unblocked (e.g. after
+        // login on free.wifi.gov.hk, we're redirected back to google.com).
+        // An HTTP 200 from the portal's own domain is not sufficient: the
+        // portal may return 2xx while still trapping us behind the login
+        // wall.
+        if current_url != self.origin_url {
+            tracing::warn!(
+                "captive portal: agree form did not return to origin url; current={} origin={}",
+                current_url,
+                self.origin_url
+            );
             return Err(format!(
-                "captive portal agree form returned status {}",
-                status.as_u16()
+                "captive portal login did not return to origin url {origin}; \
+                 ended at {current}",
+                origin = self.origin_url,
+                current = current_url,
             ));
         }
 
@@ -347,6 +361,13 @@ impl CaptivePortal {
     /// The portal login URL.
     pub fn login_url(&self) -> &str {
         &self.login_url
+    }
+
+    /// The origin URL the user started from (e.g. http://google.com).
+    /// Login is considered successful only if the agree form redirect
+    /// brings us back here.
+    pub fn origin_url(&self) -> &str {
+        &self.origin_url
     }
 }
 
@@ -637,5 +658,17 @@ mod tests {
         for (name, count) in &seen {
             assert_eq!(*count, 1, "duplicate profile name: {name}");
         }
+    }
+
+    #[test]
+    fn test_origin_url_is_stored_from_login_url() {
+        let profile = CaptivePortalProfile {
+            name: "agree",
+            agree_field: "agree",
+            agree_value: "yes",
+        };
+        let portal = CaptivePortal::new(profile.clone(), "http://google.com/".to_string());
+        assert_eq!(portal.origin_url(), "http://google.com/");
+        assert_eq!(portal.login_url(), "http://google.com/");
     }
 }
