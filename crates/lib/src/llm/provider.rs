@@ -255,6 +255,7 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
             ("x-preview-f-free", "x-preview-f · Free preview"),
             ("muse-spark-1.2-contributor", "Muse Spark 1.2 Contributor"),
         ],
+        ProviderKind::Particle => &[("particle-1", "Particle 1 · Frontier model")],
         ProviderKind::Requesty => &[("requesty/auto", "Requesty Auto · Rotates models")],
         ProviderKind::OrcaRouter => &[("orcarouter/free", "OrcaRouter Free · Rotates free models")],
         _ => &[],
@@ -324,6 +325,9 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     if url_lower.contains("opencode.ai") {
         return ProviderKind::OpenCode;
     }
+    if url_lower.contains("particle.ai") {
+        return ProviderKind::Particle;
+    }
     if url_lower.contains("nvidia") {
         return ProviderKind::Nvidia;
     }
@@ -392,6 +396,9 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     }
     if model_lower.starts_with("poolside/") || model_lower.starts_with("ps-") {
         return ProviderKind::Poolside;
+    }
+    if model_lower.starts_with("particle") {
+        return ProviderKind::Particle;
     }
 
     ProviderKind::OpenAiCompatible
@@ -496,6 +503,10 @@ pub fn create_provider_from_config(
             base_url,
             &resolved_key,
         )),
+        ProviderKind::Particle => std::sync::Arc::new(crate::llm::particle::ParticleProvider::new(
+            base_url,
+            &resolved_key,
+        )),
         _ => match kind.wire_format() {
             WireFormat::Anthropic => std::sync::Arc::new(
                 crate::llm::anthropic::AnthropicProvider::new(base_url, &resolved_key),
@@ -558,6 +569,7 @@ pub enum ProviderKind {
     Novita,
     OpenCode,
     OpenCodeGo,
+    Particle,
     /// Requesty AI (OpenAI-compatible gateway https://router.requesty.ai/v1).
     Requesty,
     /// OrcaRouter (OpenAI-compatible API https://api.orcarouter.ai/v1).
@@ -591,6 +603,7 @@ impl ProviderKind {
             ProviderKind::Novita,
             ProviderKind::OpenCode,
             ProviderKind::OpenCodeGo,
+            ProviderKind::Particle,
             ProviderKind::Requesty,
             ProviderKind::OrcaRouter,
             ProviderKind::OpenAiCompatible,
@@ -638,6 +651,7 @@ impl ProviderKind {
             | Self::Novita
             | Self::OpenCode
             | Self::OpenCodeGo
+            | Self::Particle
             | Self::Requesty
             | Self::OrcaRouter
             | Self::OpenAiCompatible => WireFormat::OpenAiCompatible,
@@ -668,6 +682,7 @@ impl ProviderKind {
             Self::Poolside => Some("https://inference.poolside.ai/v1"),
             Self::Kilo => Some("https://api.kilo.ai/api/gateway"),
             Self::Novita => Some("https://api.novita.ai/openai/v1"),
+            Self::Particle => Some("https://api.particle.ai/v1"),
             Self::Requesty => Some("https://router.requesty.ai/v1"),
             Self::OrcaRouter => Some("https://api.orcarouter.ai/v1"),
             // These require user-supplied URLs.
@@ -698,6 +713,7 @@ impl ProviderKind {
             Self::Poolside => "POOLSIDE_API_KEY",
             Self::Kilo => "KILO_API_KEY",
             Self::Novita => "NOVITA_API_KEY",
+            Self::Particle => "PARTICLE_API_KEY",
             Self::Requesty => "REQUESTY_API_KEY",
             Self::OrcaRouter => "ORCAROUTER_API_KEY",
             Self::OpenAiCompatible => "OPENAI_API_KEY",
@@ -729,6 +745,7 @@ impl ProviderKind {
             Self::Poolside => "poolside",
             Self::Kilo => "kilo",
             Self::Novita => "novita",
+            Self::Particle => "particle",
             Self::OpenCode => "opencode",
             Self::OpenCodeGo => "opencode-go",
             Self::Requesty => "requesty",
@@ -760,6 +777,7 @@ impl ProviderKind {
             "poolside" => ProviderKind::Poolside,
             "kilo" => ProviderKind::Kilo,
             "novita" => ProviderKind::Novita,
+            "particle" => ProviderKind::Particle,
             "opencode" | "zen" => ProviderKind::OpenCode,
             "opencode-go" | "zen-go" => ProviderKind::OpenCodeGo,
             "openrouter" => ProviderKind::OpenRouter,

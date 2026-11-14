@@ -238,6 +238,9 @@ pub const MODEL_CONTEXT_WINDOWS: &[(&str, &str, u64)] = &[
     ("*", "mimo-v2.5-free", 1_000_000),
     // Poolside (free)
     ("*", "laguna-s-2.1-free", 262_144),
+    // Particle
+    ("*", "particle-1", 1_000_000),
+    ("*", "particle-1:free", 1_000_000),
     // Muse (free)
     ("*", "muse-spark-1.2-contributor-free", 1_000_000),
     // Kilo auto-routing tiers (aggregate many models)
@@ -525,7 +528,10 @@ mod tests {
     #[test]
     fn test_context_window_for_nemotron_models() {
         // The Nemotron `-free` variants expose a 1M context window.
-        assert_eq!(context_window_for_model("*", "nemotron-3-ultra-free"), 1_000_000);
+        assert_eq!(
+            context_window_for_model("*", "nemotron-3-ultra-free"),
+            1_000_000
+        );
         assert_eq!(
             context_window_for_model("*", "nemotron-3.5-lightning-free"),
             1_000_000
@@ -540,7 +546,16 @@ mod tests {
 
     #[test]
     fn test_context_window_for_1000k_variant() {
-        assert_eq!(context_window_for_model("*", "claude-sonnet-1000k"), 1_000_000);
+        assert_eq!(
+            context_window_for_model("*", "claude-sonnet-1000k"),
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn test_context_window_for_particle_1() {
+        assert_eq!(context_window_for_model("*", "particle-1"), 1_000_000);
+        assert_eq!(context_window_for_model("*", "particle-1:free"), 1_000_000);
     }
 
     #[test]
@@ -553,7 +568,10 @@ mod tests {
         assert_eq!(context_window_for_model("*", "gpt-4.1"), 1_047_576);
         assert_eq!(context_window_for_model("*", "glm-5.2"), 1_000_000);
         assert_eq!(context_window_for_model("*", "grok-4.5"), 500_000);
-        assert_eq!(context_window_for_model("*", "mistral-large-latest"), 262_144);
+        assert_eq!(
+            context_window_for_model("*", "mistral-large-latest"),
+            262_144
+        );
         // Provider prefix is stripped for the lookup.
         assert_eq!(context_window_for_model("*", "openrouter/auto"), 200_000);
         // Unknown models still default to 200K.

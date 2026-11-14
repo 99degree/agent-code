@@ -22,6 +22,7 @@ pub mod normalize;
 pub mod novita;
 pub mod openai;
 pub mod opencode;
+pub mod particle;
 pub mod poolside;
 pub mod provider;
 pub mod requesty;
