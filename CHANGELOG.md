@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Accurate model context windows** — `context_window_for_model` now consults an explicit per-model table (sourced from provider catalogs such as pi.dev) before falling back to prefix heuristics, so large-context models (1M+) no longer collapse to the 128K default and trigger premature compaction. `/model` picker catalogs for NVIDIA, OpenCode, OpenCodeGo, Mistral, and Zhipu were fleshed out with real current model ids.
 
+### Fixed
+
+- **`Glob` with an empty `path` no longer walks the whole filesystem** — an empty or blank `path` was joined with the pattern as `/<pattern>`, so a project search became a walk from `/` that looked like a hang. Empty now means the working directory, and relative paths in `Glob` and `Grep` resolve against the session's working directory.
+- **Eval harness gives each agent run a time limit** — a run that never exits now fails that attempt after 5 minutes instead of holding the suite until the CI job is cancelled; the agent's stdin is closed.
+
 ## [0.31.0] - 2026-11-16
 
 ### Added
