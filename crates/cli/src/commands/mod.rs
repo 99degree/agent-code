@@ -56,10 +56,10 @@ pub(crate) fn merge_models(
     for (m, d, ctx) in live {
         if known.contains(m) {
             // Update context window for existing models if live provides one
-            if ctx.is_some() {
-                if let Some(entry) = out.iter_mut().find(|(id, _, _)| id == m) {
-                    entry.2 = *ctx;
-                }
+            if ctx.is_some()
+                && let Some(entry) = out.iter_mut().find(|(id, _, _)| id == m)
+            {
+                entry.2 = *ctx;
             }
             continue;
         }
@@ -68,11 +68,11 @@ pub(crate) fn merge_models(
     out
 }
 
+type ModelCacheEntry = (String, String, Option<u64>);
+type ModelCacheMap = HashMap<(ProviderKind, String), Vec<ModelCacheEntry>>;
+
 /// Read the model cache without mutating it.
-pub(crate) fn model_cache_read() -> std::sync::MutexGuard<
-    'static,
-    HashMap<(ProviderKind, String), Vec<(String, String, Option<u64>)>>,
-> {
+pub(crate) fn model_cache_read() -> std::sync::MutexGuard<'static, ModelCacheMap> {
     MODEL_CACHE.lock().unwrap()
 }
 

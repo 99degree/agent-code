@@ -9,6 +9,7 @@
 //! - `message` — Message types for the conversation protocol
 //! - `stream` — SSE parser that yields `StreamEvent` values
 
+pub mod aihubmix;
 pub mod anthropic;
 pub mod azure_openai;
 pub mod aihubmix;

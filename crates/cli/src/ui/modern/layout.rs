@@ -359,7 +359,7 @@ fn scrub_item(item: &TranscriptItem) -> Option<TranscriptItem> {
     use std::borrow::Cow;
     let dirty = |s: &str| matches!(escape_deceptive(s), Cow::Owned(_));
     let esc = |s: &str| escape_deceptive(s).into_owned();
-    let esc_opt = |s: &Option<String>| s.as_deref().map(&esc);
+    let esc_opt = |s: &Option<String>| s.as_deref().map(esc);
 
     match item {
         TranscriptItem::User(t) => dirty(t).then(|| TranscriptItem::User(esc(t))),

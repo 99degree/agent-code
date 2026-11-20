@@ -1694,7 +1694,12 @@ mod tests {
     fn test_should_auto_compact_empty_tracking_small_conversation() {
         let tracking = CompactTracking::default();
         let messages = vec![crate::llm::message::user_message("tiny")];
-        assert!(!should_auto_compact(&messages, "*", "claude-sonnet", &tracking));
+        assert!(!should_auto_compact(
+            &messages,
+            "*",
+            "claude-sonnet",
+            &tracking
+        ));
     }
 
     #[test]

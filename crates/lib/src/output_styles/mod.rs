@@ -47,19 +47,14 @@ use tracing::{debug, warn};
 ///
 /// The `applies_to` frontmatter list is matched against this so a
 /// style authored for one role doesn't bleed into the other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentKind {
     /// The user-facing top-level agent (interactive REPL, `--prompt`
     /// one-shots run directly by a human).
+    #[default]
     Main,
     /// A child agent spawned by the `Agent` tool.
     Subagent,
-}
-
-impl Default for AgentKind {
-    fn default() -> Self {
-        Self::Main
-    }
 }
 
 impl AgentKind {

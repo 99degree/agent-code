@@ -1045,29 +1045,27 @@ fn remove_inserted_dummy_assistants(messages: &mut Vec<Message>) {
     while i + 1 < messages.len() {
         if let Message::Assistant(a) = &messages[i] {
             // Dummy assistants have exactly one text block with the specific sentinel.
-            if a.content.len() == 1 {
-                if let ContentBlock::Text { text } = &a.content[0] {
-                    if text == "(response interrupted)" {
-                        // Determine the nature of surrounding messages.
-                        let prev_is_assistant = matches!(&messages[i - 1], Message::Assistant(_));
-                        let next_is_user = matches!(&messages[i + 1], Message::User(_));
-                        // Check if the preceding assistant actually performed a tool call.
-                        let prev_has_tool_calls =
-                            if let Message::Assistant(prev_a) = &messages[i - 1] {
-                                prev_a
-                                    .content
-                                    .iter()
-                                    .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
-                            } else {
-                                false
-                            };
-                        // Only drop the dummy when it was inserted to bridge a tool call to its result.
-                        if prev_is_assistant && prev_has_tool_calls && next_is_user {
-                            messages.remove(i);
-                            // Do not increment `i` because the next element shifted into this slot.
-                            continue;
-                        }
-                    }
+            if a.content.len() == 1
+                && let ContentBlock::Text { text } = &a.content[0]
+                && text == "(response interrupted)"
+            {
+                // Determine the nature of surrounding messages.
+                let prev_is_assistant = matches!(&messages[i - 1], Message::Assistant(_));
+                let next_is_user = matches!(&messages[i + 1], Message::User(_));
+                // Check if the preceding assistant actually performed a tool call.
+                let prev_has_tool_calls = if let Message::Assistant(prev_a) = &messages[i - 1] {
+                    prev_a
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                } else {
+                    false
+                };
+                // Only drop the dummy when it was inserted to bridge a tool call to its result.
+                if prev_is_assistant && prev_has_tool_calls && next_is_user {
+                    messages.remove(i);
+                    // Do not increment `i` because the next element shifted into this slot.
+                    continue;
                 }
             }
         }
@@ -1078,9 +1076,7 @@ fn remove_inserted_dummy_assistants(messages: &mut Vec<Message>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::message::{
-        AssistantMessage, ContentBlock, Message, StopReason, UserMessage, user_message,
-    };
+    use crate::llm::message::{AssistantMessage, ContentBlock, Message, UserMessage, user_message};
 
     fn write_session_file(dir: &std::path::Path, id: &str, updated_at: &str) {
         let json = format!(
@@ -1347,9 +1343,9 @@ mod tests {
     #[test]
     fn test_save_and_load_session() {
         // Override sessions dir to a temp directory.
-        let dir = tempfile::tempdir().unwrap();
+        let _dir = tempfile::tempdir().unwrap();
         let session_id = "test-save-load";
-        let session_file = dir.path().join(format!("{session_id}.json"));
+        let session_file = _dir.path().join(format!("{session_id}.json"));
 
         let messages = vec![user_message("hello"), user_message("world")];
 
@@ -1381,7 +1377,7 @@ mod tests {
             dual_master: DualMaster::First,
         };
         let json = serde_json::to_string_pretty(&data).unwrap();
-        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::create_dir_all(_dir.path()).unwrap();
         std::fs::write(&session_file, &json).unwrap();
 
         // Load it back.
@@ -1431,7 +1427,7 @@ mod tests {
 
     #[test]
     fn save_session_full_preserves_entire_response_history() {
-        let dir = tempfile::tempdir().unwrap();
+        let _dir = tempfile::tempdir().unwrap();
         let session_id = "persist-full-history";
 
         let messages = vec![

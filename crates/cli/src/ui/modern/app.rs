@@ -2578,9 +2578,10 @@ impl App {
 
                 // Warn if context window < 200k
                 if ctx_window < 200_000 {
-                    self.transcript.push(TranscriptItem::System(format!(
+                    self.transcript.push(TranscriptItem::System(
                         "⚠️  Small context window. Consider using a larger model for better context handling."
-                    )));
+                            .to_string(),
+                    ));
                 }
 
                 if let Some(ref e) = effort {

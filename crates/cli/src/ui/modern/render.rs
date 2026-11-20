@@ -1108,10 +1108,10 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     // Start with the selected task if it is a background task.
     let mut background_to_show = Vec::new();
-    if let Some(selected) = app.tasks.get(app.tasks_selected) {
-        if selected.source == super::tasks::TaskSource::Background {
-            background_to_show.push(selected);
-        }
+    if let Some(selected) = app.tasks.get(app.tasks_selected)
+        && selected.source == super::tasks::TaskSource::Background
+    {
+        background_to_show.push(selected);
     }
     // Add the recent background tasks, avoiding duplicates (by pointer).
     for task in &recent_background {
@@ -1143,7 +1143,7 @@ fn draw_tasks_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 .iter()
                 .position(|t| t.agent_id == key.0 && t.source == key.1 && t.task_id == key.2)
         })
-        .unwrap_or(0.min(display_tasks.len().saturating_sub(1)));
+        .unwrap_or(0);
 
     let block = Block::default()
         .borders(Borders::LEFT)

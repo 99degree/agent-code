@@ -39,6 +39,7 @@ use crate::tools::executor::{execute_tool_calls, extract_tool_calls};
 use crate::tools::registry::ToolRegistry;
 
 /// Configuration for the query engine.
+#[derive(Default)]
 pub struct QueryEngineConfig {
     pub max_turns: Option<usize>,
     pub verbose: bool,
@@ -50,18 +51,6 @@ pub struct QueryEngineConfig {
     pub agent_kind: AgentKind,
     /// Whether debug mode is enabled.
     pub debug_enabled: bool,
-}
-
-impl Default for QueryEngineConfig {
-    fn default() -> Self {
-        Self {
-            max_turns: None,
-            verbose: false,
-            unattended: false,
-            agent_kind: AgentKind::default(),
-            debug_enabled: false,
-        }
-    }
 }
 
 /// The query engine orchestrates the agent loop.
@@ -2003,11 +1992,11 @@ impl QueryEngine {
                             Some(StreamEvent::TextDelta(text)) => {
                                 sink.on_text(&text);
                                 // Debug: serialize the event and append to debug_response_text
-                                if self.config.debug_enabled || self.state.config.features.debug_mode {
-                                    if let Ok(json) = serde_json::to_string(&StreamEvent::TextDelta(text.clone())) {
-                                        debug_response_text.push_str(&json);
-                                        debug_response_text.push('\n');
-                                    }
+                                if (self.config.debug_enabled || self.state.config.features.debug_mode)
+                                    && let Ok(json) = serde_json::to_string(&StreamEvent::TextDelta(text.clone()))
+                                {
+                                    debug_response_text.push_str(&json);
+                                    debug_response_text.push('\n');
                                 }
                             }
                             Some(StreamEvent::ContentBlockComplete(block)) => {
@@ -2195,11 +2184,11 @@ impl QueryEngine {
                                 sink.on_error(&msg);
 
                                 // Debug: serialize the event and append to debug_response_text
-                                if self.config.debug_enabled || self.state.config.features.debug_mode {
-                                    if let Ok(json) = serde_json::to_string(&StreamEvent::Error(msg.clone())) {
-                                        debug_response_text.push_str(&json);
-                                        debug_response_text.push('\n');
-                                    }
+                                if (self.config.debug_enabled || self.state.config.features.debug_mode)
+                                    && let Ok(json) = serde_json::to_string(&StreamEvent::Error(msg.clone()))
+                                {
+                                    debug_response_text.push_str(&json);
+                                    debug_response_text.push('\n');
                                 }
                             }
                             Some(_) => {}
@@ -2350,7 +2339,7 @@ impl QueryEngine {
                 if self.config.debug_enabled {
                     *self.last_llm_response.lock().unwrap() = debug_response_text;
                     *self.stop_location.lock().unwrap() =
-                        format!("run_turn_inner: stream error with empty content");
+                        "run_turn_inner: stream error with empty content".to_string();
                     self.print_debug_stop(sink);
                 }
                 self.state.is_query_active = false;

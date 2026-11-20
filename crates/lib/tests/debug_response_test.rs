@@ -53,17 +53,19 @@ async fn test_debug_response_contains_serialized_events() {
     let mut config = Config::default();
     config.features.debug_mode = true;
     let state = AppState::new(config);
-    let mut query_engine_config = QueryEngineConfig::default();
-    query_engine_config.debug_enabled = true;
+    let query_engine_config = QueryEngineConfig {
+        debug_enabled: true,
+        ..Default::default()
+    };
 
     let mut engine = QueryEngine::new(provider, tools, permissions, state, query_engine_config);
 
-    let mut sink = agent_code_lib::query::NullSink;
+    let sink = agent_code_lib::query::NullSink;
 
     let last_response = engine.last_llm_response();
     assert_eq!(last_response, "");
 
-    let _ = engine.run_turn_with_sink("test prompt", &mut sink).await;
+    let _ = engine.run_turn_with_sink("test prompt", &sink).await;
 
     let last_response = engine.last_llm_response();
     println!("Last response: {}", last_response);
