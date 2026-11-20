@@ -240,6 +240,7 @@ pub const MODEL_CONTEXT_WINDOWS: &[(&str, &str, u64)] = &[
     ("*", "laguna-s-2.1-free", 262_144),
     // Particle
     ("*", "particle-1", 1_000_000),
+    ("*", "particle-1*", 1_000_000),
     ("*", "particle-1:free", 1_000_000),
     // Muse (free)
     ("*", "muse-spark-1.2-contributor-free", 1_000_000),
@@ -283,6 +284,9 @@ pub fn context_window_for_model(provider: &str, model: &str) -> u64 {
     // Heuristic fallback for unknown models.
     if lower.contains("opus") || lower.contains("sonnet") || lower.contains("haiku") {
         200_000
+    } else if lower.starts_with("particle-1") {
+        // Particle 1 family exposes a 1M context window.
+        1_000_000
     } else if lower.contains("nemotron") {
         // NVIDIA Nemotron `-free` variants expose a 1M context window;
         // treat the family as 1M to avoid premature compaction.
@@ -556,6 +560,7 @@ mod tests {
     fn test_context_window_for_particle_1() {
         assert_eq!(context_window_for_model("*", "particle-1"), 1_000_000);
         assert_eq!(context_window_for_model("*", "particle-1:free"), 1_000_000);
+        assert_eq!(context_window_for_model("*", "particle-1*"), 1_000_000);
     }
 
     #[test]
