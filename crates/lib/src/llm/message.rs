@@ -366,16 +366,16 @@ fn base64_encode(data: &[u8]) -> String {
         out.push(CHARS[((b1 & 0xf) << 2) | (b2 >> 6)] as char);
         out.push(CHARS[b2 & 0x3f] as char);
     }
-    match *remainder {
+    match remainder {
         [b0] => {
-            let b0 = b0 as usize;
+            let b0 = *b0 as usize;
             out.push(CHARS[b0 >> 2] as char);
             out.push(CHARS[(b0 & 3) << 4] as char);
             out.push('=');
             out.push('=');
         }
         [b0, b1] => {
-            let (b0, b1) = (b0 as usize, b1 as usize);
+            let (b0, b1) = (*b0 as usize, *b1 as usize);
             out.push(CHARS[b0 >> 2] as char);
             out.push(CHARS[((b0 & 3) << 4) | (b1 >> 4)] as char);
             out.push(CHARS[(b1 & 0xf) << 2] as char);
