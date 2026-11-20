@@ -201,6 +201,7 @@ pub const MODEL_CONTEXT_WINDOWS: &[(&str, &str, u64)] = &[
     // Mistral
     ("*", "codestral-latest", 256_000),
     ("*", "devstral-latest", 262_144),
+    ("*", "mistral-large-4", 1_000_000),
     ("*", "mistral-large-latest", 262_144),
     ("*", "mistral-medium-latest", 262_144),
     ("*", "mistral-small-latest", 256_000),
