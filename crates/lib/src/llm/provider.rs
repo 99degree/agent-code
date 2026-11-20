@@ -170,6 +170,7 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
             ("sonar-deep-research", "Sonar Deep Research · In-depth"),
         ],
         ProviderKind::OpenRouter => &[("openrouter/free", "OpenRouter Free · Rotates free models")],
+        ProviderKind::Aihubmix => &[("gpt-4o-mini", "GPT-4o Mini · AIHubMix gateway")],
         ProviderKind::Nvidia => &[
             (
                 "nvidia/nemotron-3-ultra-550b-a55b",
@@ -312,6 +313,9 @@ pub fn detect_provider(model: &str, base_url: &str) -> ProviderKind {
     }
     if url_lower.contains("openrouter.ai") {
         return ProviderKind::OpenRouter;
+    }
+    if url_lower.contains("aihubmix.com") {
+        return ProviderKind::Aihubmix;
     }
     if url_lower.contains("cohere.com") || url_lower.contains("cohere.ai") {
         return ProviderKind::Cohere;
@@ -507,6 +511,10 @@ pub fn create_provider_from_config(
             base_url,
             &resolved_key,
         )),
+        ProviderKind::Aihubmix => std::sync::Arc::new(crate::llm::aihubmix::AihubmixProvider::new(
+            base_url,
+            &resolved_key,
+        )),
         _ => match kind.wire_format() {
             WireFormat::Anthropic => std::sync::Arc::new(
                 crate::llm::anthropic::AnthropicProvider::new(base_url, &resolved_key),
@@ -557,6 +565,8 @@ pub enum ProviderKind {
     Together,
     Zhipu,
     OpenRouter,
+    /// AIHubMix (OpenAI-compatible gateway https://aihubmix.com/v1).
+    Aihubmix,
     Cohere,
     Perplexity,
     Nvidia,
@@ -594,6 +604,7 @@ impl ProviderKind {
             ProviderKind::Together,
             ProviderKind::Zhipu,
             ProviderKind::OpenRouter,
+            ProviderKind::Aihubmix,
             ProviderKind::Cohere,
             ProviderKind::Perplexity,
             ProviderKind::Nvidia,
@@ -652,6 +663,7 @@ impl ProviderKind {
             | Self::OpenCode
             | Self::OpenCodeGo
             | Self::Particle
+            | Self::Aihubmix
             | Self::Requesty
             | Self::OrcaRouter
             | Self::OpenAiCompatible => WireFormat::OpenAiCompatible,
@@ -683,6 +695,7 @@ impl ProviderKind {
             Self::Kilo => Some("https://api.kilo.ai/api/gateway"),
             Self::Novita => Some("https://api.novita.ai/openai/v1"),
             Self::Particle => Some("https://api.particle.ai/v1"),
+            Self::Aihubmix => Some("https://aihubmix.com/v1"),
             Self::Requesty => Some("https://router.requesty.ai/v1"),
             Self::OrcaRouter => Some("https://api.orcarouter.ai/v1"),
             // These require user-supplied URLs.
@@ -714,6 +727,7 @@ impl ProviderKind {
             Self::Kilo => "KILO_API_KEY",
             Self::Novita => "NOVITA_API_KEY",
             Self::Particle => "PARTICLE_API_KEY",
+            Self::Aihubmix => "AIHUBMIX_API_KEY",
             Self::Requesty => "REQUESTY_API_KEY",
             Self::OrcaRouter => "ORCAROUTER_API_KEY",
             Self::OpenAiCompatible => "OPENAI_API_KEY",
@@ -746,6 +760,7 @@ impl ProviderKind {
             Self::Kilo => "kilo",
             Self::Novita => "novita",
             Self::Particle => "particle",
+            Self::Aihubmix => "aihubmix",
             Self::OpenCode => "opencode",
             Self::OpenCodeGo => "opencode-go",
             Self::Requesty => "requesty",
@@ -778,6 +793,7 @@ impl ProviderKind {
             "kilo" => ProviderKind::Kilo,
             "novita" => ProviderKind::Novita,
             "particle" => ProviderKind::Particle,
+            "aihubmix" => ProviderKind::Aihubmix,
             "opencode" | "zen" => ProviderKind::OpenCode,
             "opencode-go" | "zen-go" => ProviderKind::OpenCodeGo,
             "openrouter" => ProviderKind::OpenRouter,
