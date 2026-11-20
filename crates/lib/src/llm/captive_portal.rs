@@ -10,7 +10,22 @@
 //!
 //! No TOML configuration is required — profiles are compiled in and
 //! selected by name at runtime.
+//!
+//! Form discovery:
+//!
+//! 1. Parse the first `<form>` element from static HTML via `scraper`.
+//! 2. If none is found, fall back to a `button[onclick]` handler (static).
+//! 3. If still none, scan inline `<script>` blocks and external `<script src>`
+//!    URLs for form data embedded in JavaScript (form HTML assigned to
+//!    `innerHTML`/`document.write`, JSON field configs, etc.) — portals that
+//!    render the login form purely via JS have no `<form>` in the raw HTML.
+//!
+//! JavaScript execution itself is intentionally *not* performed; we only
+//! extract declarative form data that the page author embedded in script
+//! text. This avoids pulling in a headless browser while covering the common
+//! JS-injected captive-portal login shape.
 
+use regex::Regex;
 use reqwest::header::LOCATION;
 use scraper::{Html, Selector};
 use std::collections::HashMap;
@@ -195,23 +210,30 @@ impl CaptivePortal {
             .map_err(|e| format!("failed to read login page body: {e}"))?;
 
         // Step 2: Parse the first form and its inputs from the HTML.
+        // Static HTML first, then JS-injected form data (innerHTML/document.write
+        // in inline scripts, or JSON configs in external scripts), then a
+        // button[onclick] fallback as last resort.
         let form = match parse_first_form(&html) {
             Some(f) => f,
-            None => match parse_login_button(&html) {
-                Some(btn) => {
-                    tracing::info!(
-                        "captive portal: no <form> found; using JS login button on page (action={})",
-                        btn.action
-                    );
-                    btn
-                }
-                None => {
-                    return Err(format!(
-                        "captive portal: reached login page for {} but no HTML form or login button found \
-                         (JavaScript-driven login; cannot auto-submit)",
-                        self.login_url
-                    ));
-                }
+            None => match parse_js_form(&html, &final_url, &self.client).await {
+                Some(f) => f,
+                None => match parse_login_button(&html) {
+                    Some(btn) => {
+                        tracing::info!(
+                            "captive portal: no <form> found; using JS login button on page (action={})",
+                            btn.action
+                        );
+                        btn
+                    }
+                    None => {
+                        return Err(format!(
+                            "captive portal: reached login page for {} but no HTML form, \
+                             JS-embedded form, or login button found \
+                             (JavaScript-driven login; cannot auto-submit)",
+                            self.login_url
+                        ));
+                    }
+                },
             },
         };
 
@@ -533,6 +555,157 @@ fn parse_login_button(html: &str) -> Option<Form> {
     })
 }
 
+/// Parse form data embedded in JavaScript within the HTML page.
+///
+/// Captive portals that render their login form purely via JS have no
+/// `<form>` element in the raw HTML. Instead they often:
+///
+/// - assign an HTML form string to `innerHTML` / `document.write`,
+/// - put the agree field name/value in a JS object/JSON config,
+/// - load an external `<script src="...">` that emits the form HTML.
+///
+/// We scan inline `<script>` blocks and, for external scripts, fetch them
+/// (same client/cookie jar) and scan their text too. We only extract
+/// *declarative* form data — no JavaScript is executed.
+///
+/// Strategy:
+/// 1. For every inline `<script>` and every fetched external script,
+///    look for a string literal that looks like an HTML `<form>...</form>`
+///    snippet (assigned to `innerHTML`, passed to `document.write`, etc.).
+///    If found, parse that snippet as a form.
+/// 2. Otherwise look for JSON-looking object literals in script text that
+///    contain `agree`/`accept`/`continue`-ish field names alongside a form
+///    `action` URL, and synthesize a `Form` from them.
+///
+/// `html` is the raw page HTML; `page_url` is the final URL used to resolve
+/// relative script `src` URLs; `http` is the shared cookie-jar client used
+/// to fetch external scripts.
+async fn parse_js_form(html: &str, page_url: &str, http: &reqwest::Client) -> Option<Form> {
+    let selector = Selector::parse("script").ok()?;
+
+    // Do all scraper work in a scoped block so the `!Send` scraper types
+    // (`Html`, `ElementRef`) are dropped before any `.await`.
+    // Otherwise the async future is not `Send` and cannot be spawned.
+    let (inline_texts, script_srcs): (Vec<String>, Vec<String>) = {
+        let document = Html::parse_document(html);
+        let mut inline_texts: Vec<String> = Vec::new();
+        let mut script_srcs: Vec<String> = Vec::new();
+        for script in document.select(&selector) {
+            if let Some(src) = script.value().attr("src") {
+                script_srcs.push(resolve_action_url(page_url, src));
+                continue;
+            }
+            let text = script.text().next().filter(|t| !t.trim().is_empty());
+            if let Some(text) = text {
+                inline_texts.push(text.to_string());
+            }
+        }
+        (inline_texts, script_srcs)
+    };
+
+    // Fetch external scripts (await happens outside the scraper loop).
+    let mut external_texts: Vec<String> = Vec::new();
+    for src_url in script_srcs {
+        if let Some(text) = fetch_script_text(http, &src_url).await {
+            external_texts.push(text);
+        }
+    }
+
+    let script_texts: Vec<String> = inline_texts.into_iter().chain(external_texts).collect();
+
+    // 1. Look for an HTML form snippet embedded in script text.
+    for text in &script_texts {
+        if let Some(form) = extract_form_snippet(text) {
+            return Some(form);
+        }
+    }
+
+    // 2. Look for a JSON-like config object with agree-ish fields.
+    for text in &script_texts {
+        if let Some(form) = extract_js_config_form(text) {
+            return Some(form);
+        }
+    }
+
+    None
+}
+
+/// Find a `<form>...</form>` snippet embedded inside a block of JS text,
+/// e.g. `document.write('<form action="/login" ...>...')` or
+/// `el.innerHTML = "<form ...>...</form>"`. Returns the parsed form.
+fn extract_form_snippet(js: &str) -> Option<Form> {
+    // Find candidate form snippets between <form ...> and </form>.
+    let form_start_re = regex::Regex::new(r"<form\b[^>]*>").ok()?;
+    for m in form_start_re.find_iter(js) {
+        let start = m.start();
+        let rest = &js[start..];
+        let end = rest.find("</form>")? + 7; // include closing tag length
+        let snippet = &rest[..end];
+        if let Some(form) = parse_first_form(snippet) {
+            return Some(form);
+        }
+    }
+    None
+}
+
+/// Look for a JSON-like object literal in JS text that carries form field
+/// configuration (e.g. `{action: "/login", fields: {agree: "yes"}}`) and
+/// synthesize a `Form` from it.
+fn extract_js_config_form(js: &str) -> Option<Form> {
+    // Very heuristic: find `{...}` objects containing a field name that
+    // looks like an agree/accept/continue field.
+    let re = regex::Regex::new(r"\{[^{}]*\b(agree|accept|continue|terms)\b[^{}]*\}").ok()?;
+    for m in re.find_iter(js) {
+        let obj = m.as_str();
+        // Try to extract an `action` or `url` key from the same object.
+        let action = extract_json_str(obj, "action")
+            .or_else(|| extract_json_str(obj, "url"))
+            .or_else(|| extract_json_str(obj, "submit_url"))
+            .unwrap_or_default();
+        let mut inputs: Vec<Input> = Vec::new();
+        for field in ["agree", "accept", "continue", "terms"] {
+            if let Some(val) = extract_json_str(obj, field) {
+                inputs.push(Input {
+                    name: field.to_string(),
+                    value: val,
+                });
+            }
+        }
+        if inputs.is_empty() {
+            continue;
+        }
+        return Some(Form { action, inputs });
+    }
+    None
+}
+
+/// Extract a string value for a key from a JSON-like object snippet, e.g.
+/// `action: "/login"` or `action:"/login"` or `agree: "yes"`.
+fn extract_json_str(obj: &str, key: &str) -> Option<String> {
+    // All literal braces are doubled (`{{`/`}}`) because this is a format! string.
+    // The value must be followed by a comma, `}`, `}`, or end of string.
+    // The key may be quoted (`"action": ...`) or unquoted (`action: ...`).
+    let pattern = format!(
+        r#"["']?{key}["']?\s*:?\s*["']?([^"',{{}}]+)["']?\s*(?:[,{{}}]|$)"#,
+        key = regex::escape(key)
+    );
+    let re = Regex::new(&pattern).ok()?;
+    re.captures(obj)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().trim_matches('"').to_string())
+}
+
+/// Fetch the text of an external `<script src>` URL using the shared client
+/// (cookies preserved). Returns `None` on any failure — external scripts are
+/// best-effort.
+async fn fetch_script_text(http: &reqwest::Client, url: &str) -> Option<String> {
+    let resp = http.get(url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.text().await.ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,5 +843,59 @@ mod tests {
         let portal = CaptivePortal::new(profile.clone(), "http://google.com/".to_string());
         assert_eq!(portal.origin_url(), "http://google.com/");
         assert_eq!(portal.login_url(), "http://google.com/");
+    }
+
+    #[test]
+    fn test_extract_form_snippet_finds_form_in_js() {
+        let js = r#"
+        var el = document.createElement('div');
+        el.innerHTML = '<form action="/login" method="POST"><input name="agree" value="yes"></form>';
+        document.body.appendChild(el);
+        "#;
+        let form = extract_form_snippet(js).expect("should find form");
+        assert_eq!(form.action, "/login");
+        assert_eq!(form.inputs.len(), 1);
+        assert_eq!(form.inputs[0].name, "agree");
+    }
+
+    #[test]
+    fn test_extract_form_snippet_no_form_returns_none() {
+        let js = "var x = 1; console.log('hello');";
+        assert!(extract_form_snippet(js).is_none());
+    }
+
+    #[test]
+    fn test_extract_js_config_form_synthesizes_form() {
+        let js = r#"
+        var config = {action: "/submit", agree: "true", csrf: "abc123"};
+        "#;
+        let form = extract_js_config_form(js).expect("should synthesize form");
+        assert_eq!(form.action, "/submit");
+        assert_eq!(form.inputs.len(), 1);
+        assert_eq!(form.inputs[0].name, "agree");
+        assert_eq!(form.inputs[0].value, "true");
+    }
+
+    #[test]
+    fn test_extract_js_config_form_no_agree_field_returns_none() {
+        let js = r#"
+        var config = {action: "/submit", foo: "bar"};
+        "#;
+        assert!(extract_js_config_form(js).is_none());
+    }
+
+    #[test]
+    fn test_extract_json_str_extracts_value() {
+        let obj = r#"action: "/login", agree: "yes"#;
+        assert_eq!(extract_json_str(obj, "action").as_deref(), Some("/login"));
+        assert_eq!(extract_json_str(obj, "agree").as_deref(), Some("yes"));
+        assert!(extract_json_str(obj, "missing").is_none());
+    }
+
+    #[test]
+    fn test_extract_json_str_quoted_keys() {
+        let obj = r#"{"action": "/login", "agree": "true"}"#;
+        assert_eq!(extract_json_str(obj, "action").as_deref(), Some("/login"));
+        assert_eq!(extract_json_str(obj, "agree").as_deref(), Some("true"));
     }
 }
