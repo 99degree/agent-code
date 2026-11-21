@@ -427,6 +427,12 @@ pub enum DualMaster {
     First,
     /// Use the response from `secondary_model`.
     Second,
+    /// Master-slave mode: race both models and accept the first arrival.
+    /// If the first reply is not a repeat of the previous assistant turn,
+    /// cancel the slow one and use the first response. If it is looping,
+    /// wait for the slow response and prefer whichever differs; if both
+    /// loop, keep the first and surface a loop reminder.
+    MasterSlave,
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

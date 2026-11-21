@@ -179,6 +179,12 @@ pub const COMMANDS: &[Command] = &[
         hidden: false,
     },
     Command {
+        name: "master-slave",
+        aliases: &[],
+        description: "Toggle master-slave dual-LLM mode: race both models, accept the first non-looping reply",
+        hidden: false,
+    },
+    Command {
         name: "provider",
         aliases: &[
             "p",
@@ -881,6 +887,7 @@ pub const INTERACTIVE_SLASH_NAMES: &[&str] = &[
     "theme",
     "model",
     "model2",
+    "master-slave",
     "powerup",
     // Full interactive uninstall flow.
     "uninstall",
@@ -2308,6 +2315,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
         }
         Some("dual-master") => {
             execute_dual_master(args, engine);
+            CommandResult::Handled
+        }
+        Some("master-slave") => {
+            execute_master_slave(args, engine);
             CommandResult::Handled
         }
         Some("files") => {
@@ -6907,8 +6918,57 @@ fn execute_dual_master(args: Option<&str>, engine: &mut QueryEngine) {
     }
 }
 
-/// Source through which a file entered the session's attention — used
-/// in `/files` output so users can tell what role the file played.
+/// Toggle master-slave dual-LLM mode.
+///
+/// `on`  → race primary and secondary, accept the first non-looping reply.
+/// `off` → fall back to primary-as-master.
+/// `second` → use secondary as master (plain dual-LLM).
+fn execute_master_slave(args: Option<&str>, engine: &mut QueryEngine) {
+    let state = engine.state_mut();
+    let api = &mut state.config.api;
+
+    if !api.dual_llm_enabled {
+        println!("Dual LLM is not enabled. Set a secondary model with /model2 first.");
+        return;
+    }
+
+    match args {
+        None | Some("") => {
+            println!("Master-slave mode: {:?}", api.dual_master);
+            println!("Primary model: {}", api.model);
+            if let Some(m) = &api.secondary_model {
+                println!("Secondary model: {m}");
+            }
+        }
+        Some("on") => {
+            api.dual_master = DualMaster::MasterSlave;
+            println!(
+                "Master-slave mode enabled: race primary ({}) and secondary ({}); accept the first non-looping reply.",
+                api.model,
+                api.secondary_model.as_deref().unwrap_or("unset")
+            );
+        }
+        Some("off") | Some("first") => {
+            api.dual_master = DualMaster::First;
+            println!(
+                "Master-slave mode disabled: dual-LLM master set to primary model ({})",
+                api.model
+            );
+        }
+        Some("second") => {
+            api.dual_master = DualMaster::Second;
+            if let Some(m) = &api.secondary_model {
+                println!("Dual LLM master set to: secondary model ({m})");
+            } else {
+                println!("Dual LLM master set to: secondary model (not set)");
+            }
+        }
+        Some(other) => {
+            println!("Unknown selection '{other}'. Use: /master-slave on | off | second");
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileSource {
     /// User typed `@path` in a prompt; content was inlined.

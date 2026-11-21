@@ -1688,7 +1688,8 @@ impl QueryEngine {
                         {
                             let probe_url = crate::llm::captive_portal::TEST_PORTALS[0];
                             let portal_reachable =
-                                crate::llm::captive_portal::probe_portal_connectivity(probe_url).await;
+                                crate::llm::captive_portal::probe_portal_connectivity(probe_url)
+                                    .await;
                             if !portal_reachable {
                                 tracing::warn!(
                                     "captive portal probe failed for {probe_url}; no portal reachable, \
@@ -2453,7 +2454,10 @@ impl QueryEngine {
                             StreamEvent::ContentBlockComplete(block) => {
                                 primary_blocks.push(block);
                             }
-                            StreamEvent::Done { usage: u, stop_reason: sr } => {
+                            StreamEvent::Done {
+                                usage: u,
+                                stop_reason: sr,
+                            } => {
                                 primary_usage = u.clone();
                                 primary_stop = sr.clone();
                             }
@@ -2477,7 +2481,10 @@ impl QueryEngine {
                             StreamEvent::ContentBlockComplete(block) => {
                                 secondary_blocks.push(block);
                             }
-                            StreamEvent::Done { usage: u, stop_reason: sr } => {
+                            StreamEvent::Done {
+                                usage: u,
+                                stop_reason: sr,
+                            } => {
                                 secondary_usage = u.clone();
                                 secondary_stop = sr.clone();
                             }
@@ -2527,8 +2534,10 @@ impl QueryEngine {
                     })
                     .unwrap_or_default();
 
-                let primary_loops = primary_ok && !primary_text.is_empty() && primary_text == prev_text;
-                let secondary_loops = secondary_ok && !secondary_text.is_empty() && secondary_text == prev_text;
+                let primary_loops =
+                    primary_ok && !primary_text.is_empty() && primary_text == prev_text;
+                let secondary_loops =
+                    secondary_ok && !secondary_text.is_empty() && secondary_text == prev_text;
 
                 // If exactly one stream errored (timed out / failed) and the
                 // other one is looping, treat it like the single-LLM loop case:
@@ -2542,7 +2551,8 @@ impl QueryEngine {
                         subtype: SystemMessageType::Informational,
                         content: "<system-reminder>The secondary model errored out and your \
                      previous response is a repeat. Stop echoing — use a tool, ask a \
-                     clarifying question, or give your final answer.</system-reminder>".into(),
+                     clarifying question, or give your final answer.</system-reminder>"
+                            .into(),
                         level: MessageLevel::Info,
                     });
                     self.state.push_message(loop_msg);
@@ -2557,7 +2567,8 @@ impl QueryEngine {
                         subtype: SystemMessageType::Informational,
                         content: "<system-reminder>The primary model errored out and your \
                      previous response is a repeat. Stop echoing — use a tool, ask a \
-                     clarifying question, or give your final answer.</system-reminder>".into(),
+                     clarifying question, or give your final answer.</system-reminder>"
+                            .into(),
                         level: MessageLevel::Info,
                     });
                     self.state.push_message(loop_msg);
@@ -2586,7 +2597,9 @@ impl QueryEngine {
                             content_blocks = primary_blocks;
                             usage = primary_usage;
                             stop_reason = primary_stop;
-                            sink.on_warning("Dual LLM: secondary repeated previous reply; using primary.");
+                            sink.on_warning(
+                                "Dual LLM: secondary repeated previous reply; using primary.",
+                            );
                         }
                         (true, false) => {
                             // Secondary fresh, primary loops: use secondary.
@@ -2594,7 +2607,9 @@ impl QueryEngine {
                             usage = secondary_usage.clone();
                             stop_reason = secondary_stop.clone();
                             model = secondary_model_name.clone();
-                            sink.on_warning("Dual LLM: primary repeated previous reply; using secondary.");
+                            sink.on_warning(
+                                "Dual LLM: primary repeated previous reply; using secondary.",
+                            );
                         }
                         (true, true) => {
                             // Both loop: keep primary; the loop detection below
@@ -2606,8 +2621,18 @@ impl QueryEngine {
                         }
                     }
 
-                    let use_secondary =
-                        matches!(self.state.config.api.dual_master, DualMaster::Second);
+                    let use_secondary = match self.state.config.api.dual_master {
+                        DualMaster::Second => true,
+                        DualMaster::First => false,
+                        DualMaster::MasterSlave => {
+                            // Master-slave: prefer primary unless it loops and
+                            // the secondary is fresh. If both are fresh, use
+                            // primary (first arrival by config order). If both
+                            // loop, keep primary and let the loop reminder below
+                            // fire.
+                            primary_loops && !secondary_loops
+                        }
+                    };
                     let master = if use_secondary {
                         DualMaster::Second
                     } else {
@@ -2620,13 +2645,9 @@ impl QueryEngine {
                             usage = secondary_usage.clone();
                             stop_reason = secondary_stop.clone();
                             model = secondary_model_name.clone();
-                            sink.on_warning(
-                                "Dual LLM: using secondary model response as master.",
-                            );
+                            sink.on_warning("Dual LLM: using secondary model response as master.");
                         } else if !use_secondary && !primary_loops {
-                            sink.on_warning(
-                                "Dual LLM: using primary model response as master.",
-                            );
+                            sink.on_warning("Dual LLM: using primary model response as master.");
                         }
                     } else if use_secondary && !secondary_loops && primary_loops {
                         content_blocks = secondary_blocks.clone();

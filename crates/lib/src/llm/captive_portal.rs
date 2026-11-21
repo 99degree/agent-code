@@ -693,17 +693,17 @@ fn extract_ajax_form(js: &str) -> Option<Form> {
 
 /// Extract `$.post(url, data)` from JS text.
 fn extract_jquery_post(js: &str) -> Option<Form> {
-    let re = regex::Regex::new(
-        r#"(?i)\$\.post\(\s*["']([^"']+)["']\s*,\s*(\{[^{}]*\})"#,
-    )
-    .ok()?;
+    let re = regex::Regex::new(r#"(?i)\$\.post\(\s*["']([^"']+)["']\s*,\s*(\{[^{}]*\})"#).ok()?;
     for caps in re.captures_iter(js) {
         // Capture groups: group 1 = url, group 2 = data object
         let url_val = caps.get(1)?.as_str().to_string();
         let data_obj = caps.get(2)?.as_str();
         let inputs = extract_agree_fields(data_obj);
         if !inputs.is_empty() {
-            return Some(Form { action: url_val, inputs });
+            return Some(Form {
+                action: url_val,
+                inputs,
+            });
         }
     }
     None
@@ -733,7 +733,10 @@ fn extract_jquery_ajax(js: &str) -> Option<Form> {
             let data_obj = &data_rest[..data_end];
             let inputs = extract_agree_fields(data_obj);
             if !inputs.is_empty() {
-                return Some(Form { action: url, inputs });
+                return Some(Form {
+                    action: url,
+                    inputs,
+                });
             }
         }
     }
@@ -742,16 +745,17 @@ fn extract_jquery_ajax(js: &str) -> Option<Form> {
 
 /// Extract `axios.post(url, data)` from JS text.
 fn extract_axios_post(js: &str) -> Option<Form> {
-    let re = regex::Regex::new(
-        r#"(?i)axios\.post\(\s*["']([^"']+)["']\s*,\s*(\{[^{}]*\})"#,
-    )
-    .ok()?;
+    let re =
+        regex::Regex::new(r#"(?i)axios\.post\(\s*["']([^"']+)["']\s*,\s*(\{[^{}]*\})"#).ok()?;
     for caps in re.captures_iter(js) {
         let url_val = caps.get(1)?.as_str().to_string();
         let data_obj = caps.get(2)?.as_str();
         let inputs = extract_agree_fields(data_obj);
         if !inputs.is_empty() {
-            return Some(Form { action: url_val, inputs });
+            return Some(Form {
+                action: url_val,
+                inputs,
+            });
         }
     }
     None
@@ -1045,7 +1049,8 @@ mod tests {
 
     #[test]
     fn test_extract_origin_url_no_url_param_returns_none() {
-        let login = "https://free.wifi.gov.hk/GovWifiUI_/userlanding/tc/login.html?zoneName=KPRH160";
+        let login =
+            "https://free.wifi.gov.hk/GovWifiUI_/userlanding/tc/login.html?zoneName=KPRH160";
         assert_eq!(extract_origin_url(login), None);
     }
 
