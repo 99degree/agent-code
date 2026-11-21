@@ -893,6 +893,48 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_login_button_no_form_button_only() {
+        // Simulates the GovWifi portal page: no <form>, just a button with
+        // an onclick handler and no named inputs.
+        let html = r#"
+        <html>
+        <body>
+          <div class="btn_wrapper">
+            <button type="button" class="btn btn-default btn_gw_default wide"
+              onclick="Service.userLogin(this,'.loadingGif')">同意</button>
+          </div>
+        </body>
+        </html>
+        "#;
+        let form = parse_login_button(html).expect("should find login button");
+        assert_eq!(form.action, "");
+        assert_eq!(form.inputs.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_login_button_with_inputs() {
+        let html = r#"
+        <html>
+        <body>
+          <input type="hidden" name="csrf" value="abc123">
+          <button type="button" onclick="Service.userLogin(this)">同意</button>
+        </body>
+        </html>
+        "#;
+        let form = parse_login_button(html).expect("should find login button");
+        assert_eq!(form.action, "");
+        assert_eq!(form.inputs.len(), 1);
+        assert_eq!(form.inputs[0].name, "csrf");
+        assert_eq!(form.inputs[0].value, "abc123");
+    }
+
+    #[test]
+    fn test_parse_login_button_no_button_returns_none() {
+        let html = "<html><body>No button here</body></html>";
+        assert!(parse_login_button(html).is_none());
+    }
+
+    #[test]
     fn test_extract_form_snippet_finds_form_in_js() {
         let js = r#"
         var el = document.createElement('div');
