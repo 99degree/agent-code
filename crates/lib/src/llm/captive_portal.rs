@@ -1146,6 +1146,7 @@ mod tests {
             name: "agree",
             agree_field: "agree",
             agree_value: "yes",
+            extra_fields: &[],
         };
         let portal = CaptivePortal::new(profile.clone(), "http://google.com/".to_string());
         assert_eq!(portal.origin_url(), "http://google.com/");
@@ -1174,6 +1175,7 @@ mod tests {
             name: "agree",
             agree_field: "agree",
             agree_value: "yes",
+            extra_fields: &[],
         };
         let login = "https://free.wifi.gov.hk/GovWifiUI_/userlanding/tc/login.html?zoneName=KPRH160&ssid=Wi-Fi.HK&url=http%3A%2F%2Fexample.com%2F&";
         let portal = CaptivePortal::new(profile.clone(), login.to_string());

@@ -177,6 +177,7 @@ pub const MODEL_CONTEXT_WINDOWS: &[(&str, &str, u64)] = &[
     // StepFun (via NVIDIA NIM) — 1M context
     ("nim", "step-5-preview", 1_000_000),
     ("*", "step-5-preview", 1_000_000),
+    ("*", "step-5", 1_000_000),
     // DeepSeek
     ("*", "deepseek-v4.1-pro", 1_000_000),
     ("*", "deepseek-v4.1-flash", 1_000_000),
@@ -564,6 +565,12 @@ mod tests {
             context_window_for_model("*", "claude-sonnet-1000k"),
             1_000_000
         );
+    }
+
+    #[test]
+    fn test_context_window_for_step_5() {
+        assert_eq!(context_window_for_model("*", "step-5"), 1_000_000);
+        assert_eq!(context_window_for_model("nim", "step-5"), 1_000_000);
     }
 
     #[test]
