@@ -77,7 +77,7 @@ pub const CAPTIVE_PORTAL_PROFILES: &[CaptivePortalProfile] = &[
 /// `/connect`. Each URL is tried against every `CAPTIVE_PORTAL_PROFILES`
 /// profile until one succeeds.
 pub const TEST_PORTALS: &[&str] = &[
-    "https://free.wifi.gov.hk/GovWifiUI_/userlanding/tc/login.html?&url=http%3A%2F%2Fgoogle.com%2F&",
+    "https://free.wifi.gov.hk/GovWifiUI_/userlanding/tc/login.html?zoneName=KPRH160&ssid=Wi-Fi.HK&url=http%3A%2F%2Fgoogle.com%2F&",
 ];
 
 /// Captive portal client for one portal. Holds a persistent reqwest cookie
@@ -99,16 +99,22 @@ pub struct CaptivePortal {
 
 impl CaptivePortal {
     /// Build a new captive portal client for a profile with a login URL.
+    ///
+    /// The `origin_url` (the URL the user originally wanted to reach) is
+    /// extracted from the `url` query parameter of the login URL — captive
+    /// portals redirect back to it after the agree flow. If no `url`
+    /// parameter is present, falls back to the login URL itself.
     pub fn new(profile: CaptivePortalProfile, login_url: String) -> Self {
         let client = reqwest::Client::builder()
             .cookie_store(true)
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("failed to build captive portal HTTP client");
+        let origin_url = extract_origin_url(&login_url).unwrap_or_else(|| login_url.clone());
         Self {
             client,
             profile,
-            origin_url: login_url.clone(),
+            origin_url,
             login_url,
             diagnostics: std::sync::Mutex::new(None),
         }
@@ -706,6 +712,19 @@ async fn fetch_script_text(http: &reqwest::Client, url: &str) -> Option<String> 
     resp.text().await.ok()
 }
 
+/// Extract the origin URL (the URL the user originally wanted to reach) from
+/// a captive portal login URL.
+///
+/// Captive portals carry the original target URL as a `url` query parameter,
+/// typically URL-encoded (e.g. `url=http%3A%2F%2Fgoogle.com%2F`). This parses
+/// the query string and returns the decoded value of the first `url`
+/// parameter. Returns `None` if no `url` parameter is present.
+fn extract_origin_url(login_url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(login_url).ok()?;
+    let url_value = parsed.query_pairs().find(|(k, _)| k == "url")?.1;
+    Some(url_value.into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,6 +862,34 @@ mod tests {
         let portal = CaptivePortal::new(profile.clone(), "http://google.com/".to_string());
         assert_eq!(portal.origin_url(), "http://google.com/");
         assert_eq!(portal.login_url(), "http://google.com/");
+    }
+
+    #[test]
+    fn test_extract_origin_url_from_url_param() {
+        let login = "https://free.wifi.gov.hk/GovWifiUI_/userlanding/tc/login.html?zoneName=KPRH160&ssid=Wi-Fi.HK&url=http%3A%2F%2Fgoogle.com%2F&";
+        assert_eq!(
+            extract_origin_url(login).as_deref(),
+            Some("http://google.com/")
+        );
+    }
+
+    #[test]
+    fn test_extract_origin_url_no_url_param_returns_none() {
+        let login = "https://free.wifi.gov.hk/GovWifiUI_/userlanding/tc/login.html?zoneName=KPRH160";
+        assert_eq!(extract_origin_url(login), None);
+    }
+
+    #[test]
+    fn test_origin_url_from_url_param() {
+        let profile = CaptivePortalProfile {
+            name: "agree",
+            agree_field: "agree",
+            agree_value: "yes",
+        };
+        let login = "https://free.wifi.gov.hk/GovWifiUI_/userlanding/tc/login.html?zoneName=KPRH160&ssid=Wi-Fi.HK&url=http%3A%2F%2Fgoogle.com%2F&";
+        let portal = CaptivePortal::new(profile.clone(), login.to_string());
+        assert_eq!(portal.origin_url(), "http://google.com/");
+        assert_eq!(portal.login_url(), login);
     }
 
     #[test]
