@@ -310,7 +310,9 @@ impl CaptivePortal {
         // Merge static extra fields declared by the profile (e.g. GovWifi's
         // passcode). These only fill fields not already present from the form.
         for (name, value) in self.profile.extra_fields {
-            form_data.entry(name.to_string()).or_insert_with(|| value.to_string());
+            form_data
+                .entry(name.to_string())
+                .or_insert_with(|| value.to_string());
         }
         // Override the agree field with the profile's agreed value so the
         // submit signals acceptance even when the form's own value is empty.
@@ -780,13 +782,17 @@ fn extract_string_literal(s: &str) -> Option<String> {
 fn extract_all_fields(data_obj: &str) -> Vec<Input> {
     let mut inputs = Vec::new();
     // Match `key: "value"` (string literal) or `key: <unquoted>`.
-    let re = regex::Regex::new(
+    let re = match regex::Regex::new(
         r#"["']?([a-zA-Z_][a-zA-Z0-9_]*)["']?\s*:\s*(?:["']([^"']*)["']|([^,{}]+))"#,
-    )
-    .ok()?;
+    ) {
+        Ok(r) => r,
+        Err(_) => return inputs,
+    };
     for caps in re.captures_iter(data_obj) {
         // `continue` instead of `?` because this returns Vec<Input>, not Option.
-        let Some(name_cap) = caps.get(1) else { continue };
+        let Some(name_cap) = caps.get(1) else {
+            continue;
+        };
         let name = name_cap.as_str().to_string();
         // Only keep string-literal values; unquoted identifiers (e.g.
         // `passcode: passcode`) default to empty.
