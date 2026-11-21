@@ -42,6 +42,10 @@ pub struct CaptivePortalProfile {
     pub agree_field: &'static str,
     /// Value submitted in the agree field.
     pub agree_value: &'static str,
+    /// Extra static fields to merge into the submit body (e.g. passcode).
+    /// Used when the portal's login endpoint expects fields beyond the agree
+    /// flag (e.g. GovWifi's `passcode`).
+    pub extra_fields: &'static [(&'static str, &'static str)],
 }
 
 /// Builtin captive portal profiles.
@@ -53,21 +57,35 @@ pub const CAPTIVE_PORTAL_PROFILES: &[CaptivePortalProfile] = &[
         name: "agree",
         agree_field: "agree",
         agree_value: "yes",
+        extra_fields: &[],
     },
     CaptivePortalProfile {
         name: "accept",
         agree_field: "accept",
         agree_value: "true",
+        extra_fields: &[],
     },
     CaptivePortalProfile {
         name: "continue",
         agree_field: "continue",
         agree_value: "Continue",
+        extra_fields: &[],
     },
     CaptivePortalProfile {
         name: "terms",
         agree_field: "terms",
         agree_value: "agreed",
+        extra_fields: &[],
+    },
+    // Hong Kong GovWifi (free.wifi.gov.hk). No `<form>` — the login button
+    // calls `Service.userLogin` which POSTs to `apiPath + "/wifi/login"` with
+    // a `passcode` field. The API base path (`Common.apiPath`) and the
+    // `/wifi/login` endpoint are extracted from the portal's JS files.
+    CaptivePortalProfile {
+        name: "govwifi",
+        agree_field: "passcode",
+        agree_value: "",
+        extra_fields: &[],
     },
 ];
 
@@ -670,8 +688,10 @@ async fn parse_js_form(html: &str, page_url: &str, http: &reqwest::Client) -> Op
 ///
 /// Handles:
 /// - `$.post("url", { key: "val", ... })`
-/// - `$.ajax({ url: "url", data: { key: "val", ... } })`
+/// - `$.ajax({ url: "url", data: {...} })`
 /// - `axios.post("url", { key: "val", ... })`
+/// - `Service.request({url: "url", ...}, { key: "val", ... })` — GovWifi-style
+///   portal login where `Service.request` wraps `$.ajax` with an API path.
 ///
 /// Returns a `Form` whose action is the submit URL and whose inputs are the
 /// agree/accept/continue/terms fields found in the data object.
@@ -687,6 +707,43 @@ fn extract_ajax_form(js: &str) -> Option<Form> {
     // Pattern: axios.post("url", {...})
     if let Some(form) = extract_axios_post(js) {
         return Some(form);
+    }
+    // Pattern: Service.request({url: "...", ...}, {...}) — used by GovWifi
+    // and other portals that wrap $.ajax behind a Service helper.
+    if let Some(form) = extract_service_request(js) {
+        return Some(form);
+    }
+    None
+}
+
+/// Extract `Service.request({url: "...", ...}, data)` from JS text.
+///
+/// GovWifi-style portals bind the login button to `Service.userLogin(...)`,
+/// which internally calls `Service.request({url: Common.apiPath +
+/// "/wifi/login", type: "POST"}, {passcode: "..."})`. We scan for the
+/// `Service.request({url: ...}` pattern, extract the url string and the
+/// second argument (data object), and synthesize a `Form`.
+///
+/// Returns `None` when no `Service.request` call with a url and agree-ish
+/// data fields is found.
+fn extract_service_request(js: &str) -> Option<Form> {
+    // Match `Service.request({...url: "..."...}, {...data...})`.
+    // We tolerate whitespace and other keys between `url` and the closing
+    // brace of the options object.
+    let re = regex::Regex::new(
+        r#"(?i)Service\.request\(\s*\{\s*[^{}]*?url\s*:\s*["']([^"']+)["'][^{}]*?\}\s*,\s*(\{[^{}]*\})"#,
+    )
+    .ok()?;
+    for caps in re.captures_iter(js) {
+        let url_val = caps.get(1)?.as_str().to_string();
+        let data_obj = caps.get(2)?.as_str();
+        let inputs = extract_agree_fields(data_obj);
+        if !inputs.is_empty() {
+            return Some(Form {
+                action: url_val,
+                inputs,
+            });
+        }
     }
     None
 }
