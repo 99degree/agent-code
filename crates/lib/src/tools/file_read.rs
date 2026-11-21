@@ -1,9 +1,9 @@
 //! FileRead tool: read file contents with optional line ranges.
 //!
-//! When the model requests a small range (under 25 lines) that falls inside
+//! When the model requests a small range (under 50 lines) that falls inside
 //! a function, the read is auto-expanded to cover the rest of that function
-//! (capped at 25 lines). This avoids extra round-trips when the model only
-//! grabbed a fragment of a function body.
+//! (capped at 50 lines) using content-based language detection. This avoids
+//! extra round-trips when the model only grabs a fragment of a function body.
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -159,7 +159,7 @@ impl Tool for FileReadTool {
         // gets the full function body instead of a fragment, saving an extra
         // read round-trip. Capped at FUNCTION_EXPAND_MAX_LINES total lines.
         let effective_limit = if requested_limit < FUNCTION_EXPAND_MAX_LINES {
-            function_aware_limit(&lines, start, requested_limit)
+            function_aware_limit(&lines, start, path, requested_limit)
         } else {
             requested_limit
         };
@@ -225,18 +225,41 @@ enum Language {
     Unknown,
 }
 
+/// Detect the programming language from the file extension.
+fn language_from_path(path: &std::path::Path) -> Language {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("rs") => Language::Rust,
+        Some("py") => Language::Python,
+        Some("js") | Some("jsx") | Some("ts") | Some("tsx") => Language::JavaScript,
+        Some("go") => Language::Go,
+        Some("java") | Some("kt") | Some("scala") | Some("cs") | Some("cpp") | Some("cc")
+        | Some("c") | Some("h") | Some("hpp") => Language::CFamily,
+        Some("sh") | Some("bash") | Some("zsh") => Language::Shell,
+        Some("php") => Language::Php,
+        Some("rb") => Language::Ruby,
+        Some("swift") => Language::Swift,
+        Some("dart") => Language::Dart,
+        Some("lua") => Language::Lua,
+        _ => Language::Unknown,
+    }
+}
+
 /// When a small read range falls inside a function, expand the line count to
 /// cover the rest of that function (capped at FUNCTION_EXPAND_MAX_LINES).
 ///
 /// `start_idx` is the 0-based index of the first line to read.
 /// `requested_limit` is the number of lines the model asked for.
-fn function_aware_limit(lines: &[&str], start_idx: usize, requested_limit: usize) -> usize {
+fn function_aware_limit(
+    lines: &[&str],
+    start_idx: usize,
+    path: &std::path::Path,
+    requested_limit: usize,
+) -> usize {
     if lines.is_empty() || start_idx >= lines.len() {
         return requested_limit;
     }
 
-    // Detect language heuristically from content (file path isn't available here).
-    let lang = detect_language_from_content(lines);
+    let lang = language_from_path(path);
 
     match lang {
         Language::Unknown => requested_limit,
@@ -248,65 +271,16 @@ fn function_aware_limit(lines: &[&str], start_idx: usize, requested_limit: usize
     }
 }
 
-/// Detect language from content heuristics (first ~50 lines).
-fn detect_language_from_content(lines: &[&str]) -> Language {
-    let sample: String = lines
-        .iter()
-        .take(50)
-        .copied()
-        .collect::<Vec<_>>()
-        .join("\n");
-    let lower = sample.to_lowercase();
-
-    // Python indicators.
-    if (lower.contains("def ") || lower.contains("import ") || lower.contains("from "))
-        && (lower.contains("self.") || lower.contains(":\\n") || lower.contains("print("))
-    {
-        return Language::Python;
-    }
-
-    // Rust indicators.
-    if lower.contains("fn ") && (lower.contains("use ") || lower.contains("pub ")) {
-        return Language::Rust;
-    }
-
-    // Go indicators.
-    if lower.contains("func ") && lower.contains("package ") {
-        return Language::Go;
-    }
-
-    // JavaScript/TypeScript indicators.
-    if (lower.contains("function ") || lower.contains("=>") || lower.contains("const "))
-        && (lower.contains("console.log")
-            || lower.contains("document.")
-            || lower.contains("export "))
-    {
-        return Language::JavaScript;
-    }
-
-    // Shell indicators.
-    if lower.contains("#!/bin/bash") || lower.contains("#!/bin/sh") || lower.contains("function ") {
-        return Language::Shell;
-    }
-
-    // C-family indicators.
-    if lower.contains("#include") || lower.contains("public class") || lower.contains("void ") {
-        return Language::CFamily;
-    }
-
-    Language::Unknown
-}
-
 /// Expand a read range inside a brace-delimited function to cover the rest of
 /// the function body, capped at FUNCTION_EXPAND_MAX_LINES total lines.
 ///
-/// Scans backwards from `start_idx` to find the function's opening line
-/// (a line that looks like a function declaration containing `{`), then scans
-/// forwards to find the matching closing `}` at column 0.
+/// Scans backwards from `start_idx` to find the enclosing function
+/// declaration line (the nearest line above that looks like a
+/// `fn`/`func`/`function` declaration), then scans forward counting braces
+/// to find the matching close brace that brings depth back to 0.
 fn expand_brace_function(lines: &[&str], start_idx: usize, requested_limit: usize) -> usize {
-    // Scan backwards from start_idx to find the enclosing function declaration
-    // line (the nearest line above that looks like a `fn`/`func`/`function`
-    // declaration).
+    // Scan backwards from start_idx to find the enclosing function
+    // declaration line.
     let mut func_start = start_idx;
     let mut found_decl = false;
     for i in (0..=start_idx).rev() {
@@ -322,7 +296,7 @@ fn expand_brace_function(lines: &[&str], start_idx: usize, requested_limit: usiz
 
     // Scan forward from func_start counting braces. Track whether we've
     // entered the function body (depth > 0). When depth returns to 0 after
-    // being positive, we've found the matching close brace at column 0.
+    // being positive, we've found the matching close brace.
     let mut depth: usize = 0;
     let mut entered = false;
     let mut func_end = lines.len();
