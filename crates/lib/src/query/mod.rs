@@ -397,6 +397,7 @@ impl QueryEngine {
         state.additional_dirs.clear();
         state.brief_mode = false;
         state.response_style = crate::state::ResponseStyle::default();
+        state.loop_detected = false;
         // Back to the configured default, not to nothing.
         state.disk_output_style = initial_style;
         // Likewise for reasoning effort: chosen per conversation, absent
@@ -1257,6 +1258,8 @@ impl QueryEngine {
             crate::llm::message::user_message_with_attachments(text, attachments)
         };
         self.state.push_message(user_msg);
+        // New user input breaks any prior loop context.
+        self.state.loop_detected = false;
         // Images are the one block a token threshold cannot see: each is
         // charged a flat vision estimate, so compaction never fires on the
         // megabytes they actually add to every later request. Bound what
@@ -2462,6 +2465,57 @@ impl QueryEngine {
             self.state.push_message(assistant_msg);
             self.state.record_usage(&usage, &model);
             self.emit_context_usage(sink);
+
+            // Loop detection: if the assistant's reply text is identical to the
+            // previous assistant turn's text, the model is repeating itself.
+            // Inject a system reminder so the model can break the loop rather
+            // than echoing forever until max_turns.
+            let current_text = content_blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            let prev_text = self
+                .state
+                .messages
+                .iter()
+                .rev()
+                .skip(1) // skip the assistant message we just pushed
+                .find_map(|m| match m {
+                    Message::Assistant(a) => Some(
+                        a.content
+                            .iter()
+                            .filter_map(|b| match b {
+                                ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join(""),
+                    ),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            if !current_text.is_empty()
+                && current_text == prev_text
+                && !self.state.loop_detected
+            {
+                self.state.loop_detected = true;
+                sink.on_warning("Loop detected: model repeated the same response");
+                let loop_msg = Message::System(SystemMessage {
+                    uuid: Uuid::new_v4(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    subtype: SystemMessageType::Informational,
+                    content: "<system-reminder>You repeated the same response as your previous turn. \
+                     Stop echoing and take a different approach — use a tool, ask a clarifying \
+                     question, or give your final answer.</system-reminder>".into(),
+                    level: MessageLevel::Info,
+                });
+                self.state.push_message(loop_msg);
+                continue;
+            }
 
             // Token budget tracking per turn.
             if self.state.config.features.token_budget && usage.total() > 0 {
