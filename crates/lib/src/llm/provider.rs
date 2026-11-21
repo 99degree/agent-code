@@ -236,6 +236,7 @@ pub fn models_for_provider(kind: ProviderKind) -> &'static [(&'static str, &'sta
             ("glm-5.1", "GLM 5.1"),
             ("glm-5", "GLM 5"),
             ("kimi-k3", "Kimi K3"),
+            ("kimi-k3.1-pro", "Kimi K3.1 Pro · 1M context"),
             ("kimi-k2.7-code", "Kimi K2.7 Code"),
             ("kimi-k2.6", "Kimi K2.6"),
             ("kimi-k2.5", "Kimi K2.5"),

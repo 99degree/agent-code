@@ -222,6 +222,7 @@ pub const MODEL_CONTEXT_WINDOWS: &[(&str, &str, u64)] = &[
     // Kimi
     ("*", "kimi-k2.6", 262_144),
     ("*", "kimi-k3", 1_048_576),
+    ("*", "kimi-k3.1-pro", 1_048_576),
     ("*", "kimi-k2.7-code", 262_144),
     // MiMo
     ("*", "mimo-v2.5", 1_000_000),
@@ -610,6 +611,12 @@ mod tests {
         assert_eq!(max_output_tokens_for_model("claude-haiku-4-5"), 8_192);
         // Nemotron 3.5 Super gets its own budget.
         assert_eq!(max_output_tokens_for_model("nemotron-3.5-super"), 524_288);
+    }
+
+    #[test]
+    fn test_context_window_for_kimi_k3_1_pro() {
+        assert_eq!(context_window_for_model("*", "kimi-k3.1-pro"), 1_048_576);
+        assert_eq!(max_output_tokens_for_model("kimi-k3.1-pro"), 262_144);
     }
 
     #[test]
