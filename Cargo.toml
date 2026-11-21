@@ -9,4 +9,5 @@ resolver = "3"
 [profile.release]
 opt-level = 3
 strip = true
+codegen-units = 2
 panic = "abort"
