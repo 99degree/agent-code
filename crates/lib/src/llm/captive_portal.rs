@@ -71,7 +71,24 @@ pub const CAPTIVE_PORTAL_PROFILES: &[CaptivePortalProfile] = &[
     },
 ];
 
-/// Captive portal URLs for manual testing (no config needed).
+/// Probe a captive portal URL to check if it is reachable (HTTP 200).
+///
+/// Used to distinguish "captive portal waiting for agree" (the portal's own
+/// login page is reachable and returns 200) from "no network at all"
+/// (connection error / timeout reaching anything).
+pub async fn probe_portal_connectivity(url: &str) -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    match client.get(url).send().await {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    }
+}
 ///
 /// Add a portal URL here to test the page fetch + form submit logic via
 /// `/connect`. Each URL is tried against every `CAPTIVE_PORTAL_PROFILES`

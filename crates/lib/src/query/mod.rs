@@ -1667,10 +1667,18 @@ impl QueryEngine {
                         }
 
                         // Captive portal recovery: if the LLM call failed with a
-                        // transport-level network error, the agent is likely behind
-                        // a captive portal. Probe test portal URLs to get
-                        // the portal login page, submit the agree form, then retry
-                        // the LLM call in place (does not consume a turn).
+                        // transport-level network error, the agent may be behind
+                        // a captive portal.
+                        //
+                        // First probe a known captive portal URL (e.g.
+                        // free.wifi.gov.hk) to distinguish "portal waiting for
+                        // agree" (portal page reachable, HTTP 200) from "no
+                        // network at all" (connection error / timeout). Only if
+                        // the probe succeeds do we attempt the full login flow
+                        // (parse form, submit agree). If the probe fails, treat
+                        // it as a plain network error and fall through to normal
+                        // retry instead of wasting turns on a login that cannot
+                        // succeed.
                         // Bounded by `captive_portal_attempts` so a portal that
                         // reports success but doesn't actually unblock the network
                         // doesn't loop forever.
@@ -1678,43 +1686,56 @@ impl QueryEngine {
                             && !crate::llm::captive_portal::TEST_PORTALS.is_empty()
                             && captive_portal_attempts < CAPTIVE_PORTAL_MAX_ATTEMPTS
                         {
-                            captive_portal_attempts += 1;
-                            let probe_urls = crate::llm::captive_portal::TEST_PORTALS;
-                            let entries: Vec<(&'static str, String)> = probe_urls
-                                .iter()
-                                .flat_map(|url| {
-                                    crate::llm::captive_portal::CAPTIVE_PORTAL_PROFILES
-                                        .iter()
-                                        .map(move |p| (p.name, url.to_string()))
-                                })
-                                .collect();
-                            let manager =
-                                crate::llm::captive_portal::CaptivePortalManager::new(&entries);
-                            tracing::info!(
-                                "captive portal: attempting login on {} portal(s)",
-                                manager.portal_count()
-                            );
-                            for portal in manager.portals() {
+                            let probe_url = crate::llm::captive_portal::TEST_PORTALS[0];
+                            let portal_reachable =
+                                crate::llm::captive_portal::probe_portal_connectivity(probe_url).await;
+                            if !portal_reachable {
+                                tracing::warn!(
+                                    "captive portal probe failed for {probe_url}; no portal reachable, \
+                                     treating as plain network error"
+                                );
                                 sink.on_warning(&format!(
-                                    "Captive portal login request: {} (profile={})",
-                                    portal.login_url(),
-                                    portal.name()
+                                    "Captive portal probe failed ({probe_url}); no portal reachable"
                                 ));
-                            }
-                            match manager.login().await {
-                                Ok(()) => {
-                                    sink.on_warning(
-                                        "Captive portal login succeeded; retrying LLM call",
-                                    );
-                                    continue 'acquire;
-                                }
-                                Err(portal_err) => {
-                                    warn!(
-                                        "Captive portal login failed: {portal_err}; falling through to normal retry"
-                                    );
+                            } else {
+                                captive_portal_attempts += 1;
+                                let probe_urls = crate::llm::captive_portal::TEST_PORTALS;
+                                let entries: Vec<(&'static str, String)> = probe_urls
+                                    .iter()
+                                    .flat_map(|url| {
+                                        crate::llm::captive_portal::CAPTIVE_PORTAL_PROFILES
+                                            .iter()
+                                            .map(move |p| (p.name, url.to_string()))
+                                    })
+                                    .collect();
+                                let manager =
+                                    crate::llm::captive_portal::CaptivePortalManager::new(&entries);
+                                tracing::info!(
+                                    "captive portal: attempting login on {} portal(s)",
+                                    manager.portal_count()
+                                );
+                                for portal in manager.portals() {
                                     sink.on_warning(&format!(
-                                        "Captive portal login response: failed - {portal_err}"
+                                        "Captive portal login request: {} (profile={})",
+                                        portal.login_url(),
+                                        portal.name()
                                     ));
+                                }
+                                match manager.login().await {
+                                    Ok(()) => {
+                                        sink.on_warning(
+                                            "Captive portal login succeeded; retrying LLM call",
+                                        );
+                                        continue 'acquire;
+                                    }
+                                    Err(portal_err) => {
+                                        warn!(
+                                            "Captive portal login failed: {portal_err}; falling through to normal retry"
+                                        );
+                                        sink.on_warning(&format!(
+                                            "Captive portal login response: failed - {portal_err}"
+                                        ));
+                                    }
                                 }
                             }
                         }
