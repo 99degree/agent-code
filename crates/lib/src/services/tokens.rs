@@ -309,6 +309,10 @@ pub fn context_window_for_model(provider: &str, model: &str) -> u64 {
 /// Get the max output tokens for a model.
 pub fn max_output_tokens_for_model(model: &str) -> u64 {
     let lower = model.to_lowercase();
+    // Models with 1M+ context windows support larger output.
+    if context_window_for_model("*", model) >= 1_000_000 {
+        return 131_072;
+    }
     if lower.contains("opus") || lower.contains("sonnet") {
         16_384
     } else if lower.contains("haiku") {
@@ -588,6 +592,18 @@ mod tests {
     fn test_max_output_tokens_for_unknown_model() {
         // Unknown models default to 16384.
         assert_eq!(max_output_tokens_for_model("unknown-llm"), 16_384);
+    }
+
+    #[test]
+    fn test_max_output_tokens_for_1m_context_models() {
+        // 1M+ context models get the enlarged 131072 output budget.
+        assert_eq!(max_output_tokens_for_model("claude-opus-4-6"), 131_072);
+        assert_eq!(max_output_tokens_for_model("mistral-large-4"), 131_072);
+        assert_eq!(max_output_tokens_for_model("gpt-5.4"), 131_072);
+        assert_eq!(max_output_tokens_for_model("gemini-2.5-pro"), 131_072);
+        // Non-1M models keep the default.
+        assert_eq!(max_output_tokens_for_model("claude-sonnet-4"), 16_384);
+        assert_eq!(max_output_tokens_for_model("claude-haiku-4-5"), 8_192);
     }
 
     #[test]
