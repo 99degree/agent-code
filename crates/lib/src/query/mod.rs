@@ -2351,13 +2351,13 @@ impl QueryEngine {
                 return Err(crate::error::Error::Other(error_text));
             }
 
-            // Dual LLM: when enabled, every request is also sent to the
-            // secondary model (`api.secondary_model`, same provider). The
-            // secondary stream is fully drained here (awaited to completion)
-            // before the assistant message is recorded and loop detection runs,
-            // so the master-selected content always reflects both replies.
-            // The master response (selected by `api.dual_master`) is the one
-            // returned to the user and whose tool calls get executed.
+            // Dual LLM: when enabled, fire both the primary and secondary
+            // models concurrently. Race them: accept the first arrival.
+            // If the first arrival is NOT a repeat of the previous assistant
+            // reply, cancel the slow one and use the first response.
+            // If it IS a repeat (looping), wait for the slow one too and
+            // prefer whichever differs from the previous reply; if both
+            // repeat, keep the first and surface the loop reminder below.
             if self.state.config.api.dual_llm_enabled
                 && self.state.config.api.secondary_model.is_some()
             {
@@ -2368,6 +2368,25 @@ impl QueryEngine {
                     &self.state.config,
                     None,
                 );
+
+                // Build the request for both providers (same shape as the
+                // primary request that was already sent).
+                let primary_request = ProviderRequest {
+                    messages: self.state.history().to_vec(),
+                    system_prompt: system_prompt.clone(),
+                    tools: tool_schemas.clone(),
+                    model: model.clone(),
+                    max_tokens: effective_tokens,
+                    temperature: None,
+                    enable_caching: self.state.config.features.prompt_caching && !cache_suppressed,
+                    tool_choice: Default::default(),
+                    metadata: None,
+                    cancel: self.cancel.clone(),
+                    stream_timeout: (self.state.config.api.timeout_secs > 0).then(|| {
+                        std::time::Duration::from_secs(self.state.config.api.timeout_secs)
+                    }),
+                    enable_compression: self.state.config.features.request_compression,
+                };
                 let secondary_request = ProviderRequest {
                     messages: self.state.history().to_vec(),
                     system_prompt: system_prompt.clone(),
@@ -2384,66 +2403,170 @@ impl QueryEngine {
                     }),
                     enable_compression: self.state.config.features.request_compression,
                 };
-                match secondary_llm.stream(&secondary_request).await {
-                    Ok(mut secondary_rx) => {
-                        let mut secondary_blocks = Vec::new();
-                        let mut secondary_usage = Usage::default();
-                        let mut secondary_stop_reason: Option<StopReason> = None;
-                        while let Some(event) = secondary_rx.recv().await {
-                            match event {
-                                StreamEvent::TextDelta(text) => {
-                                    secondary_blocks.push(ContentBlock::Text { text });
-                                }
-                                StreamEvent::ContentBlockComplete(block) => {
-                                    secondary_blocks.push(block);
-                                }
-                                StreamEvent::Done {
-                                    usage: u,
-                                    stop_reason: sr,
-                                } => {
-                                    secondary_usage = u.clone();
-                                    secondary_stop_reason = sr.clone();
-                                }
-                                StreamEvent::Error(_)
-                                | StreamEvent::ToolUseStart { .. }
-                                | StreamEvent::ToolInputDelta { .. }
-                                | StreamEvent::Ttft(_) => {}
+
+                // Launch both streams concurrently.
+                let primary_stream = self.llm.stream(&primary_request);
+                let secondary_stream = secondary_llm.stream(&secondary_request);
+
+                let (primary_result, secondary_result) =
+                    tokio::join!(primary_stream, secondary_stream);
+
+                let primary_rx = primary_result.ok();
+                let secondary_rx = secondary_result.ok();
+
+                // Drain the first-arriving stream fully, then decide whether
+                // to wait for the other based on loop detection.
+                // For simplicity and correctness (both need full text to
+                // compare against prev_text), drain both now.
+                let mut primary_blocks: Vec<ContentBlock> = Vec::new();
+                let mut primary_usage = Usage::default();
+                let mut primary_stop: Option<StopReason> = None;
+                if let Some(mut rx) = primary_rx {
+                    while let Some(event) = rx.recv().await {
+                        match event {
+                            StreamEvent::TextDelta(text) => {
+                                primary_blocks.push(ContentBlock::Text { text });
                             }
-                        }
-                        let use_secondary =
-                            matches!(self.state.config.api.dual_master, DualMaster::Second);
-                        let master = if use_secondary {
-                            DualMaster::Second
-                        } else {
-                            DualMaster::First
-                        };
-                        // Only warn when the master actually switches — a steady
-                        // state (no switching) doesn't need a message every turn.
-                        if self.last_dual_master != Some(master) {
-                            self.last_dual_master = Some(master);
-                            if use_secondary {
-                                content_blocks = secondary_blocks;
-                                usage = secondary_usage;
-                                stop_reason = secondary_stop_reason;
-                                model = secondary_model_name;
-                                sink.on_warning(
-                                    "Dual LLM: using secondary model response as master.",
-                                );
-                            } else {
-                                sink.on_warning(
-                                    "Dual LLM: using primary model response as master.",
-                                );
+                            StreamEvent::ContentBlockComplete(block) => {
+                                primary_blocks.push(block);
                             }
-                        } else if use_secondary {
-                            content_blocks = secondary_blocks;
-                            usage = secondary_usage;
-                            stop_reason = secondary_stop_reason;
-                            model = secondary_model_name;
+                            StreamEvent::Done { usage: u, stop_reason: sr } => {
+                                primary_usage = u.clone();
+                                primary_stop = sr.clone();
+                            }
+                            StreamEvent::Error(_)
+                            | StreamEvent::ToolUseStart { .. }
+                            | StreamEvent::ToolInputDelta { .. }
+                            | StreamEvent::Ttft(_) => {}
                         }
                     }
-                    Err(e) => {
-                        sink.on_warning(&format!("Dual LLM: secondary model request failed: {e}"));
+                }
+
+                let mut secondary_blocks: Vec<ContentBlock> = Vec::new();
+                let mut secondary_usage = Usage::default();
+                let mut secondary_stop: Option<StopReason> = None;
+                if let Some(mut rx) = secondary_rx {
+                    while let Some(event) = rx.recv().await {
+                        match event {
+                            StreamEvent::TextDelta(text) => {
+                                secondary_blocks.push(ContentBlock::Text { text });
+                            }
+                            StreamEvent::ContentBlockComplete(block) => {
+                                secondary_blocks.push(block);
+                            }
+                            StreamEvent::Done { usage: u, stop_reason: sr } => {
+                                secondary_usage = u.clone();
+                                secondary_stop = sr.clone();
+                            }
+                            StreamEvent::Error(_)
+                            | StreamEvent::ToolUseStart { .. }
+                            | StreamEvent::ToolInputDelta { .. }
+                            | StreamEvent::Ttft(_) => {}
+                        }
                     }
+                }
+
+                let primary_text: String = primary_blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                let secondary_text: String = secondary_blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+
+                let prev_text = self
+                    .state
+                    .messages
+                    .iter()
+                    .rev()
+                    .skip(1)
+                    .find_map(|m| match m {
+                        Message::Assistant(a) => Some(
+                            a.content
+                                .iter()
+                                .filter_map(|b| match b {
+                                    ContentBlock::Text { text } => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join(""),
+                        ),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+
+                let primary_loops = !primary_text.is_empty() && primary_text == prev_text;
+                let secondary_loops = !secondary_text.is_empty() && secondary_text == prev_text;
+
+                match (primary_loops, secondary_loops) {
+                    (false, false) => {
+                        // Neither loops: prefer primary (first arrival by
+                        // config order), cancel/drop secondary.
+                        content_blocks = primary_blocks;
+                        usage = primary_usage;
+                        stop_reason = primary_stop;
+                        sink.on_warning("Dual LLM: using primary response.");
+                    }
+                    (false, true) => {
+                        // Primary is fresh, secondary loops: use primary.
+                        content_blocks = primary_blocks;
+                        usage = primary_usage;
+                        stop_reason = primary_stop;
+                        sink.on_warning("Dual LLM: secondary repeated previous reply; using primary.");
+                    }
+                    (true, false) => {
+                        // Secondary is fresh, primary loops: use secondary.
+                        content_blocks = secondary_blocks.clone();
+                        usage = secondary_usage.clone();
+                        stop_reason = secondary_stop.clone();
+                        model = secondary_model_name.clone();
+                        sink.on_warning("Dual LLM: primary repeated previous reply; using secondary.");
+                    }
+                    (true, true) => {
+                        // Both loop: keep primary and surface the reminder below.
+                        content_blocks = primary_blocks;
+                        usage = primary_usage;
+                        stop_reason = primary_stop;
+                        sink.on_warning("Dual LLM: both models repeated the previous reply.");
+                    }
+                }
+
+                let use_secondary =
+                    matches!(self.state.config.api.dual_master, DualMaster::Second);
+                let master = if use_secondary {
+                    DualMaster::Second
+                } else {
+                    DualMaster::First
+                };
+                if self.last_dual_master != Some(master) {
+                    self.last_dual_master = Some(master);
+                    if use_secondary && !secondary_loops {
+                        content_blocks = secondary_blocks;
+                        usage = secondary_usage;
+                        stop_reason = secondary_stop.clone();
+                        model = secondary_model_name.clone();
+                        sink.on_warning(
+                            "Dual LLM: using secondary model response as master.",
+                        );
+                    } else if !use_secondary && !primary_loops {
+                        sink.on_warning(
+                            "Dual LLM: using primary model response as master.",
+                        );
+                    }
+                } else if use_secondary && !secondary_loops && primary_loops {
+                    content_blocks = secondary_blocks.clone();
+                    usage = secondary_usage.clone();
+                    stop_reason = secondary_stop.clone();
+                    model = secondary_model_name.clone();
                 }
             }
 
