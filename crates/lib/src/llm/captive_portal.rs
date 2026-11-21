@@ -77,7 +77,7 @@ pub const CAPTIVE_PORTAL_PROFILES: &[CaptivePortalProfile] = &[
 /// `/connect`. Each URL is tried against every `CAPTIVE_PORTAL_PROFILES`
 /// profile until one succeeds.
 pub const TEST_PORTALS: &[&str] = &[
-    "https://free.wifi.gov.hk/GovWifiUI_/userlanding/tc/login.html?zoneName=KPRH160&ssid=Wi-Fi.HK&url=http%3A%2F%2Fgoogle.com%2F&",
+    "https://free.wifi.gov.hk/GovWifiUI_/userlanding/tc/login.html?zoneName=KPRH160&ssid=Wi-Fi.HK&url=http%3A%2F%2Fexample.com%2F&",
 ];
 
 /// Captive portal client for one portal. Holds a persistent reqwest cookie
