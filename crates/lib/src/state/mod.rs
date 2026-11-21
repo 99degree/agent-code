@@ -147,10 +147,11 @@ pub struct AppState {
     /// Context window size for the current model. Used for compaction
     /// and UI display. Updated on model change and restored from session.
     pub context_window: Option<u64>,
-    /// Set when the model has repeated the same assistant response across
-    /// consecutive turns. Prevents re-injecting the loop-reminder system
-    /// message on every iteration once a loop is detected.
-    pub loop_detected: bool,
+    /// Number of consecutive identical assistant replies seen. Used to
+    /// confirm a model loop before injecting a reminder — we wait for a
+    /// second repeat (another LLM reply) rather than acting on a single
+    /// coincidence. Reset when a reply differs from the previous one.
+    pub loop_repeat_count: u32,
 }
 
 impl AppState {
@@ -185,7 +186,7 @@ impl AppState {
             disk_output_style: None,
             pre_fast_model: None,
             context_window: None,
-            loop_detected: false,
+            loop_repeat_count: 0,
         }
     }
 
