@@ -2413,6 +2413,8 @@ impl QueryEngine {
 
                 let primary_rx = primary_result.ok();
                 let secondary_rx = secondary_result.ok();
+                let primary_ok = primary_rx.is_some();
+                let secondary_ok = secondary_rx.is_some();
 
                 // Drain the first-arriving stream fully, then decide whether
                 // to wait for the other based on loop detection.
@@ -2504,69 +2506,113 @@ impl QueryEngine {
                     })
                     .unwrap_or_default();
 
-                let primary_loops = !primary_text.is_empty() && primary_text == prev_text;
-                let secondary_loops = !secondary_text.is_empty() && secondary_text == prev_text;
+                let primary_loops = primary_ok && !primary_text.is_empty() && primary_text == prev_text;
+                let secondary_loops = secondary_ok && !secondary_text.is_empty() && secondary_text == prev_text;
 
-                match (primary_loops, secondary_loops) {
-                    (false, false) => {
-                        // Neither loops: prefer primary (first arrival by
-                        // config order), cancel/drop secondary.
-                        content_blocks = primary_blocks;
-                        usage = primary_usage;
-                        stop_reason = primary_stop;
-                        sink.on_warning("Dual LLM: using primary response.");
+                // If exactly one stream errored (timed out / failed) and the
+                // other one is looping, treat it like the single-LLM loop case:
+                // inject a reminder telling the model to try a better approach,
+                // then run another iteration so it can break out of the loop.
+                if primary_ok && !secondary_ok && primary_loops {
+                    sink.on_warning("Dual LLM: secondary errored; primary is looping.");
+                    let loop_msg = Message::System(SystemMessage {
+                        uuid: Uuid::new_v4(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        subtype: SystemMessageType::Informational,
+                        content: "<system-reminder>The secondary model errored out and your \
+                     previous response is a repeat. Stop echoing — use a tool, ask a \
+                     clarifying question, or give your final answer.</system-reminder>".into(),
+                        level: MessageLevel::Info,
+                    });
+                    self.state.push_message(loop_msg);
+                    self.state.loop_repeat_count = 0;
+                    continue;
+                }
+                if secondary_ok && !primary_ok && secondary_loops {
+                    sink.on_warning("Dual LLM: primary errored; secondary is looping.");
+                    let loop_msg = Message::System(SystemMessage {
+                        uuid: Uuid::new_v4(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        subtype: SystemMessageType::Informational,
+                        content: "<system-reminder>The primary model errored out and your \
+                     previous response is a repeat. Stop echoing — use a tool, ask a \
+                     clarifying question, or give your final answer.</system-reminder>".into(),
+                        level: MessageLevel::Info,
+                    });
+                    self.state.push_message(loop_msg);
+                    self.state.loop_repeat_count = 0;
+                    continue;
+                }
+
+                // Both errored: no usable response; fall through so the empty-
+                // content error path below handles it (turn fails visibly).
+                if !primary_ok && !secondary_ok {
+                    content_blocks = Vec::new();
+                    usage = Usage::default();
+                    stop_reason = None;
+                } else {
+                    // At least one stream succeeded. Pick the best response.
+                    match (primary_loops, secondary_loops) {
+                        (false, false) => {
+                            // Neither loops: prefer primary.
+                            content_blocks = primary_blocks;
+                            usage = primary_usage;
+                            stop_reason = primary_stop;
+                            sink.on_warning("Dual LLM: using primary response.");
+                        }
+                        (false, true) => {
+                            // Primary fresh, secondary loops: use primary.
+                            content_blocks = primary_blocks;
+                            usage = primary_usage;
+                            stop_reason = primary_stop;
+                            sink.on_warning("Dual LLM: secondary repeated previous reply; using primary.");
+                        }
+                        (true, false) => {
+                            // Secondary fresh, primary loops: use secondary.
+                            content_blocks = secondary_blocks.clone();
+                            usage = secondary_usage.clone();
+                            stop_reason = secondary_stop.clone();
+                            model = secondary_model_name.clone();
+                            sink.on_warning("Dual LLM: primary repeated previous reply; using secondary.");
+                        }
+                        (true, true) => {
+                            // Both loop: keep primary; the loop detection below
+                            // will inject a reminder on the second repeat.
+                            content_blocks = primary_blocks;
+                            usage = primary_usage;
+                            stop_reason = primary_stop;
+                            sink.on_warning("Dual LLM: both models repeated the previous reply.");
+                        }
                     }
-                    (false, true) => {
-                        // Primary is fresh, secondary loops: use primary.
-                        content_blocks = primary_blocks;
-                        usage = primary_usage;
-                        stop_reason = primary_stop;
-                        sink.on_warning("Dual LLM: secondary repeated previous reply; using primary.");
-                    }
-                    (true, false) => {
-                        // Secondary is fresh, primary loops: use secondary.
+
+                    let use_secondary =
+                        matches!(self.state.config.api.dual_master, DualMaster::Second);
+                    let master = if use_secondary {
+                        DualMaster::Second
+                    } else {
+                        DualMaster::First
+                    };
+                    if self.last_dual_master != Some(master) {
+                        self.last_dual_master = Some(master);
+                        if use_secondary && !secondary_loops {
+                            content_blocks = secondary_blocks.clone();
+                            usage = secondary_usage.clone();
+                            stop_reason = secondary_stop.clone();
+                            model = secondary_model_name.clone();
+                            sink.on_warning(
+                                "Dual LLM: using secondary model response as master.",
+                            );
+                        } else if !use_secondary && !primary_loops {
+                            sink.on_warning(
+                                "Dual LLM: using primary model response as master.",
+                            );
+                        }
+                    } else if use_secondary && !secondary_loops && primary_loops {
                         content_blocks = secondary_blocks.clone();
                         usage = secondary_usage.clone();
                         stop_reason = secondary_stop.clone();
                         model = secondary_model_name.clone();
-                        sink.on_warning("Dual LLM: primary repeated previous reply; using secondary.");
                     }
-                    (true, true) => {
-                        // Both loop: keep primary and surface the reminder below.
-                        content_blocks = primary_blocks;
-                        usage = primary_usage;
-                        stop_reason = primary_stop;
-                        sink.on_warning("Dual LLM: both models repeated the previous reply.");
-                    }
-                }
-
-                let use_secondary =
-                    matches!(self.state.config.api.dual_master, DualMaster::Second);
-                let master = if use_secondary {
-                    DualMaster::Second
-                } else {
-                    DualMaster::First
-                };
-                if self.last_dual_master != Some(master) {
-                    self.last_dual_master = Some(master);
-                    if use_secondary && !secondary_loops {
-                        content_blocks = secondary_blocks;
-                        usage = secondary_usage;
-                        stop_reason = secondary_stop.clone();
-                        model = secondary_model_name.clone();
-                        sink.on_warning(
-                            "Dual LLM: using secondary model response as master.",
-                        );
-                    } else if !use_secondary && !primary_loops {
-                        sink.on_warning(
-                            "Dual LLM: using primary model response as master.",
-                        );
-                    }
-                } else if use_secondary && !secondary_loops && primary_loops {
-                    content_blocks = secondary_blocks.clone();
-                    usage = secondary_usage.clone();
-                    stop_reason = secondary_stop.clone();
-                    model = secondary_model_name.clone();
                 }
             }
 
