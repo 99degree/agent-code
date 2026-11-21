@@ -309,6 +309,10 @@ pub fn context_window_for_model(provider: &str, model: &str) -> u64 {
 /// Get the max output tokens for a model.
 pub fn max_output_tokens_for_model(model: &str) -> u64 {
     let lower = model.to_lowercase();
+    // Nemotron 3.5 Super supports an enlarged output budget.
+    if lower.contains("nemotron-3.5-super") {
+        return 393_216;
+    }
     // Models with 1M+ context windows support larger output.
     if context_window_for_model("*", model) >= 1_000_000 {
         return 262_144;
@@ -604,6 +608,8 @@ mod tests {
         // Non-1M models keep the default.
         assert_eq!(max_output_tokens_for_model("claude-sonnet-4"), 16_384);
         assert_eq!(max_output_tokens_for_model("claude-haiku-4-5"), 8_192);
+        // Nemotron 3.5 Super gets its own budget.
+        assert_eq!(max_output_tokens_for_model("nemotron-3.5-super"), 393_216);
     }
 
     #[test]
