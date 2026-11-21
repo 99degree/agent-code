@@ -14,7 +14,7 @@ use crate::error::ToolError;
 
 pub struct FileReadTool;
 
-const FUNCTION_EXPAND_MAX_LINES: usize = 25;
+const FUNCTION_EXPAND_MAX_LINES: usize = 50;
 
 #[async_trait]
 impl Tool for FileReadTool {
@@ -41,7 +41,7 @@ impl Tool for FileReadTool {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Number of lines to read. When under 25 and the range falls inside a function, the read is auto-expanded to the end of that function (capped at 25 lines)."
+                    "description": "Number of lines to read. When under 50 and the range falls inside a function, the read is auto-expanded to the end of that function (capped at 50 lines)."
                 },
                 "pages": {
                     "type": "string",
