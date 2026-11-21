@@ -633,7 +633,160 @@ async fn parse_js_form(html: &str, page_url: &str, http: &reqwest::Client) -> Op
         }
     }
 
+    // 3. Look for jQuery/AJAX submit patterns, e.g.
+    //    `$.post("/login", {agree: "yes"})`,
+    //    `$.ajax({url: "/login", data: {agree: "yes"}})`,
+    //    `axios.post("/login", {agree: "yes"})`.
+    //    Captive portals that bind a login button to `onclick="Service.userLogin(...)"`
+    //    usually perform the actual login via an AJAX POST inside that function,
+    //    so we scan the external JS files for the submit URL and data fields.
+    for text in &script_texts {
+        if let Some(form) = extract_ajax_form(text) {
+            return Some(form);
+        }
+    }
+
     None
+}
+
+/// Look for jQuery/AJAX submit patterns in JS text and synthesize a `Form`.
+///
+/// Handles:
+/// - `$.post("url", { key: "val", ... })`
+/// - `$.ajax({ url: "url", data: { key: "val", ... } })`
+/// - `axios.post("url", { key: "val", ... })`
+///
+/// Returns a `Form` whose action is the submit URL and whose inputs are the
+/// agree/accept/continue/terms fields found in the data object.
+fn extract_ajax_form(js: &str) -> Option<Form> {
+    // Pattern: $.post("url", {...}) or $.post('url', {...})
+    if let Some(form) = extract_jquery_post(js) {
+        return Some(form);
+    }
+    // Pattern: $.ajax({ url: "url", ..., data: {...} })
+    if let Some(form) = extract_jquery_ajax(js) {
+        return Some(form);
+    }
+    // Pattern: axios.post("url", {...})
+    if let Some(form) = extract_axios_post(js) {
+        return Some(form);
+    }
+    None
+}
+
+/// Extract `$.post(url, data)` from JS text.
+fn extract_jquery_post(js: &str) -> Option<Form> {
+    let re = regex::Regex::new(
+        r#"(?i)\$\.post\(\s*["']([^"']+)["']\s*,\s*(\{[^{}]*\})"#,
+    )
+    .ok()?;
+    for caps in re.captures_iter(js) {
+        // Capture groups: group 1 = url, group 2 = data object
+        let url_val = caps.get(1)?.as_str().to_string();
+        let data_obj = caps.get(2)?.as_str();
+        let inputs = extract_agree_fields(data_obj);
+        if !inputs.is_empty() {
+            return Some(Form { action: url_val, inputs });
+        }
+    }
+    None
+}
+
+/// Extract `$.ajax({ url: "url", ..., data: {...} })` from JS text.
+fn extract_jquery_ajax(js: &str) -> Option<Form> {
+    // Match `$.ajax({ ... url: "url" ... data: { ... } })` allowing other keys
+    // between url and data. We scan for `$.ajax({` then find the matching close
+    // brace, then extract url and data from within.
+    let ajax_re = regex::Regex::new(r"(?i)\$\.ajax\(\s*\{").ok()?;
+    // Compiled once outside the loop to avoid `regex_creation_in_loops`.
+    let data_re = regex::Regex::new(r"(?i)data\s*:\s*\{").ok()?;
+    for m in ajax_re.find_iter(js) {
+        let start = m.end();
+        let rest = &js[start..];
+        // Find the matching closing brace for the options object.
+        let end = find_matching_brace(rest)?;
+        let opts = &rest[..end];
+        let url = extract_json_str(opts, "url")?;
+        // Locate the `data: {...}` object using brace matching so nested
+        // braces are handled correctly.
+        if let Some(dm) = data_re.find(opts) {
+            let data_start = dm.end() - 1; // position of the opening `{`
+            let data_rest = &opts[data_start..];
+            let data_end = find_matching_brace(data_rest)?;
+            let data_obj = &data_rest[..data_end];
+            let inputs = extract_agree_fields(data_obj);
+            if !inputs.is_empty() {
+                return Some(Form { action: url, inputs });
+            }
+        }
+    }
+    None
+}
+
+/// Extract `axios.post(url, data)` from JS text.
+fn extract_axios_post(js: &str) -> Option<Form> {
+    let re = regex::Regex::new(
+        r#"(?i)axios\.post\(\s*["']([^"']+)["']\s*,\s*(\{[^{}]*\})"#,
+    )
+    .ok()?;
+    for caps in re.captures_iter(js) {
+        let url_val = caps.get(1)?.as_str().to_string();
+        let data_obj = caps.get(2)?.as_str();
+        let inputs = extract_agree_fields(data_obj);
+        if !inputs.is_empty() {
+            return Some(Form { action: url_val, inputs });
+        }
+    }
+    None
+}
+
+/// Find the index of the matching closing brace for an object literal that
+/// starts at position 0 of `s`, respecting nested braces and string literals.
+fn find_matching_brace(s: &str) -> Option<usize> {
+    let mut depth: u32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in s.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_string {
+            if c == '\\' {
+                escaped = true;
+            } else if c == '"' || c == '\'' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Extract agree/accept/continue/terms field name/value pairs from a data
+/// object snippet like `{agree: "yes", csrf: "abc123"}`.
+fn extract_agree_fields(data_obj: &str) -> Vec<Input> {
+    let mut inputs = Vec::new();
+    for field in ["agree", "accept", "continue", "terms"] {
+        if let Some(val) = extract_json_str(data_obj, field) {
+            inputs.push(Input {
+                name: field.to_string(),
+                value: val,
+            });
+        }
+    }
+    inputs
 }
 
 /// Find a `<form>...</form>` snippet embedded inside a block of JS text,
@@ -951,6 +1104,51 @@ mod tests {
     fn test_extract_form_snippet_no_form_returns_none() {
         let js = "var x = 1; console.log('hello');";
         assert!(extract_form_snippet(js).is_none());
+    }
+
+    #[test]
+    fn test_extract_jquery_post_extracts_url_and_fields() {
+        let js = r#"$.post("/login", {agree: "yes", csrf: "abc123"});"#;
+        let form = extract_jquery_post(js).expect("should parse $.post");
+        assert_eq!(form.action, "/login");
+        assert_eq!(form.inputs.len(), 1);
+        assert_eq!(form.inputs[0].name, "agree");
+        assert_eq!(form.inputs[0].value, "yes");
+    }
+
+    #[test]
+    fn test_extract_jquery_post_no_agree_field_returns_none() {
+        let js = r#"$.post("/login", {foo: "bar"});"#;
+        assert!(extract_jquery_post(js).is_none());
+    }
+
+    #[test]
+    fn test_extract_jquery_ajax_extracts_url_and_fields() {
+        let js = r#"$.ajax({url: "/login", type: "POST", data: {agree: "true"}});"#;
+        let form = extract_jquery_ajax(js).expect("should parse $.ajax");
+        assert_eq!(form.action, "/login");
+        assert_eq!(form.inputs.len(), 1);
+        assert_eq!(form.inputs[0].name, "agree");
+        assert_eq!(form.inputs[0].value, "true");
+    }
+
+    #[test]
+    fn test_extract_axios_post_extracts_url_and_fields() {
+        let js = r#"axios.post("/submit", {accept: "true"});"#;
+        let form = extract_axios_post(js).expect("should parse axios.post");
+        assert_eq!(form.action, "/submit");
+        assert_eq!(form.inputs.len(), 1);
+        assert_eq!(form.inputs[0].name, "accept");
+        assert_eq!(form.inputs[0].value, "true");
+    }
+
+    #[test]
+    fn test_find_matching_brace() {
+        // i+1 is the exclusive end index past the matching close brace.
+        assert_eq!(find_matching_brace("{}"), Some(2));
+        assert_eq!(find_matching_brace("{a: 1, b: {c: 2}}"), Some(17));
+        assert_eq!(find_matching_brace("{a: '}'}"), Some(8));
+        assert_eq!(find_matching_brace("{unclosed"), None);
     }
 
     #[test]
