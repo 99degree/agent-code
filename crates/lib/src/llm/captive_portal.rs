@@ -307,6 +307,13 @@ impl CaptivePortal {
         for input in &form.inputs {
             form_data.insert(input.name.clone(), input.value.clone());
         }
+        // Merge static extra fields declared by the profile (e.g. GovWifi's
+        // passcode). These only fill fields not already present from the form.
+        for (name, value) in self.profile.extra_fields {
+            form_data.entry(name.to_string()).or_insert_with(|| value.to_string());
+        }
+        // Override the agree field with the profile's agreed value so the
+        // submit signals acceptance even when the form's own value is empty.
         form_data.insert(
             self.profile.agree_field.to_string(),
             self.profile.agree_value.to_string(),
@@ -721,23 +728,31 @@ fn extract_ajax_form(js: &str) -> Option<Form> {
 /// GovWifi-style portals bind the login button to `Service.userLogin(...)`,
 /// which internally calls `Service.request({url: Common.apiPath +
 /// "/wifi/login", type: "POST"}, {passcode: "..."})`. We scan for the
-/// `Service.request({url: ...}` pattern, extract the url string and the
+/// `Service.request({url: ...}` pattern, extract the url expression and the
 /// second argument (data object), and synthesize a `Form`.
 ///
-/// Returns `None` when no `Service.request` call with a url and agree-ish
-/// data fields is found.
+/// Returns `None` when no `Service.request` call with a url and data fields
+/// is found.
 fn extract_service_request(js: &str) -> Option<Form> {
-    // Match `Service.request({...url: "..."...}, {...data...})`.
+    // Match `Service.request({...url: <expr>...}, {...data...})`.
     // We tolerate whitespace and other keys between `url` and the closing
-    // brace of the options object.
+    // brace of the options object. The url expression may be a plain string
+    // literal (`url: "/wifi/login"`) or a concatenation
+    // (`url: Common.apiPath + "/wifi/login"`).
     let re = regex::Regex::new(
-        r#"(?i)Service\.request\(\s*\{\s*[^{}]*?url\s*:\s*["']([^"']+)["'][^{}]*?\}\s*,\s*(\{[^{}]*\})"#,
+        r#"(?i)Service\.request\(\s*\{\s*[^{}]*?url\s*:\s*([^,}]*?)\s*[^{}]*?\}\s*,\s*(\{[^{}]*\})"#,
     )
     .ok()?;
     for caps in re.captures_iter(js) {
-        let url_val = caps.get(1)?.as_str().to_string();
+        let url_expr = caps.get(1)?.as_str().trim();
+        // Extract the first string literal from the url expression.
+        let url_val = extract_string_literal(url_expr)?;
         let data_obj = caps.get(2)?.as_str();
-        let inputs = extract_agree_fields(data_obj);
+        // Extract all field names from the data object (GovWifi uses
+        // `passcode`, not an agree-ish field). Values that are string
+        // literals are preserved; others default to empty and are filled
+        // in by the profile's agree field during submit.
+        let inputs = extract_all_fields(data_obj);
         if !inputs.is_empty() {
             return Some(Form {
                 action: url_val,
@@ -746,6 +761,42 @@ fn extract_service_request(js: &str) -> Option<Form> {
         }
     }
     None
+}
+
+/// Extract the first double- or single-quoted string literal from `s`,
+/// returning its unquoted contents.
+fn extract_string_literal(s: &str) -> Option<String> {
+    let re = regex::Regex::new(r#"["']([^"']+)["']"#).ok()?;
+    re.captures(s)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+/// Extract all `key: value` pairs from a JS object snippet like
+/// `{passcode: passcode, csrf: "abc"}`. Fields with string-literal values
+/// keep them; fields with unquoted values (JS variable references like
+/// `passcode: passcode`) default to empty — the caller fills in the
+/// profile's agree value for the primary field during submit.
+fn extract_all_fields(data_obj: &str) -> Vec<Input> {
+    let mut inputs = Vec::new();
+    // Match `key: "value"` (string literal) or `key: <unquoted>`.
+    let re = regex::Regex::new(
+        r#"["']?([a-zA-Z_][a-zA-Z0-9_]*)["']?\s*:\s*(?:["']([^"']*)["']|([^,{}]+))"#,
+    )
+    .ok()?;
+    for caps in re.captures_iter(data_obj) {
+        // `continue` instead of `?` because this returns Vec<Input>, not Option.
+        let Some(name_cap) = caps.get(1) else { continue };
+        let name = name_cap.as_str().to_string();
+        // Only keep string-literal values; unquoted identifiers (e.g.
+        // `passcode: passcode`) default to empty.
+        let value = caps
+            .get(2)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+        inputs.push(Input { name, value });
+    }
+    inputs
 }
 
 /// Extract `$.post(url, data)` from JS text.
