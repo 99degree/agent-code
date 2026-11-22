@@ -112,6 +112,11 @@ pub async fn probe_portal_connectivity(url: &str) -> bool {
 /// Add a portal URL here to test the page fetch + form submit logic via
 /// `/connect`. Each URL is tried against every `CAPTIVE_PORTAL_PROFILES`
 /// profile until one succeeds.
+///
+/// This is a real captive portal (Hong Kong GovWifi). Manual testing via
+/// `/connect` requires network access to the portal. Success means the
+/// agree form redirect returns to the origin URL; failure means the portal
+/// did not redirect back (expected in non-captive environments).
 pub const TEST_PORTALS: &[&str] = &[
     "https://free.wifi.gov.hk/GovWifiUI_/userlanding/tc/login.html?zoneName=KPRH160&ssid=Wi-Fi.HK&url=http%3A%2F%2Fexample.com%2F&",
 ];
