@@ -66,6 +66,16 @@ pulldown-cmark = "0.13"
 # DOM API that replaces the regex-based HTML parsing in captive_portal.rs.
 scraper = "0.27"
 
+# JavaScript execution for JS-heavy captive portals. rquickjs provides
+# Rust bindings to the QuickJS engine.
+rquickjs = { version = "0.14", features = ["loader", "futures", "bindgen"] }
+
+# URL parsing for resolving relative URLs in JS execution.
+url = "2.5"
+
+# URL encoding/decoding for form data parsing.
+urlencoding = "2.1"
+
 # Linux OS-level sandbox: Landlock (filesystem confinement) + seccomp
 # (network kill). Linux-only so non-Linux targets still build.
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -25,6 +25,7 @@
 //! text. This avoids pulling in a headless browser while covering the common
 //! JS-injected captive-portal login shape.
 
+use crate::llm::captive_portal_js::execute_portal_js;
 use regex::Regex;
 use reqwest::header::LOCATION;
 use scraper::{Html, Selector};
@@ -497,15 +498,15 @@ impl CaptivePortalManager {
 }
 
 /// Parsed HTML form: action URL and input name/value pairs.
-struct Form {
-    action: String,
-    inputs: Vec<Input>,
+pub struct Form {
+    pub action: String,
+    pub inputs: Vec<Input>,
 }
 
 /// One form input: name and value.
-struct Input {
-    name: String,
-    value: String,
+pub struct Input {
+    pub name: String,
+    pub value: String,
 }
 
 /// Parse the first `<form>` element from HTML using scraper's DOM parser,
@@ -689,6 +690,32 @@ async fn parse_js_form(html: &str, page_url: &str, http: &reqwest::Client) -> Op
             return Some(form);
         }
     }
+
+    // 4. Fall back to executing JavaScript in a sandboxed QuickJS environment.
+    // This handles portals that generate forms dynamically via complex JS logic.
+
+    // For simplicity, we'll execute all scripts. In practice, inline scripts
+    // define variables/functions that external scripts use.
+    if let Ok(js_result) = execute_portal_js(
+        script_texts.clone(), // all scripts as inline (they're already fetched)
+        vec![],               // no additional external scripts
+        page_url.to_string(),
+        page_url.to_string(), // origin_url fallback to page_url
+    )
+    .await
+        && js_result.submitted {
+            let mut inputs: Vec<Input> = Vec::new();
+            for (name, value) in js_result.fields {
+                inputs.push(Input { name, value });
+            }
+            let action = js_result.action.unwrap_or_default();
+            tracing::debug!(
+                "captive portal: JS execution captured form action={}, fields={}",
+                action,
+                inputs.len()
+            );
+            return Some(Form { action, inputs });
+        }
 
     None
 }
@@ -924,10 +951,14 @@ fn extract_agree_fields(data_obj: &str) -> Vec<Input> {
     inputs
 }
 
-/// Find a `<form>...</form>` snippet embedded inside a block of JS text,
-/// e.g. `document.write('<form action="/login" ...>...')` or
-/// `el.innerHTML = "<form ...>...</form>"`. Returns the parsed form.
-fn extract_form_snippet(js: &str) -> Option<Form> {
+// 3. Look for jQuery/AJAX submit patterns, e.g.
+//    `$.post("/login", {agree: "yes"})`,
+//    `$.ajax({url: "/login", data: {agree: "yes"}})`,
+//    `axios.post("/login", {agree: "yes"})`.
+//    Captive portals that bind a login button to `onclick="Service.userLogin(...)"`
+//    usually perform the actual login via an AJAX POST inside that function,
+//    so we scan the external JS files for the submit URL and data fields.
+pub fn extract_form_snippet(js: &str) -> Option<Form> {
     // Find candidate form snippets between <form ...> and </form>.
     let form_start_re = regex::Regex::new(r"<form\b[^>]*>").ok()?;
     for m in form_start_re.find_iter(js) {
