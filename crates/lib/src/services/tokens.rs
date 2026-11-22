@@ -252,6 +252,8 @@ pub const MODEL_CONTEXT_WINDOWS: &[(&str, &str, u64)] = &[
     ("*", "kilo-auto/balanced", 1_000_000),
     ("*", "kilo-auto/efficient", 1_000_000),
     ("*", "kilo-auto/free", 256_000),
+    // Ling
+    ("*", "ling-3.2-flash", 1_000_000),
     // Misc
     ("*", "big-pickle", 200_000),
 ];
@@ -571,6 +573,11 @@ mod tests {
     fn test_context_window_for_step_5() {
         assert_eq!(context_window_for_model("*", "step-5"), 1_000_000);
         assert_eq!(context_window_for_model("nim", "step-5"), 1_000_000);
+    }
+
+    #[test]
+    fn test_context_window_for_ling_3_2_flash() {
+        assert_eq!(context_window_for_model("*", "ling-3.2-flash"), 1_000_000);
     }
 
     #[test]
