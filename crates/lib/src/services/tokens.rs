@@ -254,6 +254,8 @@ pub const MODEL_CONTEXT_WINDOWS: &[(&str, &str, u64)] = &[
     ("*", "kilo-auto/free", 256_000),
     // Ling
     ("*", "ling-3.2-flash", 1_000_000),
+    // Baidu ERNIE
+    ("*", "ernie-5.5-flash", 1_000_000),
     // Misc
     ("*", "big-pickle", 200_000),
 ];
@@ -578,6 +580,11 @@ mod tests {
     #[test]
     fn test_context_window_for_ling_3_2_flash() {
         assert_eq!(context_window_for_model("*", "ling-3.2-flash"), 1_000_000);
+    }
+
+    #[test]
+    fn test_context_window_for_ernie_5_5_flash() {
+        assert_eq!(context_window_for_model("*", "ernie-5.5-flash"), 1_000_000);
     }
 
     #[test]
