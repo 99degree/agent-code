@@ -683,7 +683,45 @@ impl QueryEngine {
     /// profile (agree/accept/continue/terms), returning `Ok(())` on first
     /// success. Used by `/connect` so the user can test portal recovery
     /// manually without waiting for an LLM call to fail.
+    ///
+    /// Before attempting the captive portal login, we first peek at a
+    /// detection URL (e.g. https://example.com). If that URL is reachable
+    /// with a 2xx response, the network is not behind a captive portal and
+    /// we report success immediately without running any portal login logic.
     pub async fn captive_portal_login(&self) -> Result<String, String> {
+        // Step 0: Peek at a detection URL first. If it's reachable, we're not
+        // behind a captive portal — no login needed.
+        let detection_url = "https://example.com";
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return Err("failed to build HTTP client for detection probe".to_string()),
+        };
+        match client.get(detection_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                return Ok(format!(
+                    "captive portal: detection URL {detection_url} reachable (status={}); \
+                     no captive portal login needed",
+                    resp.status().as_u16()
+                ));
+            }
+            Ok(resp) => {
+                tracing::info!(
+                    "captive portal: detection URL {detection_url} returned status {}, \
+                     proceeding with portal login attempt",
+                    resp.status().as_u16()
+                );
+            }
+            Err(e) => {
+                tracing::info!(
+                    "captive portal: detection URL {detection_url} unreachable ({e}), \
+                     proceeding with portal login attempt"
+                );
+            }
+        }
+
         let probe_urls = crate::llm::captive_portal::TEST_PORTALS;
         if probe_urls.is_empty() {
             return Err("no test portal URLs configured".to_string());
