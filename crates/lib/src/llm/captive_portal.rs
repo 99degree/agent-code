@@ -407,28 +407,50 @@ impl CaptivePortal {
             summary.push_str(&format!("captive portal: redirect Location: {loc}\n"));
         }
 
-        // A captive portal login is accepted when the agree form redirect
-        // brings us back to the origin URL the user started from — that's
-        // the real proof the external network is unblocked (e.g. after
-        // login on free.wifi.gov.hk, we're redirected back to google.com).
-        // An HTTP 200 from the portal's own domain is not sufficient: the
-        // portal may return 2xx while still trapping us behind the login
-        // wall.
-        if current_url != self.origin_url {
-            tracing::warn!(
-                "captive portal: agree form did not return to origin url; current={} origin={}",
-                current_url,
-                self.origin_url
+        // A captive portal login is accepted when:
+        //   1. The agree form redirect brings us back to the origin URL (strongest proof), OR
+        //   2. The server responded with a 2xx status code (server accepted the submission,
+        //      even if the final client-side redirect happens via JS, e.g. GovWifi does
+        //      window.location = 'landing.html?...' after a successful POST).
+        // An HTTP 2xx from the portal means the server accepted the agree submission.
+        if status.is_success() {
+            tracing::info!(
+                "captive portal: agree form accepted by server (status={})",
+                status.as_u16()
             );
-            return Err(format!(
-                "captive portal login did not return to origin url {origin}; \
-                 ended at {current}",
-                origin = self.origin_url,
-                current = current_url,
+            summary.push_str(&format!(
+                "captive portal: agree form accepted by server (status={})\n",
+                status.as_u16()
             ));
+            return Ok(summary);
         }
 
-        Ok(summary)
+        // If we got a non-success status, check if any redirect brought us back to origin.
+        if current_url == self.origin_url {
+            tracing::info!(
+                "captive portal: agree form redirect returned to origin url {}",
+                current_url
+            );
+            summary.push_str(&format!(
+                "captive portal: agree form redirect returned to origin url {}\n",
+                current_url
+            ));
+            return Ok(summary);
+        }
+
+        tracing::warn!(
+            "captive portal: agree form not accepted; status={}, current={} origin={}",
+            status.as_u16(),
+            current_url,
+            self.origin_url
+        );
+        Err(format!(
+            "captive portal login did not succeed; server returned status {}, \
+             current url {current} does not match origin url {origin}",
+            status.as_u16(),
+            current = current_url,
+            origin = self.origin_url
+        ))
     }
 
     /// The profile name.
