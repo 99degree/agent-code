@@ -386,25 +386,45 @@ impl CaptivePortal {
         let resp = final_resp.ok_or_else(|| "captive portal redirect loop".to_string())?;
 
         let status = resp.status();
+        let final_url = resp.url().clone();
+        let headers = resp.headers().clone();
+        // Capture the response body so the user can see what the portal
+        // returned after the agree submit (success page, error message, or
+        // a JS redirect snippet). Do this before any redirect following.
+        let body_text = resp.text().await.unwrap_or_default();
+
         tracing::info!(
             "captive portal: agree form submitted, status={}, final_url={}",
             status.as_u16(),
-            resp.url()
+            final_url
         );
         summary.push_str(&format!(
             "captive portal: agree form submitted, status={}, final_url={}\n",
             status.as_u16(),
-            resp.url()
+            final_url
         ));
         // Log response headers from the submit (Set-Cookie, Location, etc.).
         summary.push_str("captive portal: POST response headers:\n");
-        for (name, value) in resp.headers() {
+        for (name, value) in headers.iter() {
             if let Ok(v) = value.to_str() {
                 summary.push_str(&format!("  {name}: {v}\n"));
             }
         }
-        if let Some(loc) = resp.headers().get(LOCATION).and_then(|v| v.to_str().ok()) {
+        if let Some(loc) = headers.get(LOCATION).and_then(|v| v.to_str().ok()) {
             summary.push_str(&format!("captive portal: redirect Location: {loc}\n"));
+        }
+        // Log a truncated view of the response body so the user can tell if
+        // the submit succeeded (e.g. a "success" / welcome message) or failed
+        // (e.g. an error page or another login form).
+        if !body_text.is_empty() {
+            let preview = if body_text.len() > 2000 {
+                format!("{}\n... (truncated, {} bytes total)", &body_text[..2000], body_text.len())
+            } else {
+                body_text.clone()
+            };
+            summary.push_str("captive portal: POST response body:\n");
+            summary.push_str(&preview);
+            summary.push('\n');
         }
 
         // A captive portal login is accepted when:
@@ -446,10 +466,12 @@ impl CaptivePortal {
         );
         Err(format!(
             "captive portal login did not succeed; server returned status {}, \
-             current url {current} does not match origin url {origin}",
+             current url {current} does not match origin url {origin}\n\
+             response body:\n{body_text}",
             status.as_u16(),
             current = current_url,
-            origin = self.origin_url
+            origin = self.origin_url,
+            body_text = body_text
         ))
     }
 
