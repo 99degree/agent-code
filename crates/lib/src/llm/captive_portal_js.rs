@@ -98,6 +98,53 @@ impl JsSandbox {
             location.set("origin", origin_url.clone())?;
             window.set("location", location)?;
 
+            // document (minimal mock so portal JS referencing document doesn't crash).
+            // Pre-create separate null/empty values per closure so each move-closure
+            // captures its own value (Value is invariant over its lifetime parameter
+            // and cannot be shared across multiple closures).
+            let null_val_get = Value::new_null(ctx.clone());
+            let null_val_query = Value::new_null(ctx.clone());
+            let empty_obj_sel = Object::new(ctx.clone())?.into_value();
+            let empty_obj_create = Object::new(ctx.clone())?.into_value();
+            let document = Object::new(ctx.clone())?;
+            document.set(
+                "getElementById",
+                Function::new(
+                    ctx.clone(),
+                    move |_ctx: Ctx<'_>, _id: String| -> rquickjs::Result<Value> {
+                        Ok(null_val_get.clone())
+                    },
+                ),
+            )?;
+            document.set(
+                "querySelector",
+                Function::new(
+                    ctx.clone(),
+                    move |_ctx: Ctx<'_>, _sel: String| -> rquickjs::Result<Value> {
+                        Ok(null_val_query.clone())
+                    },
+                ),
+            )?;
+            document.set(
+                "querySelectorAll",
+                Function::new(
+                    ctx.clone(),
+                    move |_ctx: Ctx<'_>, _sel: String| -> rquickjs::Result<Value> {
+                        Ok(empty_obj_sel.clone())
+                    },
+                ),
+            )?;
+            document.set(
+                "createElement",
+                Function::new(
+                    ctx.clone(),
+                    move |_ctx: Ctx<'_>, _tag: String| -> rquickjs::Result<Value> {
+                        Ok(empty_obj_create.clone())
+                    },
+                ),
+            )?;
+            window.set("document", document)?;
+
             // navigator
             let navigator = Object::new(ctx.clone())?;
             navigator.set(
