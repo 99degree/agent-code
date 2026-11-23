@@ -114,12 +114,17 @@ pub async fn probe_portal_connectivity(url: &str) -> bool {
 /// `/connect`. Each URL is tried against every `CAPTIVE_PORTAL_PROFILES`
 /// profile until one succeeds.
 ///
-/// This is a real captive portal (Hong Kong GovWifi). Manual testing via
+/// These are real captive portals (Hong Kong GovWifi). Manual testing via
 /// `/connect` requires network access to the portal. Success means the
 /// agree form redirect returns to the origin URL; failure means the portal
 /// did not redirect back (expected in non-captive environments).
+///
+/// - The `tc` URL targets the Traditional Chinese page (button text in Chinese).
+/// - The `en` URL targets the English page with the "I Accept" button,
+///   exercising the same `parse_login_button` / AJAX path in English.
 pub const TEST_PORTALS: &[&str] = &[
     "https://free.wifi.gov.hk/GovWifiUI_/userlanding/tc/login.html?zoneName=KPRH160&ssid=Wi-Fi.HK&url=http%3A%2F%2Fexample.com%2F&",
+    "https://free.wifi.gov.hk/GovWifiUI_/userlanding/en/login.html?zoneName=KPRH160&ssid=Wi-Fi.HK&url=http%3A%2F%2Fgoogle.com%2F&",
 ];
 
 /// Captive portal client for one portal. Holds a persistent reqwest cookie
