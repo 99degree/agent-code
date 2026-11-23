@@ -689,10 +689,14 @@ impl QueryEngine {
     /// with a 2xx response, the network is not behind a captive portal and
     /// we report success immediately without running any portal login logic.
     pub async fn captive_portal_login(&self) -> Result<String, String> {
-        // Step 0: Peek at a detection URL first. If it's reachable, we're not
-        // behind a captive portal — no login needed.
+        // Step 0: Peek at a detection URL first. If it's reachable with a 2xx
+        // response and no redirect, we're not behind a captive portal — no
+        // login needed. We disable redirect following so a 3xx redirect to the
+        // portal login page is detected as "behind a captive portal" rather
+        // than being silently followed to a 200 OK login page.
         let detection_url = "https://example.com";
         let client = match reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(10))
             .build()
         {
