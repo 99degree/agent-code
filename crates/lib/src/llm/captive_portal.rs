@@ -749,38 +749,10 @@ async fn parse_js_form(html: &str, page_url: &str, http: &reqwest::Client) -> Op
 
     let script_texts: Vec<String> = inline_texts.into_iter().chain(external_texts).collect();
 
-    // 1. Look for an HTML form snippet embedded in script text.
-    for text in &script_texts {
-        if let Some(form) = extract_form_snippet(text) {
-            return Some(form);
-        }
-    }
-
-    // 2. Look for a JSON-like config object with agree-ish fields.
-    for text in &script_texts {
-        if let Some(form) = extract_js_config_form(text) {
-            return Some(form);
-        }
-    }
-
-    // 3. Look for jQuery/AJAX submit patterns, e.g.
-    //    `$.post("/login", {agree: "yes"})`,
-    //    `$.ajax({url: "/login", data: {agree: "yes"}})`,
-    //    `axios.post("/login", {agree: "yes"})`.
-    //    Captive portals that bind a login button to `onclick="Service.userLogin(...)"`
-    //    usually perform the actual login via an AJAX POST inside that function,
-    //    so we scan the external JS files for the submit URL and data fields.
-    for text in &script_texts {
-        if let Some(form) = extract_ajax_form(text) {
-            return Some(form);
-        }
-    }
-
-    // 4. Fall back to executing JavaScript in a sandboxed QuickJS environment.
-    // This handles portals that generate forms dynamically via complex JS logic.
-
-    // For simplicity, we'll execute all scripts. In practice, inline scripts
-    // define variables/functions that external scripts use.
+    // 1. Run the JS engine (QuickJS) first. This handles portals that build
+    //    the login form dynamically via complex JS logic (innerHTML,
+    //    document.write, Service.userLogin binding, etc.) where no static
+    //    form or declarative submit pattern exists in the raw HTML.
     if let Ok(js_result) = execute_portal_js(
         script_texts.clone(), // all scripts as inline (they're already fetched)
         vec![],               // no additional external scripts
@@ -795,12 +767,41 @@ async fn parse_js_form(html: &str, page_url: &str, http: &reqwest::Client) -> Op
             }
             let action = js_result.action.unwrap_or_default();
             tracing::debug!(
-                "captive portal: JS execution captured form action={}, fields={}",
+                "captive portal: JS engine captured form action={}, fields={}",
                 action,
                 inputs.len()
             );
             return Some(Form { action, inputs });
+    }
+
+    // 2. Fall back to declarative regex extraction for portals that embed
+    //    the form or submit data directly in script text.
+    // 2a. Look for an HTML form snippet embedded in script text.
+    for text in &script_texts {
+        if let Some(form) = extract_form_snippet(text) {
+            return Some(form);
         }
+    }
+
+    // 2b. Look for a JSON-like config object with agree-ish fields.
+    for text in &script_texts {
+        if let Some(form) = extract_js_config_form(text) {
+            return Some(form);
+        }
+    }
+
+    // 2c. Look for jQuery/AJAX submit patterns, e.g.
+    //     `$.post("/login", {agree: "yes"})`,
+    //     `$.ajax({url: "/login", data: {agree: "yes"}})`,
+    //     `axios.post("/login", {agree: "yes"})`.
+    //     Captive portals that bind a login button to `onclick="Service.userLogin(...)"`
+    //     usually perform the actual login via an AJAX POST inside that function,
+    //     so we scan the external JS files for the submit URL and data fields.
+    for text in &script_texts {
+        if let Some(form) = extract_ajax_form(text) {
+            return Some(form);
+        }
+    }
 
     None
 }
