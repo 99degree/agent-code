@@ -143,7 +143,10 @@ impl JsSandbox {
                     },
                 ),
             )?;
-            window.set("document", document)?;
+            window.set("document", document.clone())?;
+            // Also expose document as a bare global so portal JS that
+            // references `document` directly (not `window.document`) works.
+            ctx.globals().set("document", document)?;
 
             // navigator
             let navigator = Object::new(ctx.clone())?;
