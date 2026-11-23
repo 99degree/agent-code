@@ -1300,9 +1300,10 @@ pub fn execute(input: &str, engine: &mut QueryEngine) -> CommandResult {
         }
         Some("connect") => {
             // Run captive portal login probe and submit the agree form.
+            let force = matches!(args, Some("force"));
             let handle = tokio::runtime::Handle::try_current();
             let result = if let Ok(ref h) = handle {
-                h.block_on(engine.captive_portal_login())
+                h.block_on(engine.captive_portal_login(force))
             } else {
                 Err("no tokio runtime available".to_string())
             };
