@@ -487,8 +487,14 @@ impl CaptivePortal {
         ))
     }
 
-    /// Heuristic: does the response body look like a captive-portal login /
-    /// landing page (meaning the agree submit did NOT actually log us in)?
+    /// Heuristic: does the response body look like a captive-portal LOGIN page
+    /// (meaning the agree submit did NOT actually log us in)?
+    ///
+    /// We only flag a body as "still on login page" if it contains an actual
+    /// form carrying an agree/accept/continue/passcode input. Generic
+    /// "login"/"welcome"/"landing" text is NOT enough — GovWifi-style portals
+    /// redirect to a `landing.html` page after a successful submit, and that
+    /// page may mention "login" in boilerplate text even though we're logged in.
     fn body_looks_like_login_page(body: &str) -> bool {
         static AGREE_FIELD_RE: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(
@@ -496,19 +502,9 @@ impl CaptivePortal {
             )
             .expect("valid agree-field regex")
         });
-        let lower = body.to_ascii_lowercase();
-        // If there's still a form carrying an agree/accept/continue field, we
-        // are back on the login page.
-        let has_agree_field = AGREE_FIELD_RE.is_match(&lower);
-        // Typical login/landing-page keywords.
-        let has_login_keywords = [
-            "login", "sign in", "sign-in", "agree", "accept", "continue",
-            "captive portal", "wifi login", "wireless login", "hotspot",
-            "authentication required",
-        ]
-        .iter()
-        .any(|kw| lower.contains(kw));
-        has_agree_field || has_login_keywords
+        // If there's still a form carrying an agree/accept/continue/passcode
+        // field, we are back on the login page.
+        AGREE_FIELD_RE.is_match(&body.to_ascii_lowercase())
     }
 
     /// The profile name.
