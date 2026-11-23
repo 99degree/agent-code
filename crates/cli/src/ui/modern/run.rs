@@ -555,9 +555,11 @@ pub async fn run_modern_tui(
     KEYBOARD_ENHANCEMENT_WANTED.store(caps.kitty_keyboard_safe, Ordering::Relaxed);
 
     let mut terminal = setup_terminal()?;
-    // Full-screen clear on launch so the launch surface draws onto a blank
-    // screen instead of over whatever the shell left behind.
-    app.force_full_redraw = true;
+    // Clear the full screen on launch (write a blank over the alt screen)
+    // so the launch surface draws onto a clean terminal instead of over
+    // whatever the shell left behind. Then mark dirty so the first frame
+    // paints the launch surface.
+    let _ = terminal.clear();
     app.dirty = true;
     // Set the window title once at startup. Updating it on every paint or
     // animation tick rewrites the title constantly during streaming, which
