@@ -558,6 +558,7 @@ pub async fn run_modern_tui(
     // Full-screen clear on launch so the launch surface draws onto a blank
     // screen instead of over whatever the shell left behind.
     app.force_full_redraw = true;
+    app.dirty = true;
     // Set the window title once at startup. Updating it on every paint or
     // animation tick rewrites the title constantly during streaming, which
     // is distracting in Termux (Android) terminal tabs — and carries no
