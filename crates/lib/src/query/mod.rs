@@ -730,9 +730,7 @@ impl QueryEngine {
                 }
             }
         } else {
-            tracing::info!(
-                "captive portal: force mode enabled, skipping detection URL probe"
-            );
+            tracing::info!("captive portal: force mode enabled, skipping detection URL probe");
         }
 
         let probe_urls = crate::llm::captive_portal::TEST_PORTALS;

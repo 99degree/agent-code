@@ -424,7 +424,11 @@ impl CaptivePortal {
         // (e.g. an error page or another login form).
         if !body_text.is_empty() {
             let preview = if body_text.len() > 2000 {
-                format!("{}\n... (truncated, {} bytes total)", &body_text[..2000], body_text.len())
+                format!(
+                    "{}\n... (truncated, {} bytes total)",
+                    &body_text[..2000],
+                    body_text.len()
+                )
             } else {
                 body_text.clone()
             };
@@ -497,10 +501,8 @@ impl CaptivePortal {
     /// page may mention "login" in boilerplate text even though we're logged in.
     fn body_looks_like_login_page(body: &str) -> bool {
         static AGREE_FIELD_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(
-                r#"<input[^>]*name\s*=\s*['"]?(agree|accept|continue|terms|passcode)['"]?"#,
-            )
-            .expect("valid agree-field regex")
+            Regex::new(r#"<input[^>]*name\s*=\s*['"]?(agree|accept|continue|terms|passcode)['"]?"#)
+                .expect("valid agree-field regex")
         });
         // If there's still a form carrying an agree/accept/continue/passcode
         // field, we are back on the login page.
@@ -756,18 +758,19 @@ async fn parse_js_form(html: &str, page_url: &str, http: &reqwest::Client) -> Op
         page_url.to_string(), // origin_url fallback to page_url
     )
     .await
-        && js_result.submitted {
-            let mut inputs: Vec<Input> = Vec::new();
-            for (name, value) in js_result.fields {
-                inputs.push(Input { name, value });
-            }
-            let action = js_result.action.unwrap_or_default();
-            tracing::debug!(
-                "captive portal: JS engine captured form action={}, fields={}",
-                action,
-                inputs.len()
-            );
-            return Some(Form { action, inputs });
+        && js_result.submitted
+    {
+        let mut inputs: Vec<Input> = Vec::new();
+        for (name, value) in js_result.fields {
+            inputs.push(Input { name, value });
+        }
+        let action = js_result.action.unwrap_or_default();
+        tracing::debug!(
+            "captive portal: JS engine captured form action={}, fields={}",
+            action,
+            inputs.len()
+        );
+        return Some(Form { action, inputs });
     }
 
     // 2. Fall back to declarative regex extraction for portals that embed
@@ -912,7 +915,9 @@ fn resolve_url_expr(url_expr: &str, js: &str) -> Option<String> {
 /// Extract the `apiPath` value from JS like `var apiPath = "/GovWifiAPI_";`.
 fn extract_api_path(js: &str) -> Option<String> {
     let re = regex::Regex::new(r#"var\s+apiPath\s*=\s*["']([^"']+)["']"#).ok()?;
-    re.captures(js).and_then(|c| c.get(1)).map(|m| m.as_str().to_string())
+    re.captures(js)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
 }
 
 /// Extract the first double- or single-quoted string literal from `s`,

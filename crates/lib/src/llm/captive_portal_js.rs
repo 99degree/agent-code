@@ -285,13 +285,13 @@ fn create_mock_xhr(
                                 for key_result in obj.keys::<rquickjs::Atom>() {
                                     if let Ok(key) = key_result
                                         && let Ok(key_str) = key.to_string()
-                                            && let Ok(val) = obj.get::<_, Value>(&key_str) {
-                                                let val_str =
-                                                    rquickjs::String::from_value(val.clone())
-                                                        .and_then(|s| s.to_string())
-                                                        .unwrap_or_default();
-                                                result.fields.insert(key_str, val_str);
-                                            }
+                                        && let Ok(val) = obj.get::<_, Value>(&key_str)
+                                    {
+                                        let val_str = rquickjs::String::from_value(val.clone())
+                                            .and_then(|s| s.to_string())
+                                            .unwrap_or_default();
+                                        result.fields.insert(key_str, val_str);
+                                    }
                                 }
                             } else if let Ok(body_str) =
                                 rquickjs::String::from_value(body_val.clone())
@@ -391,12 +391,13 @@ fn create_mock_fetch(
                         for key_result in obj.keys::<rquickjs::Atom>() {
                             if let Ok(key) = key_result
                                 && let Ok(key_str) = key.to_string()
-                                    && let Ok(val) = obj.get::<_, Value>(&key_str) {
-                                        let val_str = rquickjs::String::from_value(val.clone())
-                                            .and_then(|s| s.to_string())
-                                            .unwrap_or_default();
-                                        fields.insert(key_str, val_str);
-                                    }
+                                && let Ok(val) = obj.get::<_, Value>(&key_str)
+                            {
+                                let val_str = rquickjs::String::from_value(val.clone())
+                                    .and_then(|s| s.to_string())
+                                    .unwrap_or_default();
+                                fields.insert(key_str, val_str);
+                            }
                         }
                     } else if let Ok(body_str) =
                         rquickjs::String::from_value(body_val.clone()).and_then(|s| s.to_string())
@@ -421,9 +422,9 @@ fn create_mock_fetch(
                 if let Ok(method_val) = opts.get::<_, Value>("method")
                     && let Ok(m) =
                         rquickjs::String::from_value(method_val.clone()).and_then(|s| s.to_string())
-                    {
-                        eprintln!("[captive-portal-js] fetch method: {}", m);
-                    }
+                {
+                    eprintln!("[captive-portal-js] fetch method: {}", m);
+                }
             }
 
             // Update captured data
@@ -509,12 +510,13 @@ fn create_mock_jquery(
                         for key_result in obj.keys::<rquickjs::Atom>() {
                             if let Ok(key) = key_result
                                 && let Ok(key_str) = key.to_string()
-                                    && let Ok(val) = obj.get::<_, Value>(&key_str) {
-                                        let val_str = rquickjs::String::from_value(val.clone())
-                                            .and_then(|s| s.to_string())
-                                            .unwrap_or_default();
-                                        result.fields.insert(key_str, val_str);
-                                    }
+                                && let Ok(val) = obj.get::<_, Value>(&key_str)
+                            {
+                                let val_str = rquickjs::String::from_value(val.clone())
+                                    .and_then(|s| s.to_string())
+                                    .unwrap_or_default();
+                                result.fields.insert(key_str, val_str);
+                            }
                         }
                     }
                 }
@@ -542,47 +544,47 @@ fn create_mock_jquery(
                     options.type_name()
                 );
                 if let Ok(mut result) = captured_ajax.lock()
-                    && let Some(obj) = options.as_object() {
-                        if let Ok(url_val) = obj.get::<_, Value>("url")
-                            && let Ok(url_str) = rquickjs::String::from_value(url_val.clone())
-                                .and_then(|s| s.to_string())
-                            {
-                                result.action = Some(resolve_url(&base_url_ajax, &url_str));
-                            }
-                        if let Ok(data_val) = obj.get::<_, Value>("data") {
-                            if let Some(obj) = data_val.as_object() {
-                                result.submitted = true;
-                                for key_result in obj.keys::<rquickjs::Atom>() {
-                                    if let Ok(key) = key_result
-                                        && let Ok(key_str) = key.to_string()
-                                            && let Ok(val) = obj.get::<_, Value>(&key_str) {
-                                                let val_str =
-                                                    rquickjs::String::from_value(val.clone())
-                                                        .and_then(|s| s.to_string())
-                                                        .unwrap_or_default();
-                                                result.fields.insert(key_str, val_str);
-                                            }
+                    && let Some(obj) = options.as_object()
+                {
+                    if let Ok(url_val) = obj.get::<_, Value>("url")
+                        && let Ok(url_str) = rquickjs::String::from_value(url_val.clone())
+                            .and_then(|s| s.to_string())
+                    {
+                        result.action = Some(resolve_url(&base_url_ajax, &url_str));
+                    }
+                    if let Ok(data_val) = obj.get::<_, Value>("data") {
+                        if let Some(obj) = data_val.as_object() {
+                            result.submitted = true;
+                            for key_result in obj.keys::<rquickjs::Atom>() {
+                                if let Ok(key) = key_result
+                                    && let Ok(key_str) = key.to_string()
+                                    && let Ok(val) = obj.get::<_, Value>(&key_str)
+                                {
+                                    let val_str = rquickjs::String::from_value(val.clone())
+                                        .and_then(|s| s.to_string())
+                                        .unwrap_or_default();
+                                    result.fields.insert(key_str, val_str);
                                 }
-                            } else if let Ok(data_str) =
-                                rquickjs::String::from_value(data_val.clone())
-                                    .and_then(|s| s.to_string())
-                            {
-                                result.submitted = true;
-                                for pair in data_str.split('&') {
-                                    if let Some((k, v)) = pair.split_once('=') {
-                                        result.fields.insert(
-                                            urlencoding::decode(k)
-                                                .unwrap_or(Cow::Borrowed(k))
-                                                .into_owned(),
-                                            urlencoding::decode(v)
-                                                .unwrap_or(Cow::Borrowed(v))
-                                                .into_owned(),
-                                        );
-                                    }
+                            }
+                        } else if let Ok(data_str) = rquickjs::String::from_value(data_val.clone())
+                            .and_then(|s| s.to_string())
+                        {
+                            result.submitted = true;
+                            for pair in data_str.split('&') {
+                                if let Some((k, v)) = pair.split_once('=') {
+                                    result.fields.insert(
+                                        urlencoding::decode(k)
+                                            .unwrap_or(Cow::Borrowed(k))
+                                            .into_owned(),
+                                        urlencoding::decode(v)
+                                            .unwrap_or(Cow::Borrowed(v))
+                                            .into_owned(),
+                                    );
                                 }
                             }
                         }
                     }
+                }
                 // Return mock jqXHR promise
                 let (promise_obj, resolve, _reject) = rquickjs::Promise::new(&ctx_jq_ajax)?;
                 let response = Object::new(ctx_jq_ajax.clone())?;
@@ -696,12 +698,13 @@ fn create_mock_axios(
                         for key_result in data_obj.keys::<rquickjs::Atom>() {
                             if let Ok(key) = key_result
                                 && let Ok(key_str) = key.to_string()
-                                    && let Ok(val) = data_obj.get::<_, Value>(&key_str) {
-                                        let val_str = rquickjs::String::from_value(val.clone())
-                                            .and_then(|s| s.to_string())
-                                            .unwrap_or_default();
-                                        result.fields.insert(key_str, val_str);
-                                    }
+                                && let Ok(val) = data_obj.get::<_, Value>(&key_str)
+                            {
+                                let val_str = rquickjs::String::from_value(val.clone())
+                                    .and_then(|s| s.to_string())
+                                    .unwrap_or_default();
+                                result.fields.insert(key_str, val_str);
+                            }
                         }
                     }
                 }
@@ -736,23 +739,25 @@ fn create_mock_axios(
                     if let Ok(url_val) = config.get::<_, Value>("url")
                         && let Ok(url_str) = rquickjs::String::from_value(url_val.clone())
                             .and_then(|s| s.to_string())
-                        {
-                            result.action = Some(resolve_url(&base_url_req, &url_str));
-                        }
+                    {
+                        result.action = Some(resolve_url(&base_url_req, &url_str));
+                    }
                     if let Ok(data_val) = config.get::<_, Value>("data")
-                        && let Some(obj) = data_val.as_object() {
-                            result.submitted = true;
-                            for key_result in obj.keys::<rquickjs::Atom>() {
-                                if let Ok(key) = key_result
-                                    && let Ok(key_str) = key.to_string()
-                                        && let Ok(val) = obj.get::<_, Value>(&key_str) {
-                                            let val_str = rquickjs::String::from_value(val.clone())
-                                                .and_then(|s| s.to_string())
-                                                .unwrap_or_default();
-                                            result.fields.insert(key_str, val_str);
-                                        }
+                        && let Some(obj) = data_val.as_object()
+                    {
+                        result.submitted = true;
+                        for key_result in obj.keys::<rquickjs::Atom>() {
+                            if let Ok(key) = key_result
+                                && let Ok(key_str) = key.to_string()
+                                && let Ok(val) = obj.get::<_, Value>(&key_str)
+                            {
+                                let val_str = rquickjs::String::from_value(val.clone())
+                                    .and_then(|s| s.to_string())
+                                    .unwrap_or_default();
+                                result.fields.insert(key_str, val_str);
                             }
                         }
+                    }
                 }
                 let (promise_obj, resolve, _reject) = rquickjs::Promise::new(&ctx_axios_call)?;
                 let response = Object::new(ctx_axios_call.clone())?;
@@ -797,19 +802,20 @@ fn create_mock_service(
                     if let Ok(url_val) = options.get::<_, Value>("url")
                         && let Ok(url_str) = rquickjs::String::from_value(url_val.clone())
                             .and_then(|s| s.to_string())
-                        {
-                            result.action = Some(resolve_url(&base_url_req, &url_str));
-                        }
+                    {
+                        result.action = Some(resolve_url(&base_url_req, &url_str));
+                    }
                     result.submitted = true;
                     for key_result in data.keys::<rquickjs::Atom>() {
                         if let Ok(key) = key_result
                             && let Ok(key_str) = key.to_string()
-                                && let Ok(val) = data.get::<_, Value>(&key_str) {
-                                    let val_str = rquickjs::String::from_value(val.clone())
-                                        .and_then(|s| s.to_string())
-                                        .unwrap_or_default();
-                                    result.fields.insert(key_str, val_str);
-                                }
+                            && let Ok(val) = data.get::<_, Value>(&key_str)
+                        {
+                            let val_str = rquickjs::String::from_value(val.clone())
+                                .and_then(|s| s.to_string())
+                                .unwrap_or_default();
+                            result.fields.insert(key_str, val_str);
+                        }
                     }
                 }
                 // Return mock promise
