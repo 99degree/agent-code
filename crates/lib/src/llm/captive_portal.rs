@@ -1482,4 +1482,47 @@ mod tests {
         assert_eq!(extract_json_str(obj, "action").as_deref(), Some("/login"));
         assert_eq!(extract_json_str(obj, "agree").as_deref(), Some("true"));
     }
+
+    #[test]
+    fn test_resolve_url_expr_common_api_path() {
+        let js = r#"var apiPath = "/GovWifiAPI_";"#;
+        // Concatenation resolves Common.apiPath + literal.
+        let resolved = resolve_url_expr(r#"Common.apiPath + "/wifi/login""#, js);
+        assert_eq!(resolved.as_deref(), Some("/GovWifiAPI_/wifi/login"));
+        // Plain quoted string literal passes through unchanged.
+        let resolved = resolve_url_expr("\"/wifi/login\"", js);
+        assert_eq!(resolved.as_deref(), Some("/wifi/login"));
+        // Unresolvable expression returns None.
+        assert!(resolve_url_expr("someVar + '/x'", js).is_none());
+    }
+
+    #[test]
+    fn test_resolve_url_expr_extract_api_path() {
+        let js = r#"var apiPath = "/GovWifiAPI_";"#;
+        assert_eq!(extract_api_path(js).as_deref(), Some("/GovWifiAPI_"));
+        let js = "var other = 1;";
+        assert!(extract_api_path(js).is_none());
+    }
+
+    #[test]
+    fn test_captive_portal_new_extracts_origin_url() {
+        use super::CaptivePortalProfile;
+        let profile = CaptivePortalProfile {
+            name: "agree",
+            agree_field: "agree",
+            agree_value: "yes",
+            extra_fields: &[],
+        };
+        let portal = super::CaptivePortal::new(
+            profile.clone(),
+            "https://free.wifi.gov.hk/GovWifiUI_/userlanding/tc/login.html?zoneName=KPRH160&ssid=Wi-Fi.HK&url=http%3A%2F%2Fexample.com%2F&".to_string(),
+        );
+        assert_eq!(portal.origin_url(), "http://example.com/");
+        // No url param falls back to the login URL itself.
+        let portal = super::CaptivePortal::new(
+            profile,
+            "https://free.wifi.gov.hk/login.html".to_string(),
+        );
+        assert_eq!(portal.origin_url(), "https://free.wifi.gov.hk/login.html");
+    }
 }
