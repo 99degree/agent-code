@@ -25,7 +25,6 @@
 //! text. This avoids pulling in a headless browser while covering the common
 //! JS-injected captive-portal login shape.
 
-use crate::llm::captive_portal_js::execute_portal_js;
 use regex::Regex;
 use reqwest::header::LOCATION;
 use scraper::{Html, Selector};
@@ -747,55 +746,36 @@ async fn parse_js_form(html: &str, page_url: &str, http: &reqwest::Client) -> Op
 
     let script_texts: Vec<String> = inline_texts.into_iter().chain(external_texts).collect();
 
-    // 1. Run the JS engine (QuickJS) first. This handles portals that build
-    //    the login form dynamically via complex JS logic (innerHTML,
-    //    document.write, Service.userLogin binding, etc.) where no static
-    //    form or declarative submit pattern exists in the raw HTML.
-    if let Ok(js_result) = execute_portal_js(
-        script_texts.clone(), // all scripts as inline (they're already fetched)
-        vec![],               // no additional external scripts
-        page_url.to_string(),
-        page_url.to_string(), // origin_url fallback to page_url
-    )
-    .await
-        && js_result.submitted
-    {
-        let mut inputs: Vec<Input> = Vec::new();
-        for (name, value) in js_result.fields {
-            inputs.push(Input { name, value });
-        }
-        let action = js_result.action.unwrap_or_default();
-        tracing::debug!(
-            "captive portal: JS engine captured form action={}, fields={}",
-            action,
-            inputs.len()
-        );
-        return Some(Form { action, inputs });
-    }
+    // Parse JS-embedded form data via declarative regex extraction.
+    // This handles portals that embed form data or submit patterns directly
+    // in script text (e.g. GovWifi's Service.request({url: Common.apiPath +
+    // "/wifi/login", ...}, {passcode: "..."})).
+    //
+    // Note: JavaScript execution (QuickJS) is intentionally NOT performed here.
+    // Declarative extraction covers the common captive-portal JS-injected login
+    // shape without a headless browser or JS runtime.
 
-    // 2. Fall back to declarative regex extraction for portals that embed
-    //    the form or submit data directly in script text.
-    // 2a. Look for an HTML form snippet embedded in script text.
+    // 1. Look for an HTML form snippet embedded in script text.
     for text in &script_texts {
         if let Some(form) = extract_form_snippet(text) {
             return Some(form);
         }
     }
 
-    // 2b. Look for a JSON-like config object with agree-ish fields.
+    // 2. Look for a JSON-like config object with agree-ish fields.
     for text in &script_texts {
         if let Some(form) = extract_js_config_form(text) {
             return Some(form);
         }
     }
 
-    // 2c. Look for jQuery/AJAX submit patterns, e.g.
-    //     `$.post("/login", {agree: "yes"})`,
-    //     `$.ajax({url: "/login", data: {agree: "yes"}})`,
-    //     `axios.post("/login", {agree: "yes"})`.
-    //     Captive portals that bind a login button to `onclick="Service.userLogin(...)"`
-    //     usually perform the actual login via an AJAX POST inside that function,
-    //     so we scan the external JS files for the submit URL and data fields.
+    // 3. Look for jQuery/AJAX submit patterns, e.g.
+    //    `$.post("/login", {agree: "yes"})`,
+    //    `$.ajax({url: "/login", data: {agree: "yes"}})`,
+    //    `axios.post("/login", {agree: "yes"})`.
+    //    Captive portals that bind a login button to `onclick="Service.userLogin(...)"`
+    //    usually perform the actual login via an AJAX POST inside that function,
+    //    so we scan the external JS files for the submit URL and data fields.
     for text in &script_texts {
         if let Some(form) = extract_ajax_form(text) {
             return Some(form);
@@ -1519,10 +1499,8 @@ mod tests {
         );
         assert_eq!(portal.origin_url(), "http://example.com/");
         // No url param falls back to the login URL itself.
-        let portal = super::CaptivePortal::new(
-            profile,
-            "https://free.wifi.gov.hk/login.html".to_string(),
-        );
+        let portal =
+            super::CaptivePortal::new(profile, "https://free.wifi.gov.hk/login.html".to_string());
         assert_eq!(portal.origin_url(), "https://free.wifi.gov.hk/login.html");
     }
 }
