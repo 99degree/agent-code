@@ -30,6 +30,7 @@ use regex::Regex;
 use reqwest::header::LOCATION;
 use scraper::{Html, Selector};
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 /// A builtin captive portal profile.
 ///
@@ -427,16 +428,21 @@ impl CaptivePortal {
             summary.push('\n');
         }
 
-        // A captive portal login is accepted when:
-        //   1. The agree form redirect brings us back to the origin URL (strongest proof), OR
-        //   2. The server responded with a 2xx status code (server accepted the submission,
-        //      even if the final client-side redirect happens via JS, e.g. GovWifi does
-        //      window.location = 'landing.html?...' after a successful POST).
-        // An HTTP 2xx from the portal means the server accepted the agree submission.
-        if status.is_success() {
+        // A captive portal login is genuinely accepted only when one of:
+        //   1. The agree form redirect brings us back to the origin URL
+        //      (strongest proof the external network is unblocked), OR
+        //   2. The response body no longer looks like a login page — i.e. it
+        //      does not contain a form with the agree field, nor typical
+        //      login/landing-page keywords ("login", "sign in", "agree",
+        //      "accept", "captive", "portal", "wifi login"). A 2xx that just
+        //      returns the landing/login page again is a failed submit, not
+        //      a success.
+        let still_on_login_page = Self::body_looks_like_login_page(&body_text);
+        if current_url == self.origin_url || (!still_on_login_page && status.is_success()) {
             tracing::info!(
-                "captive portal: agree form accepted by server (status={})",
-                status.as_u16()
+                "captive portal: agree form accepted by server (status={}, back_to_origin={})",
+                status.as_u16(),
+                current_url == self.origin_url
             );
             summary.push_str(&format!(
                 "captive portal: agree form accepted by server (status={})\n",
@@ -459,10 +465,11 @@ impl CaptivePortal {
         }
 
         tracing::warn!(
-            "captive portal: agree form not accepted; status={}, current={} origin={}",
+            "captive portal: agree form not accepted; status={}, current={} origin={}, still_on_login_page={}",
             status.as_u16(),
             current_url,
-            self.origin_url
+            self.origin_url,
+            still_on_login_page
         );
         Err(format!(
             "captive portal login did not succeed; server returned status {}, \
@@ -473,6 +480,30 @@ impl CaptivePortal {
             origin = self.origin_url,
             body_text = body_text
         ))
+    }
+
+    /// Heuristic: does the response body look like a captive-portal login /
+    /// landing page (meaning the agree submit did NOT actually log us in)?
+    fn body_looks_like_login_page(body: &str) -> bool {
+        static AGREE_FIELD_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(
+                r#"<input[^>]*name\s*=\s*['"]?(agree|accept|continue|terms|passcode)['"]?"#,
+            )
+            .expect("valid agree-field regex")
+        });
+        let lower = body.to_ascii_lowercase();
+        // If there's still a form carrying an agree/accept/continue field, we
+        // are back on the login page.
+        let has_agree_field = AGREE_FIELD_RE.is_match(&lower);
+        // Typical login/landing-page keywords.
+        let has_login_keywords = [
+            "login", "sign in", "sign-in", "agree", "accept", "continue",
+            "captive portal", "wifi login", "wireless login", "hotspot",
+            "authentication required",
+        ]
+        .iter()
+        .any(|kw| lower.contains(kw));
+        has_agree_field || has_login_keywords
     }
 
     /// The profile name.
