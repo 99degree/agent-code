@@ -859,8 +859,10 @@ fn extract_service_request(js: &str) -> Option<Form> {
     .ok()?;
     for caps in re.captures_iter(js) {
         let url_expr = caps.get(1)?.as_str().trim();
-        // Extract the first string literal from the url expression.
-        let url_val = extract_string_literal(url_expr)?;
+        // Resolve the url expression, handling concatenations like
+        // `Common.apiPath + "/wifi/login"` where `Common.apiPath` is defined
+        // elsewhere in the same script (e.g. `var apiPath = "/GovWifiAPI_";`).
+        let url_val = resolve_url_expr(url_expr, js)?;
         let data_obj = caps.get(2)?.as_str();
         // Extract all field names from the data object (GovWifi uses
         // `passcode`, not an agree-ish field). Values that are string
@@ -875,6 +877,45 @@ fn extract_service_request(js: &str) -> Option<Form> {
         }
     }
     None
+}
+
+/// Resolve a JS url expression to a concrete path string.
+///
+/// Handles:
+/// - a plain string literal: `"/wifi/login"` -> `/wifi/login`
+/// - a concatenation with `Common.apiPath`: `Common.apiPath + "/wifi/login"`
+///   -> looks up `var apiPath = "..."` in `js` and substitutes, giving
+///   `/GovWifiAPI_/wifi/login`.
+///
+/// Returns `None` when the expression cannot be resolved.
+fn resolve_url_expr(url_expr: &str, js: &str) -> Option<String> {
+    let trimmed = url_expr.trim();
+    // Plain string literal: the whole expression is one quoted string.
+    let starts_quote = trimmed.starts_with('"') || trimmed.starts_with('\'');
+    let ends_quote = trimmed.ends_with('"') || trimmed.ends_with('\'');
+    if starts_quote && ends_quote && trimmed.len() >= 2 {
+        return Some(trimmed[1..trimmed.len() - 1].to_string());
+    }
+    // Concatenation: split on `+` and resolve each part.
+    let parts: Vec<&str> = trimmed.split('+').map(|s| s.trim()).collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let mut resolved = String::new();
+    for part in parts {
+        if part == "Common.apiPath" {
+            resolved.push_str(&extract_api_path(js)?);
+        } else {
+            resolved.push_str(&extract_string_literal(part)?);
+        }
+    }
+    Some(resolved)
+}
+
+/// Extract the `apiPath` value from JS like `var apiPath = "/GovWifiAPI_";`.
+fn extract_api_path(js: &str) -> Option<String> {
+    let re = regex::Regex::new(r#"var\s+apiPath\s*=\s*["']([^"']+)["']"#).ok()?;
+    re.captures(js).and_then(|c| c.get(1)).map(|m| m.as_str().to_string())
 }
 
 /// Extract the first double- or single-quoted string literal from `s`,
