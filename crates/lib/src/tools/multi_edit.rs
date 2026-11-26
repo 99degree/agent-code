@@ -130,6 +130,117 @@ fn parse_edits(input: &serde_json::Value) -> Result<Vec<EditPair>, ToolError> {
     Ok(pairs)
 }
 
+/// Best-effort, whitespace-tolerant search for the region of `haystack`
+/// that most closely matches `needle`.
+///
+/// Slides a window of `needle.len()` lines over `haystack` (comparing
+/// trimmed line contents) and returns the window with the most matching
+/// lines, the line count of `needle`, and the byte range of that window.
+/// Used to build a helpful hint when an exact `old_string` match fails —
+/// showing the user what content actually exists near their intended edit.
+///
+/// Returns `None` when no line of `needle` matches any line of `haystack`,
+/// when `needle` is empty, or when `needle` is longer than `haystack`.
+fn sparse_match_window(haystack: &str, needle: &str) -> Option<(usize, usize, usize, usize)> {
+    let needle_lines: Vec<&str> = needle.lines().map(str::trim).collect();
+    if needle_lines.is_empty() {
+        return None;
+    }
+
+    let mut lines: Vec<(usize, usize, &str)> = Vec::new();
+    let mut idx = 0;
+    for line in haystack.split_inclusive('\n') {
+        let start = idx;
+        idx += line.len();
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let body = body.strip_suffix('\r').unwrap_or(body);
+        lines.push((start, idx, body.trim()));
+    }
+
+    let n = needle_lines.len();
+    if n > lines.len() {
+        return None;
+    }
+
+    let mut best: Option<(usize, usize)> = None; // (start_line_idx, match_count)
+    for (i, window) in lines.windows(n).enumerate() {
+        let matches = window
+            .iter()
+            .zip(&needle_lines)
+            .filter(|((_, _, h), ndl)| h == *ndl)
+            .count();
+        if matches == 0 {
+            continue;
+        }
+        if best.map_or(0, |b| b.1) < matches {
+            best = Some((i, matches));
+        }
+    }
+
+    let (start_idx, matched) = best?;
+    let start_byte = lines[start_idx].0;
+    let end_byte = lines[start_idx + n - 1].1;
+    Some((start_byte, end_byte, matched, n))
+}
+
+/// Build a human-readable hint showing the best-effort (sparse) match of
+/// `needle` inside `haystack`, with a few surrounding context lines.
+///
+/// The returned view spans at least `min_lines` lines so it covers the area
+/// the agent intended to change (whichever of old_string / new_string is
+/// longer).
+///
+/// Returns `None` when no line of `needle` matches any line of `haystack`.
+fn sparse_match_hint(
+    haystack: &str,
+    needle: &str,
+    min_lines: usize,
+) -> Option<String> {
+    let (start_byte, _end_byte, matched, total) = sparse_match_window(haystack, needle)?;
+
+    // Re-derive line boundaries to compute line numbers and context.
+    let mut lines: Vec<(usize, usize, &str)> = Vec::new();
+    let mut idx = 0;
+    for line in haystack.split_inclusive('\n') {
+        let start = idx;
+        idx += line.len();
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let body = body.strip_suffix('\r').unwrap_or(body);
+        lines.push((start, idx, body.trim()));
+    }
+
+    // Locate the line index of the matched window's first line.
+    let start_idx = lines
+        .iter()
+        .position(|(s, _, _)| *s == start_byte)
+        .unwrap_or(0);
+
+    // The intended edit spans `needle` lines; ensure the view covers at least
+    // `min_lines` lines (the longer of old_string / new_string) so the agent
+    // sees the full area of intent.
+    let view_len = total.max(min_lines);
+    let end_idx = (start_idx + view_len).min(lines.len());
+
+    const CTX: usize = 2;
+    let view_start = start_idx.saturating_sub(CTX);
+    let view_end = (end_idx + CTX).min(lines.len());
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Closest match ({matched}/{total} lines matched):\n"
+    ));
+    for (li, line) in lines.iter().enumerate().take(view_end).skip(view_start) {
+        let (s, e, _) = *line;
+        let marker = if li >= start_idx && li < end_idx {
+            ">>>"
+        } else {
+            "   "
+        };
+        out.push_str(&format!("{marker} {:>3} | {}\n", li + 1, &haystack[s..e]));
+    }
+    Some(out)
+}
+
 #[async_trait]
 impl Tool for MultiEditTool {
     fn name(&self) -> &'static str {
@@ -227,9 +338,13 @@ impl Tool for MultiEditTool {
             let occurrences = content.matches(&pair.old_string).count();
 
             if occurrences == 0 {
+                let min_lines = pair.old_string.lines().count().max(pair.new_string.lines().count());
+                let hint = sparse_match_hint(&content, &pair.old_string, min_lines)
+                    .map(|h| format!("\n{h}"))
+                    .unwrap_or_default();
                 return Err(ToolError::InvalidInput(format!(
                     "edits[{idx}]: old_string not found in {file_path} \
-                     (may have been consumed by a prior edit in this batch)"
+                     (may have been consumed by a prior edit in this batch){hint}"
                 )));
             }
 
